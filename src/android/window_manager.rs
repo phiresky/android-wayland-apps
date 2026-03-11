@@ -87,41 +87,56 @@ impl WindowManager {
 
     /// Launch a WaylandWindowActivity via JNI with the given window_id.
     fn launch_activity(&self, window_id: u32) {
+        if let Err(e) = self.launch_activity_inner(window_id) {
+            log::error!("Failed to launch Activity for window_id={}: {}", window_id, e);
+        }
+    }
+
+    fn launch_activity_inner(&self, window_id: u32) -> Result<(), jni::errors::Error> {
         let vm = unsafe {
             jni::JavaVM::from_raw(self.android_app.vm_as_ptr() as *mut _)
-        }.expect("Failed to get JavaVM");
-        let mut env = vm.attach_current_thread().expect("Failed to attach thread");
+        }?;
+        let mut env = vm.attach_current_thread()?;
 
         let activity = unsafe {
             JObject::from_raw(self.android_app.activity_as_ptr() as *mut _)
         };
 
-        // Create Intent for WaylandWindowActivity
-        let intent_class = env.find_class("android/content/Intent").unwrap();
+        // Use the Activity's classloader (not the system one) to find our Java class.
+        // env.find_class() uses the system classloader which doesn't know about app classes.
+        let class_loader = env
+            .call_method(&activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])?
+            .l()?;
+        let class_name = env
+            .new_string("io.github.phiresky.wayland_android.WaylandWindowActivity")?;
         let activity_class = env
-            .find_class("io/github/phiresky/wayland_android/WaylandWindowActivity")
-            .unwrap();
+            .call_method(
+                &class_loader,
+                "loadClass",
+                "(Ljava/lang/String;)Ljava/lang/Class;",
+                &[JValue::Object(&class_name)],
+            )?
+            .l()?;
 
-        let intent = env
-            .new_object(
-                &intent_class,
-                "(Landroid/content/Context;Ljava/lang/Class;)V",
-                &[
-                    JValue::Object(&activity),
-                    JValue::Object(&JObject::from(activity_class)),
-                ],
-            )
-            .unwrap();
+        // Create Intent for WaylandWindowActivity
+        let intent_class = env.find_class("android/content/Intent")?;
+        let intent = env.new_object(
+            &intent_class,
+            "(Landroid/content/Context;Ljava/lang/Class;)V",
+            &[
+                JValue::Object(&activity),
+                JValue::Object(&activity_class),
+            ],
+        )?;
 
         // Put window_id as extra
-        let key = env.new_string("window_id").unwrap();
+        let key = env.new_string("window_id")?;
         env.call_method(
             &intent,
             "putExtra",
             "(Ljava/lang/String;I)Landroid/content/Intent;",
             &[JValue::Object(&key), JValue::Int(window_id as i32)],
-        )
-        .unwrap();
+        )?;
 
         // Add FLAG_ACTIVITY_NEW_DOCUMENT | FLAG_ACTIVITY_MULTIPLE_TASK
         // so each window appears as a separate task in recents
@@ -131,8 +146,7 @@ impl WindowManager {
             "addFlags",
             "(I)Landroid/content/Intent;",
             &[JValue::Int(flags)],
-        )
-        .unwrap();
+        )?;
 
         // Start the activity
         env.call_method(
@@ -140,13 +154,13 @@ impl WindowManager {
             "startActivity",
             "(Landroid/content/Intent;)V",
             &[JValue::Object(&intent)],
-        )
-        .unwrap();
+        )?;
 
         log::info!("Launched WaylandWindowActivity for window_id={}", window_id);
 
         // Prevent JNI ref leak
         unsafe { vm.detach_current_thread() };
+        Ok(())
     }
 
     /// Remove a window and clean up its resources.
