@@ -42,17 +42,18 @@ Goal: `weston-terminal` (or `foot`) renders in the single NativeActivity window.
 - [x] Render texture to the EGL surface (full window)
 - [x] Verify: weston-terminal visible on screen
 
-### 1d. Basic input
+### 1d. Basic input [DONE]
 
-- [ ] Forward touch events as pointer events to the Wayland client
-- [ ] Forward key events (hardware keyboard) to the client
-- [ ] Test: can type in weston-terminal
+- [x] Forward touch events as pointer events to the Wayland client
+- [x] Forward key events (hardware keyboard) to the client
+- [x] Test: can type in weston-terminal
+- Note: Input was already fully ported from localdesktop (event_centralizer.rs + event_handler.rs)
 
-### 1e. Bundle xkb data properly
+### 1e. Use xkb data from Arch rootfs [DONE]
 
-- [ ] Include xkb data as Android assets or in the APK
-- [ ] Copy xkb data to app files dir on first launch
-- [ ] Remove manual `adb push` workaround
+- [x] Point XKB_CONFIG_ROOT at `{ARCH_FS_ROOT}/usr/share/X11/xkb`
+- [x] Fix absolute symlink to relative (so it resolves outside proot)
+- [x] Remove manual `adb push` workaround
 
 ## Milestone 2: Multi-window (Activity-per-toplevel)
 

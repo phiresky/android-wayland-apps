@@ -13,10 +13,12 @@ use smithay::{
     utils::{Clock, Monotonic},
 };
 use crate::android::compositor::Compositor;
+use crate::android::window_manager::WindowManager;
 
 pub struct WaylandBackend {
     pub compositor: Compositor,
     pub graphic_renderer: Option<WinitGraphicsBackend<GlesRenderer>>,
+    pub window_manager: Option<WindowManager>,
     pub clock: Clock<Monotonic>,
     pub key_counter: u32,
     pub scale_factor: f64,

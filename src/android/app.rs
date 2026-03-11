@@ -8,6 +8,7 @@ use crate::android::{
     backend::{bind_egl, centralize, handle, WaylandBackend},
     compositor::{Compositor, State},
     proot::launch::launch,
+    window_manager::WindowManager,
 };
 use smithay::output::{Mode, Output, PhysicalProperties, Scale, Subpixel};
 use smithay::utils::{Clock, Monotonic, Transform};
@@ -24,11 +25,12 @@ impl App {
             backend: WaylandBackend {
                 compositor,
                 graphic_renderer: None,
+                window_manager: None,
                 clock: Clock::<Monotonic>::new(),
                 key_counter: 0,
                 scale_factor: 1.0,
             },
-            android_app,
+            android_app: android_app.clone(),
         }
     }
 }
@@ -67,6 +69,9 @@ impl ApplicationHandler for App {
         );
 
         self.backend.compositor.output.replace(output);
+
+        // Create the window manager for multi-window support.
+        self.backend.window_manager = Some(WindowManager::new(self.android_app.clone()));
 
         // Launch the proot environment so clients can connect.
         launch();

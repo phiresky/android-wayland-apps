@@ -25,6 +25,14 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <activity
+            android:name="io.github.phiresky.wayland_android.WaylandWindowActivity"
+            android:exported="false"
+            android:launchMode="standard"
+            android:taskAffinity=""
+            android:documentLaunchMode="always"
+            android:configChanges="orientation|keyboardHidden|screenSize|screenLayout|smallestScreenSize" />
     </application>
 
 </manifest>

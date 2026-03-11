@@ -42,7 +42,7 @@ use winit::raw_window_handle::{AndroidNdkWindowHandle, HasWindowHandle, RawWindo
 use winit::window::{Window as WinitWindow, WindowAttributes};
 
 pub struct AndroidNativeSurface {
-    handle: AndroidNdkWindowHandle,
+    pub handle: AndroidNdkWindowHandle,
 }
 
 unsafe impl Send for AndroidNativeSurface {}
@@ -159,6 +159,8 @@ pub fn bind_egl(event_loop: &ActiveEventLoop) -> WinitGraphicsBackend<GlesRender
         Err(error) => panic!("Failed to get window handle: {:?}", error),
     };
 
+    let pixel_format = context.pixel_format();
+    let config_id = context.config_id();
     let renderer = unsafe { GlesRenderer::new(context) }.expect("Failed to create GLES Renderer");
     let damage_tracking = display.supports_damage();
 
@@ -166,11 +168,13 @@ pub fn bind_egl(event_loop: &ActiveEventLoop) -> WinitGraphicsBackend<GlesRender
 
     WinitGraphicsBackend {
         window: window.clone(),
-        _display: display,
+        display,
         egl_surface: surface,
         damage_tracking,
         bind_size: None,
         renderer,
+        pixel_format,
+        config_id,
     }
 }
 
@@ -195,12 +199,14 @@ pub enum Error {
 #[derive(Debug)]
 pub struct WinitGraphicsBackend<R> {
     renderer: R,
-    // The display isn't used past this point but must be kept alive.
-    _display: EGLDisplay,
+    display: EGLDisplay,
     egl_surface: EGLSurface,
     window: Arc<WinitWindow>,
     damage_tracking: bool,
     bind_size: Option<Size<i32, Physical>>,
+    /// Saved from the EGLContext before it's consumed by GlesRenderer.
+    pixel_format: Option<smithay::backend::egl::ffi::egl::types::EGLConfig>,
+    config_id: smithay::backend::egl::ffi::egl::types::EGLConfig,
 }
 
 impl<R> WinitGraphicsBackend<R>
@@ -252,6 +258,33 @@ where
     /// `WinitGraphicsBackend::bind` transparently handles window resizes for you.
     pub fn egl_surface(&self) -> &EGLSurface {
         &self.egl_surface
+    }
+
+    /// Create an EGL surface for an additional Android window (from a WaylandWindowActivity).
+    pub fn create_surface_for_native_window(
+        &self,
+        handle: AndroidNdkWindowHandle,
+    ) -> Result<EGLSurface, EGLError> {
+        unsafe {
+            EGLSurface::new(
+                &self.display,
+                self.pixel_format,
+                self.config_id,
+                AndroidNativeSurface { handle },
+            )
+        }
+    }
+
+    /// Bind the renderer to an arbitrary EGL surface (for multi-window rendering).
+    pub fn bind_surface(&mut self, surface: &mut EGLSurface) -> Result<(&mut R, R::Framebuffer<'_>), SwapBuffersError> {
+        let fb = self.renderer.bind(surface)?;
+        Ok((&mut self.renderer, fb))
+    }
+
+    /// Swap buffers on an arbitrary EGL surface.
+    pub fn submit_surface(&self, surface: &EGLSurface) -> Result<(), SwapBuffersError> {
+        surface.swap_buffers(None)?;
+        Ok(())
     }
 
     /// Retrieve the buffer age of the current backbuffer of the window.

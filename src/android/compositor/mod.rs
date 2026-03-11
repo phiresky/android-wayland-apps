@@ -61,6 +61,10 @@ pub struct State {
     pub data_device_state: DataDeviceState,
     pub seat_state: SeatState<Self>,
     pub size: Size<i32, Logical>,
+    /// New toplevels queued by XdgShellHandler, drained by the main loop.
+    pub pending_toplevels: Vec<ToplevelSurface>,
+    /// Toplevels that have been closed, drained by the main loop.
+    pub closed_toplevels: Vec<ToplevelSurface>,
 }
 
 impl BufferHandler for State {
@@ -73,11 +77,12 @@ impl XdgShellHandler for State {
     }
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
+        // Don't configure size yet — the Activity will tell us its dimensions.
         surface.with_pending_state(|state| {
-            state.size.replace(self.size);
             state.states.set(xdg_toplevel::State::Activated);
         });
         surface.send_configure();
+        self.pending_toplevels.push(surface);
     }
 
     fn new_popup(&mut self, _surface: PopupSurface, _positioner: PositionerState) {
@@ -216,6 +221,8 @@ impl Compositor {
             data_device_state: DataDeviceState::new::<State>(&dh),
             seat_state,
             size: (1920, 1080).into(),
+            pending_toplevels: Vec::new(),
+            closed_toplevels: Vec::new(),
         };
 
         Ok(Compositor {

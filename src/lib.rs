@@ -10,4 +10,5 @@ pub mod android {
     pub mod backend;
     pub mod proot;
     pub mod utils;
+    pub mod window_manager;
 }
