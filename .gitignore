@@ -1,0 +1,36 @@
+target/
+.tmp/
+.cargo/
+jniLibs/
+android/build/
+android/.gradle/
+android/gradle/wrapper/gradle-wrapper.jar
+android/gradlew
+android/gradlew.bat
+*.apk
+.env
+.idea/
+.vscode/
+.mcp.json
+
+# User dotfiles (not project files)
+.bash_profile
+.bashrc
+.zshrc
+.zprofile
+.profile
+.gitconfig
+.ripgreprc
+
+# Remnant device files
+.gitmodules
+HEAD
+config
+hooks
+objects
+
+# Reference repos (cloned separately)
+refs/
+
+# Claude config
+.claude/
