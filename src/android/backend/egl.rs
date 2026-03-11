@@ -61,7 +61,9 @@ unsafe impl EGLNativeSurface for AndroidNativeSurface {
                 std::ptr::null(),
             )
         };
-        assert!(!surface.is_null());
+        if surface.is_null() {
+            return Err(smithay::backend::egl::EGLError::BadAlloc);
+        }
         Ok(surface)
     }
 }
@@ -75,7 +77,7 @@ fn create_egl_display(
 
     // Get the display
     let display = unsafe { egl.get_display(khronos_egl::DEFAULT_DISPLAY) }
-        .expect("Failed to get EGL display");
+        .ok_or("Failed to get EGL display")?;
 
     // Initialize the display
     let (_major, _minor) = egl.initialize(display)?;
@@ -84,8 +86,8 @@ fn create_egl_display(
     let config_attribs = [khronos_egl::NONE];
     let config = egl
         .choose_first_config(display, &config_attribs)
-        .expect("Failed to choose EGL config")
-        .expect("No suitable EGL config found");
+        .map_err(|e| format!("Failed to choose EGL config: {e}"))?
+        .ok_or("No suitable EGL config found")?;
 
     // Create the EGLDisplay from raw pointers
     let egl_display = unsafe {
@@ -94,7 +96,7 @@ fn create_egl_display(
             config.as_ptr() as *mut c_void,
         )
     }
-    .expect("Failed to create EGL display");
+    .map_err(|e| format!("Failed to create EGL display: {e}"))?;
 
     Ok(egl_display)
 }
@@ -103,21 +105,14 @@ fn create_egl_display(
 /// trait, from a given [`WindowAttributes`] struct, as well as given
 /// [`GlAttributes`] for further customization of the rendering pipeline and a
 /// corresponding [`WinitEventLoop`].
-pub fn bind_egl(event_loop: &dyn ActiveEventLoop) -> WinitGraphicsBackend<GlesRenderer> {
+pub fn bind_egl(event_loop: &dyn ActiveEventLoop) -> Result<WinitGraphicsBackend<GlesRenderer>, Box<dyn std::error::Error>> {
     let window: Box<dyn WinitWindow> = event_loop
-        .create_window(WindowAttributes::default())
-        .expect("Failed to create window");
+        .create_window(WindowAttributes::default())?;
 
-    let handle = (&*window).window_handle().map(|handle| handle.as_raw());
+    let handle = (*window).window_handle()?.as_raw();
     let (display, context, surface) = match handle {
-        Ok(RawWindowHandle::AndroidNdk(handle)) => {
-            let display = create_egl_display(handle);
-            let display = match display {
-                Ok(display) => display,
-                Err(error) => {
-                    panic!("Failed to create EGLDisplay: {:?}", error)
-                }
-            };
+        RawWindowHandle::AndroidNdk(handle) => {
+            let display = create_egl_display(handle)?;
 
             let gl_attributes = GlAttributes {
                 version: (3, 0),
@@ -137,38 +132,40 @@ pub fn bind_egl(event_loop: &dyn ActiveEventLoop) -> WinitGraphicsBackend<GlesRe
                     PixelFormatRequirements::_8_bit(),
                 )
             })
-            .expect("Failed to create EGLContext");
+            .map_err(|e| format!("Failed to create EGLContext: {e}"))?;
 
+            let pixel_format = context.pixel_format()
+                .ok_or("EGLContext has no pixel format")?;
             let surface = unsafe {
                 EGLSurface::new(
                     &display,
-                    context.pixel_format().unwrap(),
+                    pixel_format,
                     context.config_id(),
                     AndroidNativeSurface { handle },
                 )
-                .expect("Failed to create EGLSurface")
+                .map_err(|e| format!("Failed to create EGLSurface: {e}"))?
             };
 
             let _ = context.unbind();
             (display, context, surface)
         }
-        Ok(platform) => panic!("Unsupported platform: {:?}", platform),
-        Err(error) => panic!("Failed to get window handle: {:?}", error),
+        platform => return Err(format!("Unsupported platform: {:?}", platform).into()),
     };
 
-    let renderer = unsafe { GlesRenderer::new(context) }.expect("Failed to create GLES Renderer");
+    let renderer = unsafe { GlesRenderer::new(context) }
+        .map_err(|e| format!("Failed to create GLES Renderer: {e}"))?;
     let damage_tracking = display.supports_damage();
 
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
 
-    WinitGraphicsBackend {
+    Ok(WinitGraphicsBackend {
         window,
         display,
         egl_surface: surface,
         damage_tracking,
         bind_size: None,
         renderer,
-    }
+    })
 }
 
 /// Errors thrown by the `winit` backends
@@ -301,9 +298,10 @@ where
     ) -> Result<(), SwapBuffersError> {
         let mut damage = match damage {
             Some(damage) if self.damage_tracking && !damage.is_empty() => {
-                let bind_size = self
-                    .bind_size
-                    .expect("submitting without ever binding the renderer.");
+                let Some(bind_size) = self.bind_size else {
+                    log::error!("submitting without ever binding the renderer.");
+                    return Ok(());
+                };
                 let damage = damage
                     .iter()
                     .map(|rect| {

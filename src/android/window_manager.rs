@@ -56,7 +56,10 @@ pub struct WindowManager {
 impl WindowManager {
     pub fn new(android_app: AndroidApp) -> Self {
         let (tx, rx) = mpsc::channel();
-        *EVENT_SENDER.lock().unwrap() = Some(tx);
+        match EVENT_SENDER.lock() {
+            Ok(mut guard) => *guard = Some(tx),
+            Err(e) => log::error!("Failed to lock EVENT_SENDER: {e}"),
+        }
 
         Self {
             windows: HashMap::new(),
@@ -176,9 +179,8 @@ impl WindowManager {
     /// Get the ANativeWindow handle for creating an EGL surface.
     pub fn get_native_handle(&self, window_id: u32) -> Option<AndroidNdkWindowHandle> {
         self.windows.get(&window_id).and_then(|w| {
-            w.native_window.map(|ptr| {
-                let non_null = NonNull::new(ptr).expect("null ANativeWindow");
-                AndroidNdkWindowHandle::new(non_null)
+            w.native_window.and_then(|ptr| {
+                NonNull::new(ptr).map(AndroidNdkWindowHandle::new)
             })
         })
     }
@@ -189,8 +191,13 @@ impl WindowManager {
 // ============================================================
 
 fn send_event(event: WindowEvent) {
-    if let Some(tx) = EVENT_SENDER.lock().unwrap().as_ref() {
-        let _ = tx.send(event);
+    match EVENT_SENDER.lock() {
+        Ok(guard) => {
+            if let Some(tx) = guard.as_ref() {
+                let _ = tx.send(event);
+            }
+        }
+        Err(e) => log::error!("Failed to lock EVENT_SENDER: {e}"),
     }
 }
 

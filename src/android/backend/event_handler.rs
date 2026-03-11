@@ -11,13 +11,12 @@ use smithay::backend::renderer::utils::draw_render_elements;
 use smithay::backend::renderer::{Color32F, Frame, Renderer};
 use smithay::input::keyboard::FilterResult;
 use smithay::input::{pointer, touch};
-use smithay::reexports::wayland_server::protocol::wl_pointer::ButtonState;
 use smithay::utils::{Rectangle, Transform, SERIAL_COUNTER};
 use smithay::wayland::shell::xdg::ToplevelSurface;
 use smithay::{
     backend::input::{
-        AbsolutePositionEvent, Axis, Event, InputEvent, KeyboardKeyEvent, PointerAxisEvent,
-        PointerButtonEvent, TouchEvent,
+        AbsolutePositionEvent, Axis, ButtonState, Event, InputEvent, KeyboardKeyEvent,
+        PointerAxisEvent, PointerButtonEvent, TouchEvent,
     },
     output::{Mode, Scale},
 };
@@ -47,43 +46,47 @@ pub fn handle(
             // --- 1. Process pending toplevels: create Activity windows ---
             let pending: Vec<ToplevelSurface> =
                 backend.compositor.state.pending_toplevels.drain(..).collect();
-            if !pending.is_empty() {
-                if let Some(wm) = backend.window_manager.as_mut() {
+            if !pending.is_empty()
+                && let Some(wm) = backend.window_manager.as_mut() {
                     for toplevel in pending {
                         wm.new_toplevel(toplevel);
                     }
                 }
-            }
 
             // --- 2. Process window events from JNI ---
             process_window_events(backend);
 
             // --- 3. Accept Wayland clients, dispatch protocol ---
-            if let Some(stream) = backend
-                .compositor
-                .listener
-                .accept()
-                .expect("Failed to accept listener")
-            {
-                let client = backend
-                    .compositor
-                    .display
-                    .handle()
-                    .insert_client(stream, Arc::new(ClientState::default()))
-                    .unwrap();
-                backend.compositor.clients.push(client);
+            match backend.compositor.listener.accept() {
+                Ok(Some(stream)) => {
+                    match backend
+                        .compositor
+                        .display
+                        .handle()
+                        .insert_client(stream, Arc::new(ClientState::default()))
+                    {
+                        Ok(client) => backend.compositor.clients.push(client),
+                        Err(e) => log::error!("Failed to insert client: {:?}", e),
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => log::error!("Failed to accept listener: {:?}", e),
             }
 
-            backend
+            if let Err(e) = backend
                 .compositor
                 .display
                 .dispatch_clients(&mut backend.compositor.state)
-                .expect("Failed to dispatch clients");
-            backend
+            {
+                log::error!("Failed to dispatch clients: {:?}", e);
+            }
+            if let Err(e) = backend
                 .compositor
                 .display
                 .flush_clients()
-                .expect("Failed to flush clients");
+            {
+                log::error!("Failed to flush clients: {:?}", e);
+            }
 
             // --- 4. Render each Activity window ---
             render_activity_windows(backend);
@@ -103,7 +106,7 @@ pub fn handle(
             if let Some(output) = &backend.compositor.output {
                 output.change_current_state(
                     Some(Mode {
-                        size: size.into(),
+                        size: size,
                         refresh: 60000,
                     }),
                     Some(Transform::Normal),
@@ -131,11 +134,10 @@ fn process_window_events(backend: &mut WaylandBackend) {
                 native_window,
             } => {
                 // Store the native window pointer first
-                if let Some(wm) = backend.window_manager.as_mut() {
-                    if let Some(window) = wm.windows.get_mut(&window_id) {
+                if let Some(wm) = backend.window_manager.as_mut()
+                    && let Some(window) = wm.windows.get_mut(&window_id) {
                         window.native_window = Some(native_window);
                     }
-                }
                 // Now create EGL surface (needs both winit and wm)
                 let handle = backend
                     .window_manager
@@ -150,11 +152,10 @@ fn process_window_events(backend: &mut WaylandBackend) {
 
                     if let Some(surface) = surface {
                         log::info!("Created EGL surface for window_id={}", window_id);
-                        if let Some(wm) = backend.window_manager.as_mut() {
-                            if let Some(window) = wm.windows.get_mut(&window_id) {
+                        if let Some(wm) = backend.window_manager.as_mut()
+                            && let Some(window) = wm.windows.get_mut(&window_id) {
                                 window.egl_surface = Some(surface);
                             }
-                        }
                     } else {
                         log::error!("Failed to create EGL surface for window_id={}", window_id);
                     }
@@ -165,8 +166,8 @@ fn process_window_events(backend: &mut WaylandBackend) {
                 width,
                 height,
             } => {
-                if let Some(wm) = backend.window_manager.as_mut() {
-                    if let Some(window) = wm.windows.get_mut(&window_id) {
+                if let Some(wm) = backend.window_manager.as_mut()
+                    && let Some(window) = wm.windows.get_mut(&window_id) {
                         window.size = (width, height).into();
                         window.needs_redraw = true;
                         window.toplevel.with_pending_state(|state| {
@@ -175,24 +176,21 @@ fn process_window_events(backend: &mut WaylandBackend) {
                         window.toplevel.send_configure();
                         log::info!("Window {} resized to {}x{}", window_id, width, height);
                     }
-                }
             }
             WindowEvent::SurfaceDestroyed { window_id } => {
-                if let Some(wm) = backend.window_manager.as_mut() {
-                    if let Some(window) = wm.windows.get_mut(&window_id) {
+                if let Some(wm) = backend.window_manager.as_mut()
+                    && let Some(window) = wm.windows.get_mut(&window_id) {
                         window.egl_surface = None;
                         window.native_window = None;
                         log::info!("Surface destroyed for window_id={}", window_id);
                     }
-                }
             }
             WindowEvent::WindowClosed { window_id } => {
                 // Send close to the Wayland client
-                if let Some(wm) = backend.window_manager.as_ref() {
-                    if let Some(window) = wm.windows.get(&window_id) {
+                if let Some(wm) = backend.window_manager.as_ref()
+                    && let Some(window) = wm.windows.get(&window_id) {
                         window.toplevel.send_close();
                     }
-                }
                 if let Some(wm) = backend.window_manager.as_mut() {
                     wm.remove_window(window_id);
                 }
@@ -251,10 +249,18 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
 
         // Render in a scoped block so borrows are released before submit
         {
-            let wm = backend.window_manager.as_mut().unwrap();
-            let window = wm.windows.get_mut(&window_id).unwrap();
-            let egl_surface = window.egl_surface.as_mut().unwrap();
-            let winit = backend.graphic_renderer.as_mut().unwrap();
+            let Some(wm) = backend.window_manager.as_mut() else {
+                continue;
+            };
+            let Some(window) = wm.windows.get_mut(&window_id) else {
+                continue;
+            };
+            let Some(egl_surface) = window.egl_surface.as_mut() else {
+                continue;
+            };
+            let Some(winit) = backend.graphic_renderer.as_mut() else {
+                continue;
+            };
 
             let Ok((renderer, mut framebuffer)) = winit.bind_surface(egl_surface) else {
                 log::error!("Failed to bind surface for window_id={}", window_id);
@@ -285,10 +291,18 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
         }
         // Borrows released — now swap buffers
         {
-            let wm = backend.window_manager.as_ref().unwrap();
-            let window = wm.windows.get(&window_id).unwrap();
-            let egl_surface = window.egl_surface.as_ref().unwrap();
-            let winit = backend.graphic_renderer.as_ref().unwrap();
+            let Some(wm) = backend.window_manager.as_ref() else {
+                continue;
+            };
+            let Some(window) = wm.windows.get(&window_id) else {
+                continue;
+            };
+            let Some(egl_surface) = window.egl_surface.as_ref() else {
+                continue;
+            };
+            let Some(winit) = backend.graphic_renderer.as_ref() else {
+                continue;
+            };
             let _ = winit.submit_surface(egl_surface);
         }
     }
@@ -315,8 +329,12 @@ fn render_main_window(backend: &mut WaylandBackend) {
         let _ = frame.finish();
     }
     // bind() borrows released — now submit
-    let winit = backend.graphic_renderer.as_mut().unwrap();
-    winit.submit(Some(&[damage])).unwrap();
+    let Some(winit) = backend.graphic_renderer.as_mut() else {
+        return;
+    };
+    if let Err(e) = winit.submit(Some(&[damage])) {
+        log::error!("Failed to submit main window: {:?}", e);
+    }
 }
 
 /// Handle touch events from a WaylandWindowActivity.
@@ -349,11 +367,13 @@ fn handle_activity_touch(
 
     match action {
         ACTION_DOWN => {
-            compositor.keyboard.set_focus(
-                &mut compositor.state,
-                Some(toplevel.wl_surface().clone()),
-                serial,
-            );
+            if let Some(kb) = &compositor.keyboard {
+                kb.set_focus(
+                    &mut compositor.state,
+                    Some(toplevel.wl_surface().clone()),
+                    serial,
+                );
+            }
             let pointer = compositor.pointer.clone();
             pointer.motion(
                 &mut compositor.state,
@@ -368,9 +388,7 @@ fn handle_activity_touch(
                 &mut compositor.state,
                 &pointer::ButtonEvent {
                     button: 0x110, // BTN_LEFT
-                    state: smithay::backend::input::ButtonState::Pressed
-                        .try_into()
-                        .unwrap(),
+                    state: ButtonState::Pressed,
                     serial,
                     time,
                 },
@@ -383,9 +401,7 @@ fn handle_activity_touch(
                 &mut compositor.state,
                 &pointer::ButtonEvent {
                     button: 0x110,
-                    state: smithay::backend::input::ButtonState::Released
-                        .try_into()
-                        .unwrap(),
+                    state: ButtonState::Released,
                     serial,
                     time,
                 },
@@ -431,11 +447,13 @@ fn handle_activity_key(
     let serial = SERIAL_COUNTER.next_serial();
     let time = compositor.start_time.elapsed().as_millis() as u32;
 
-    compositor.keyboard.set_focus(
-        &mut compositor.state,
-        Some(toplevel.wl_surface().clone()),
-        serial,
-    );
+    if let Some(kb) = &compositor.keyboard {
+        kb.set_focus(
+            &mut compositor.state,
+            Some(toplevel.wl_surface().clone()),
+            serial,
+        );
+    }
 
     // Android keycode to Linux keycode (rough offset)
     let linux_keycode = (key_code - 7).max(0) as u32;
@@ -445,14 +463,16 @@ fn handle_activity_key(
         smithay::backend::input::KeyState::Released
     };
 
-    compositor.keyboard.input::<(), _>(
-        &mut compositor.state,
-        linux_keycode.into(),
-        key_state,
-        serial,
-        time,
-        |_, _, _| FilterResult::Forward,
-    );
+    if let Some(kb) = &compositor.keyboard {
+        kb.input::<(), _>(
+            &mut compositor.state,
+            linux_keycode.into(),
+            key_state,
+            serial,
+            time,
+            |_, _, _| FilterResult::Forward,
+        );
+    }
 }
 
 /// Handle input from the main NativeActivity (winit) — routes to first toplevel as fallback.
@@ -462,23 +482,27 @@ fn handle_winit_input(event: InputEvent<WinitInput>, backend: &mut WaylandBacken
             let compositor = &mut backend.compositor;
             let serial = SERIAL_COUNTER.next_serial();
             let time = compositor.start_time.elapsed().as_millis() as u32;
-            compositor.keyboard.input::<(), _>(
-                &mut compositor.state,
-                event.key_code(),
-                event.state(),
-                serial,
-                time,
-                |_, _, _| FilterResult::Forward,
-            );
+            if let Some(kb) = &compositor.keyboard {
+                kb.input::<(), _>(
+                    &mut compositor.state,
+                    event.key_code(),
+                    event.state(),
+                    serial,
+                    time,
+                    |_, _, _| FilterResult::Forward,
+                );
+            }
         }
         InputEvent::TouchDown { event } => {
             let compositor = &mut backend.compositor;
             if let Some(surface) = get_first_surface(&compositor.state) {
-                compositor.keyboard.set_focus(
-                    &mut compositor.state,
-                    Some(surface.wl_surface().clone()),
-                    0.into(),
-                );
+                if let Some(kb) = &compositor.keyboard {
+                    kb.set_focus(
+                        &mut compositor.state,
+                        Some(surface.wl_surface().clone()),
+                        0.into(),
+                    );
+                }
                 let serial = SERIAL_COUNTER.next_serial();
                 let time = compositor.start_time.elapsed().as_millis() as u32;
                 compositor.touch.down(
@@ -543,21 +567,22 @@ fn handle_winit_input(event: InputEvent<WinitInput>, backend: &mut WaylandBacken
         InputEvent::PointerButton { event, .. } => {
             let serial = SERIAL_COUNTER.next_serial();
             let button = event.button_code();
-            let state = ButtonState::from(event.state());
+            let state = event.state();
             let compositor = &mut backend.compositor;
             let pointer = compositor.pointer.clone();
-            if let Some(surface) = get_first_surface(&compositor.state) {
-                compositor.keyboard.set_focus(
-                    &mut compositor.state,
-                    Some(surface.wl_surface().clone()),
-                    0.into(),
-                );
-            }
+            if let Some(surface) = get_first_surface(&compositor.state)
+                && let Some(kb) = &compositor.keyboard {
+                    kb.set_focus(
+                        &mut compositor.state,
+                        Some(surface.wl_surface().clone()),
+                        0.into(),
+                    );
+                }
             pointer.button(
                 &mut compositor.state,
                 &pointer::ButtonEvent {
                     button,
-                    state: state.try_into().unwrap(),
+                    state,
                     serial,
                     time: event.time_msec(),
                 },

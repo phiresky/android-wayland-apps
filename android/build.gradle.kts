@@ -46,7 +46,7 @@ dependencies {
 // Copy all native .so files into jniLibs before build
 tasks.register<Copy>("assembleNativeLibs") {
     // Cargo ndk output
-    from("../target/aarch64-linux-android/release/libandroid_wayland_launcher.so")
+    from("../target/aarch64-linux-android/debug/libandroid_wayland_launcher.so")
     // Prebuilt libs (xkbcommon, proot, proot_loader)
     from("../libs/arm64-v8a/") {
         include("*.so")

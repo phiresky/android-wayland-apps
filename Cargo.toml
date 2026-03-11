@@ -29,6 +29,10 @@ smithay = { version = "0.7.0", default-features = false, features = [
     "renderer_glow",
     "wayland_frontend",
 ] }
+ureq = "2"
+tar = "0.4"
+xz2 = "0.1"
+pathdiff = "0.2"
 
 [dependencies]
 anyhow = "1.0.68"

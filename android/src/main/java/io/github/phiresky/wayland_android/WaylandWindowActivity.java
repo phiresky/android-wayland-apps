@@ -7,11 +7,6 @@ import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.KeyEvent;
-import android.view.WindowManager;
-
-import androidx.core.view.WindowCompat;
-import androidx.core.view.WindowInsetsCompat;
-import androidx.core.view.WindowInsetsControllerCompat;
 
 /**
  * Each Wayland XDG toplevel gets its own instance of this Activity.
@@ -36,25 +31,17 @@ public class WaylandWindowActivity extends Activity implements SurfaceHolder.Cal
             return;
         }
 
-        // Edge-to-edge: let content draw behind system bars
-        WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
-        getWindow().getAttributes().layoutInDisplayCutoutMode =
-                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+        // SDK 35 forces edge-to-edge; opt out so content doesn't render behind system bars
+        getWindow().setDecorFitsSystemWindows(true);
 
         surfaceView = new SurfaceView(this);
         setContentView(surfaceView);
         surfaceView.getHolder().addCallback(this);
-
-        // Immersive fullscreen: hide status bar and navigation bar
-        WindowInsetsControllerCompat insetsController =
-                WindowCompat.getInsetsController(getWindow(), surfaceView);
-        insetsController.hide(WindowInsetsCompat.Type.systemBars());
-        insetsController.setSystemBarsBehavior(
-                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
     }
 
     @Override
     public void surfaceCreated(SurfaceHolder holder) {
+        if (windowId < 0) return; // Guard against stale restored activities
         nativeSurfaceCreated(windowId, holder.getSurface());
     }
 

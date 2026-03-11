@@ -71,9 +71,9 @@ impl KeyboardKeyEvent<WinitInput> for WinitKeyboardInputEvent {
 
     fn state(&self) -> KeyState {
         if self.state == ElementState::Pressed {
-            return KeyState::Pressed;
+            KeyState::Pressed
         } else {
-            return KeyState::Released;
+            KeyState::Released
         }
     }
 
@@ -200,9 +200,9 @@ impl PointerButtonEvent<WinitInput> for WinitMouseInputEvent {
 
     fn state(&self) -> ButtonState {
         if self.state == ElementState::Pressed {
-            return ButtonState::Pressed;
+            ButtonState::Pressed
         } else {
-            return ButtonState::Released;
+            ButtonState::Released
         }
     }
 }

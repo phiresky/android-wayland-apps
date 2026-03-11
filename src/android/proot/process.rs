@@ -1,8 +1,8 @@
 use crate::android::utils::application_context::get_application_context;
 use crate::core::config;
-use std::io::BufRead;
-use std::io::BufReader;
-use std::process::{Command, Output, Stdio};
+use std::io::{BufRead, BufReader};
+use std::os::unix::process::ExitStatusExt;
+use std::process::{Command, ExitStatus, Output, Stdio};
 use std::sync::{Arc, OnceLock};
 
 static USE_NO_SECCOMP: OnceLock<bool> = OnceLock::new();
@@ -151,24 +151,75 @@ impl ArchProcess {
 
         process.arg("-c").arg(&self.command);
 
-        if let Some(log) = self.log {
-            let mut child = process
-                .stdout(Stdio::piped())
-                .stderr(Stdio::inherit())
-                .spawn()
-                .expect("Failed to run command");
+        let failed = || Output {
+            status: ExitStatus::from_raw(1),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        };
 
-            let reader = BufReader::new(child.stdout.take().unwrap());
-            for line in reader.lines() {
-                let line = line.unwrap();
-                log(line);
+        if let Some(log) = self.log {
+            let mut child = match process
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    log::error!("Failed to spawn proot command: {}", e);
+                    return failed();
+                }
+            };
+
+            let stderr_log = log.clone();
+            let stderr_thread = child.stderr.take().map(|stderr| {
+                std::thread::spawn(move || {
+                    let reader = BufReader::new(stderr);
+                    for line in reader.lines() {
+                        match line {
+                            Ok(l) => stderr_log(format!("[stderr] {}", l)),
+                            Err(e) => {
+                                log::error!("Error reading proot stderr: {}", e);
+                                break;
+                            }
+                        }
+                    }
+                })
+            });
+
+            if let Some(stdout) = child.stdout.take() {
+                let reader = BufReader::new(stdout);
+                for line in reader.lines() {
+                    match line {
+                        Ok(l) => log(l),
+                        Err(e) => {
+                            log::error!("Error reading proot stdout: {}", e);
+                            break;
+                        }
+                    }
+                }
             }
 
-            child
-                .wait_with_output()
-                .expect("Failed to wait for command")
+            if let Some(t) = stderr_thread {
+                if let Err(e) = t.join() {
+                    log::error!("stderr reader thread panicked: {:?}", e);
+                }
+            }
+
+            match child.wait_with_output() {
+                Ok(output) => output,
+                Err(e) => {
+                    log::error!("Failed to wait for proot command: {}", e);
+                    failed()
+                }
+            }
         } else {
-            process.output().expect("Failed to run command")
+            match process.output() {
+                Ok(output) => output,
+                Err(e) => {
+                    log::error!("Failed to run proot command: {}", e);
+                    failed()
+                }
+            }
         }
     }
 }

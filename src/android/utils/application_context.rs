@@ -15,83 +15,78 @@ pub struct ApplicationContext {
 }
 
 impl ApplicationContext {
-    pub fn build(android_app: &AndroidApp) {
-        let vm = unsafe { JavaVM::from_raw(android_app.vm_as_ptr() as *mut _) }
-            .expect("Failed to get JavaVM");
-        let mut env = vm
-            .attach_current_thread()
-            .expect("Failed to attach current thread");
+    pub fn build(android_app: &AndroidApp) -> Result<(), Box<dyn std::error::Error>> {
+        let vm = unsafe { JavaVM::from_raw(android_app.vm_as_ptr() as *mut _) }?;
+        let mut env = vm.attach_current_thread()?;
 
         let activity = unsafe { JObject::from_raw(android_app.activity_as_ptr() as *mut _) };
 
-        let cache_dir = Self::get_path(&mut env, &activity, "getCacheDir");
-        let data_dir = Self::get_path(&mut env, &activity, "getFilesDir");
-        let native_library_dir = Self::get_native_library_dir(&mut env, &activity);
+        let cache_dir = Self::get_path(&mut env, &activity, "getCacheDir")?;
+        let data_dir = Self::get_path(&mut env, &activity, "getFilesDir")?;
+        let native_library_dir = Self::get_native_library_dir(&mut env, &activity)?;
 
         {
             let mut context = APPLICATION_CONTEXT
                 .write()
-                .expect("Failed to write application context");
+                .map_err(|e| format!("Failed to write application context: {e}"))?;
             *context = Some(ApplicationContext {
                 cache_dir,
                 data_dir,
                 native_library_dir,
             });
-            log::info!(
-                "ApplicationContext initialized: {:?}",
-                context.as_ref().unwrap()
-            );
+            if let Some(ref ctx) = *context {
+                log::info!("ApplicationContext initialized: {:?}", ctx);
+            }
         }
+        Ok(())
     }
 
-    fn get_path(env: &mut JNIEnv, activity: &JObject, method: &str) -> PathBuf {
+    fn get_path(env: &mut JNIEnv, activity: &JObject, method: &str) -> Result<PathBuf, jni::errors::Error> {
         let path_obj = env
-            .call_method(activity, method, "()Ljava/io/File;", &[])
-            .expect("Failed to call method")
-            .l()
-            .expect("Failed to get path object");
+            .call_method(activity, method, "()Ljava/io/File;", &[])?
+            .l()?;
         let path_str = env
-            .call_method(path_obj, "getAbsolutePath", "()Ljava/lang/String;", &[])
-            .expect("Failed to get absolute path")
-            .l()
-            .expect("Failed to get path string");
+            .call_method(path_obj, "getAbsolutePath", "()Ljava/lang/String;", &[])?
+            .l()?;
         let path: String = env
-            .get_string(&JString::from(path_str))
-            .expect("Failed to convert path to string")
+            .get_string(&JString::from(path_str))?
             .into();
-        PathBuf::from(path)
+        Ok(PathBuf::from(path))
     }
 
-    fn get_native_library_dir(env: &mut JNIEnv, activity: &JObject) -> PathBuf {
+    fn get_native_library_dir(env: &mut JNIEnv, activity: &JObject) -> Result<PathBuf, jni::errors::Error> {
         let app_info = env
             .call_method(
                 activity,
                 "getApplicationInfo",
                 "()Landroid/content/pm/ApplicationInfo;",
                 &[],
-            )
-            .expect("Failed to get application info")
-            .l()
-            .expect("Failed to get application info object");
+            )?
+            .l()?;
         let native_library_dir = env
-            .get_field(app_info, "nativeLibraryDir", "Ljava/lang/String;")
-            .expect("Failed to get native library dir field")
-            .l()
-            .expect("Failed to get native library dir object");
+            .get_field(app_info, "nativeLibraryDir", "Ljava/lang/String;")?
+            .l()?;
         let path: String = env
-            .get_string(&JString::from(native_library_dir))
-            .expect("Failed to convert native library dir to string")
+            .get_string(&JString::from(native_library_dir))?
             .into();
-        PathBuf::from(path)
+        Ok(PathBuf::from(path))
     }
 }
 
 static APPLICATION_CONTEXT: RwLock<Option<ApplicationContext>> = RwLock::new(None);
 
 pub fn get_application_context() -> ApplicationContext {
-    APPLICATION_CONTEXT
-        .read()
-        .expect("Failed to read application context")
-        .clone()
-        .expect("ApplicationContext is not initialized. Please make sure `ApplicationContext::build(&android_app)` is called in `android_main`.")
+    let guard = match APPLICATION_CONTEXT.read() {
+        Ok(g) => g,
+        Err(e) => {
+            log::error!("Failed to read application context: {e}");
+            panic!("Failed to read application context: {e}");
+        }
+    };
+    match guard.clone() {
+        Some(ctx) => ctx,
+        None => {
+            panic!("ApplicationContext is not initialized. Please make sure `ApplicationContext::build(&android_app)` is called in `android_main`.");
+        }
+    }
 }

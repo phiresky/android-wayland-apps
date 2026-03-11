@@ -4,11 +4,14 @@ use bind::bind_socket;
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
     delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm,
-    delegate_xdg_shell,
+    delegate_xdg_decoration, delegate_xdg_shell,
     input::{self, keyboard::KeyboardHandle, touch::TouchHandle, Seat, SeatHandler, SeatState},
     output::Output,
     reexports::{
-        wayland_protocols::xdg::shell::server::xdg_toplevel,
+        wayland_protocols::xdg::{
+            decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as DecorationMode,
+            shell::server::xdg_toplevel,
+        },
         wayland_server::{protocol::wl_seat, Display},
     },
     utils::{Logical, Serial, Size},
@@ -26,6 +29,7 @@ use smithay::{
             SelectionHandler,
         },
         shell::xdg::{
+            decoration::{XdgDecorationHandler, XdgDecorationState},
             PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
         },
         shm::{ShmHandler, ShmState},
@@ -48,7 +52,7 @@ pub struct Compositor {
     pub clients: Vec<Client>,
     pub start_time: Instant,
     pub seat: Seat<State>,
-    pub keyboard: KeyboardHandle<State>,
+    pub keyboard: Option<KeyboardHandle<State>>,
     pub touch: TouchHandle<State>,
     pub pointer: PointerHandle<State>,
     pub output: Option<Output>,
@@ -57,6 +61,7 @@ pub struct Compositor {
 pub struct State {
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
+    pub xdg_decoration_state: XdgDecorationState,
     pub shm_state: ShmState,
     pub data_device_state: DataDeviceState,
     pub seat_state: SeatState<Self>,
@@ -121,7 +126,12 @@ impl CompositorHandler for State {
     }
 
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
-        &client.get_data::<ClientState>().unwrap().compositor_state
+        match client.get_data::<ClientState>() {
+            Some(state) => &state.compositor_state,
+            None => {
+                panic!("Client has no ClientState attached");
+            }
+        }
     }
 
     fn commit(&mut self, surface: &WlSurface) {
@@ -183,8 +193,37 @@ impl ClientData for ClientState {
 
 impl OutputHandler for State {}
 
+impl XdgDecorationHandler for State {
+    fn new_decoration(&mut self, toplevel: ToplevelSurface) {
+        // Tell clients we handle decorations server-side (i.e. no CSD needed)
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(DecorationMode::ServerSide);
+        });
+    }
+
+    fn request_mode(&mut self, toplevel: ToplevelSurface, _mode: DecorationMode) {
+        // Always force server-side (no CSD) regardless of client preference
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(DecorationMode::ServerSide);
+        });
+        if toplevel.is_initial_configure_sent() {
+            toplevel.send_pending_configure();
+        }
+    }
+
+    fn unset_mode(&mut self, toplevel: ToplevelSurface) {
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(DecorationMode::ServerSide);
+        });
+        if toplevel.is_initial_configure_sent() {
+            toplevel.send_pending_configure();
+        }
+    }
+}
+
 // Macros used to delegate protocol handling to types in the app state.
 delegate_xdg_shell!(State);
+delegate_xdg_decoration!(State);
 delegate_compositor!(State);
 delegate_shm!(State);
 delegate_seat!(State);
@@ -204,16 +243,13 @@ impl Compositor {
 
         let start_time = Instant::now();
 
-        // Key repeat rate and delay are in milliseconds: https://wayland-book.com/seat/keyboard.html
-        let keyboard = seat
-            .add_keyboard(Default::default(), 1000, 200)
-            .expect("Failed to add keyboard");
         let touch = seat.add_touch();
         let pointer = seat.add_pointer();
 
         let state = State {
             compositor_state: CompositorState::new::<State>(&dh),
             xdg_shell_state: XdgShellState::new::<State>(&dh),
+            xdg_decoration_state: XdgDecorationState::new::<State>(&dh),
             shm_state: ShmState::new::<State>(&dh, vec![]),
             data_device_state: DataDeviceState::new::<State>(&dh),
             seat_state,
@@ -229,10 +265,26 @@ impl Compositor {
             start_time,
             display,
             seat,
-            keyboard,
+            keyboard: None,
             touch,
             pointer,
             output: None,
         })
+    }
+
+    /// Initialize the keyboard. Must be called after xkb data is available.
+    pub fn init_keyboard(&mut self) {
+        if self.keyboard.is_some() {
+            return;
+        }
+        let xkb_path = std::env::var("XKB_CONFIG_ROOT").unwrap_or_default();
+        if !std::path::Path::new(&xkb_path).join("rules").exists() {
+            log::warn!("XKB data not found at {xkb_path}, deferring keyboard init");
+            return;
+        }
+        match self.seat.add_keyboard(Default::default(), 1000, 200) {
+            Ok(kb) => self.keyboard = Some(kb),
+            Err(e) => log::error!("Failed to add keyboard: {e}"),
+        }
     }
 }

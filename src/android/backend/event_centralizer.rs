@@ -40,7 +40,7 @@ pub enum CentralizedEvent {
 
 pub fn centralize(event: WindowEvent, backend: &mut WaylandBackend) -> CentralizedEvent {
     let time = backend.clock.now().as_millis() as u64;
-    return match event {
+    match event {
         WindowEvent::SurfaceResized(size) => {
             let (w, h): (i32, i32) = size.into();
 
@@ -54,16 +54,15 @@ pub fn centralize(event: WindowEvent, backend: &mut WaylandBackend) -> Centraliz
             ..
         } => {
             backend.scale_factor = new_scale_factor;
-            let (w, h): (i32, i32) = backend
-                .graphic_renderer
-                .as_ref()
-                .unwrap()
-                .window()
-                .surface_size()
-                .into();
-            CentralizedEvent::Resized {
-                size: (w, h).into(),
-                scale_factor: backend.scale_factor,
+            if let Some(renderer) = backend.graphic_renderer.as_ref() {
+                let (w, h): (i32, i32) = renderer.window().surface_size().into();
+                CentralizedEvent::Resized {
+                    size: (w, h).into(),
+                    scale_factor: backend.scale_factor,
+                }
+            } else {
+                log::error!("ScaleFactorChanged but no graphic renderer available");
+                CentralizedEvent::Unsupported
             }
         }
         WindowEvent::RedrawRequested => CentralizedEvent::Redraw,
@@ -95,12 +94,11 @@ pub fn centralize(event: WindowEvent, backend: &mut WaylandBackend) -> Centraliz
         WindowEvent::PointerMoved {
             position, source, ..
         } => {
-            let size = backend
-                .graphic_renderer
-                .as_ref()
-                .unwrap()
-                .window()
-                .surface_size();
+            let Some(renderer) = backend.graphic_renderer.as_ref() else {
+                log::error!("PointerMoved but no graphic renderer available");
+                return CentralizedEvent::Unsupported;
+            };
+            let size = renderer.window().surface_size();
             let x = position.x / size.width as f64;
             let y = position.y / size.height as f64;
             match source {
@@ -139,12 +137,11 @@ pub fn centralize(event: WindowEvent, backend: &mut WaylandBackend) -> Centraliz
         } => match button {
             ButtonSource::Touch { finger_id, .. } => match state {
                 ElementState::Pressed => {
-                    let size = backend
-                        .graphic_renderer
-                        .as_ref()
-                        .unwrap()
-                        .window()
-                        .surface_size();
+                    let Some(renderer) = backend.graphic_renderer.as_ref() else {
+                        log::error!("TouchDown but no graphic renderer available");
+                        return CentralizedEvent::Unsupported;
+                    };
+                    let size = renderer.window().surface_size();
                     let x = position.x / size.width as f64;
                     let y = position.y / size.height as f64;
                     CentralizedEvent::Input(InputEvent::TouchDown {
@@ -182,5 +179,5 @@ pub fn centralize(event: WindowEvent, backend: &mut WaylandBackend) -> Centraliz
             log::info!("Unhandled event: {:?}", event);
             CentralizedEvent::Unsupported
         }
-    };
+    }
 }

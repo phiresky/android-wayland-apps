@@ -1,4 +1,5 @@
 target/
+.gradle/
 .tmp/
 .cargo/
 jniLibs/
@@ -34,3 +35,5 @@ refs/
 
 # Claude config
 .claude/
+.idea
+.vscode
