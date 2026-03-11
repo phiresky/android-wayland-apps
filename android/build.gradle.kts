@@ -39,6 +39,10 @@ android {
     }
 }
 
+dependencies {
+    implementation("androidx.core:core:1.16.0")
+}
+
 // Copy all native .so files into jniLibs before build
 tasks.register<Copy>("assembleNativeLibs") {
     // Cargo ndk output
