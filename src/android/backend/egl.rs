@@ -25,7 +25,7 @@ use smithay::{
             context::{GlAttributes, PixelFormatRequirements},
             display::EGLDisplay,
             native::EGLNativeSurface,
-            EGLContext, EGLSurface, Error as EGLError,
+            EGLContext, EGLError, EGLSurface, Error as EGLHighError,
         },
         renderer::{
             gles::{GlesError, GlesRenderer},
@@ -159,8 +159,6 @@ pub fn bind_egl(event_loop: &ActiveEventLoop) -> WinitGraphicsBackend<GlesRender
         Err(error) => panic!("Failed to get window handle: {:?}", error),
     };
 
-    let pixel_format = context.pixel_format();
-    let config_id = context.config_id();
     let renderer = unsafe { GlesRenderer::new(context) }.expect("Failed to create GLES Renderer");
     let damage_tracking = display.supports_damage();
 
@@ -173,8 +171,6 @@ pub fn bind_egl(event_loop: &ActiveEventLoop) -> WinitGraphicsBackend<GlesRender
         damage_tracking,
         bind_size: None,
         renderer,
-        pixel_format,
-        config_id,
     }
 }
 
@@ -190,7 +186,7 @@ pub enum Error {
     /// Context creation is not supported on the current window system
     NotSupported,
     /// EGL error.
-    Egl(EGLError),
+    Egl(EGLHighError),
     /// Renderer initialization failed.
     RendererCreationError(GlesError),
 }
@@ -204,9 +200,6 @@ pub struct WinitGraphicsBackend<R> {
     window: Arc<WinitWindow>,
     damage_tracking: bool,
     bind_size: Option<Size<i32, Physical>>,
-    /// Saved from the EGLContext before it's consumed by GlesRenderer.
-    pixel_format: Option<smithay::backend::egl::ffi::egl::types::EGLConfig>,
-    config_id: smithay::backend::egl::ffi::egl::types::EGLConfig,
 }
 
 impl<R> WinitGraphicsBackend<R>
@@ -268,15 +261,15 @@ where
         unsafe {
             EGLSurface::new(
                 &self.display,
-                self.pixel_format,
-                self.config_id,
+                self.egl_surface.pixel_format(),
+                self.egl_surface.config_id(),
                 AndroidNativeSurface { handle },
             )
         }
     }
 
     /// Bind the renderer to an arbitrary EGL surface (for multi-window rendering).
-    pub fn bind_surface(&mut self, surface: &mut EGLSurface) -> Result<(&mut R, R::Framebuffer<'_>), SwapBuffersError> {
+    pub fn bind_surface<'a>(&'a mut self, surface: &'a mut EGLSurface) -> Result<(&'a mut R, R::Framebuffer<'a>), SwapBuffersError> {
         let fb = self.renderer.bind(surface)?;
         Ok((&mut self.renderer, fb))
     }

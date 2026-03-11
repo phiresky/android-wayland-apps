@@ -13,10 +13,8 @@ use smithay::wayland::shell::xdg::ToplevelSurface;
 use winit::platform::android::activity::AndroidApp;
 use winit::raw_window_handle::AndroidNdkWindowHandle;
 
-use crate::android::backend::egl::AndroidNativeSurface;
-
 // FFI for ANativeWindow
-extern "C" {
+unsafe extern "C" {
     fn ANativeWindow_fromSurface(env: *mut jni::sys::JNIEnv, surface: jobject) -> *mut c_void;
     fn ANativeWindow_acquire(window: *mut c_void);
     fn ANativeWindow_release(window: *mut c_void);
@@ -184,7 +182,7 @@ fn send_event(event: WindowEvent) {
 
 #[unsafe(no_mangle)]
 extern "system" fn Java_io_github_phiresky_wayland_1android_WaylandWindowActivity_nativeSurfaceCreated(
-    mut env: JNIEnv,
+    env: JNIEnv,
     _class: JObject,
     window_id: i32,
     surface: JObject,

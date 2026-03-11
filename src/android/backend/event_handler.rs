@@ -1,4 +1,5 @@
 use crate::android::backend::{CentralizedEvent, WaylandBackend};
+use crate::android::backend::input::WinitInput;
 use crate::android::compositor::{send_frames_surface_tree, ClientState, State};
 use crate::android::window_manager::WindowEvent;
 use smithay::backend::renderer::element::surface::{
@@ -22,15 +23,6 @@ use smithay::{
 };
 use std::sync::Arc;
 use winit::event_loop::ActiveEventLoop;
-
-/// Find the toplevel surface for a given window_id from the window manager.
-fn get_surface_for_window(backend: &WaylandBackend, window_id: u32) -> Option<ToplevelSurface> {
-    backend
-        .window_manager
-        .as_ref()
-        .and_then(|wm| wm.windows.get(&window_id))
-        .map(|w| w.toplevel.clone())
-}
 
 /// Get the first toplevel (fallback for main window / single-window mode).
 fn get_first_surface(state: &State) -> Option<ToplevelSurface> {
@@ -67,30 +59,31 @@ pub fn handle(
             process_window_events(backend);
 
             // --- 3. Accept Wayland clients, dispatch protocol ---
+            if let Some(stream) = backend
+                .compositor
+                .listener
+                .accept()
+                .expect("Failed to accept listener")
             {
-                let compositor = &mut backend.compositor;
-                if let Some(stream) = compositor
-                    .listener
-                    .accept()
-                    .expect("Failed to accept listener")
-                {
-                    let client = compositor
-                        .display
-                        .handle()
-                        .insert_client(stream, Arc::new(ClientState::default()))
-                        .unwrap();
-                    compositor.clients.push(client);
-                }
-
-                compositor
+                let client = backend
+                    .compositor
                     .display
-                    .dispatch_clients(&mut compositor.state)
-                    .expect("Failed to dispatch clients");
-                compositor
-                    .display
-                    .flush_clients()
-                    .expect("Failed to flush clients");
+                    .handle()
+                    .insert_client(stream, Arc::new(ClientState::default()))
+                    .unwrap();
+                backend.compositor.clients.push(client);
             }
+
+            backend
+                .compositor
+                .display
+                .dispatch_clients(&mut backend.compositor.state)
+                .expect("Failed to dispatch clients");
+            backend
+                .compositor
+                .display
+                .flush_clients()
+                .expect("Failed to flush clients");
 
             // --- 4. Render each Activity window ---
             render_activity_windows(backend);
@@ -104,8 +97,6 @@ pub fn handle(
             }
         }
         CentralizedEvent::Input(event) => {
-            // Input from the main NativeActivity window (winit).
-            // Route to first toplevel as fallback.
             handle_winit_input(event, backend);
         }
         CentralizedEvent::Resized { size, scale_factor } => {
@@ -127,7 +118,6 @@ pub fn handle(
 
 /// Process events from WaylandWindowActivity JNI callbacks.
 fn process_window_events(backend: &mut WaylandBackend) {
-    // Collect events first to avoid borrow issues
     let events: Vec<WindowEvent> = backend
         .window_manager
         .as_ref()
@@ -140,36 +130,33 @@ fn process_window_events(backend: &mut WaylandBackend) {
                 window_id,
                 native_window,
             } => {
-                // Create EGL surface for this Activity window
-                if let (Some(wm), Some(winit)) = (
-                    backend.window_manager.as_mut(),
-                    backend.graphic_renderer.as_ref(),
-                ) {
+                // Store the native window pointer first
+                if let Some(wm) = backend.window_manager.as_mut() {
                     if let Some(window) = wm.windows.get_mut(&window_id) {
                         window.native_window = Some(native_window);
-                        if let Some(handle) = wm.get_native_handle(window_id) {
-                            match winit.create_surface_for_native_window(handle) {
-                                Ok(surface) => {
-                                    log::info!(
-                                        "Created EGL surface for window_id={}",
-                                        window_id
-                                    );
-                                    // Re-borrow to set the surface
-                                    if let Some(window) =
-                                        backend.window_manager.as_mut().unwrap().windows.get_mut(&window_id)
-                                    {
-                                        window.egl_surface = Some(surface);
-                                    }
-                                }
-                                Err(e) => {
-                                    log::error!(
-                                        "Failed to create EGL surface for window_id={}: {:?}",
-                                        window_id,
-                                        e
-                                    );
-                                }
+                    }
+                }
+                // Now create EGL surface (needs both winit and wm)
+                let handle = backend
+                    .window_manager
+                    .as_ref()
+                    .and_then(|wm| wm.get_native_handle(window_id));
+
+                if let Some(handle) = handle {
+                    let surface = backend
+                        .graphic_renderer
+                        .as_ref()
+                        .and_then(|winit| winit.create_surface_for_native_window(handle).ok());
+
+                    if let Some(surface) = surface {
+                        log::info!("Created EGL surface for window_id={}", window_id);
+                        if let Some(wm) = backend.window_manager.as_mut() {
+                            if let Some(window) = wm.windows.get_mut(&window_id) {
+                                window.egl_surface = Some(surface);
                             }
                         }
+                    } else {
+                        log::error!("Failed to create EGL surface for window_id={}", window_id);
                     }
                 }
             }
@@ -182,20 +169,11 @@ fn process_window_events(backend: &mut WaylandBackend) {
                     if let Some(window) = wm.windows.get_mut(&window_id) {
                         window.size = (width, height).into();
                         window.needs_redraw = true;
-
-                        // Send configure to the Wayland client with new size
-                        window
-                            .toplevel
-                            .with_pending_state(|state| {
-                                state.size = Some((width, height).into());
-                            });
+                        window.toplevel.with_pending_state(|state| {
+                            state.size = Some((width, height).into());
+                        });
                         window.toplevel.send_configure();
-                        log::info!(
-                            "Window {} resized to {}x{}",
-                            window_id,
-                            width,
-                            height
-                        );
+                        log::info!("Window {} resized to {}x{}", window_id, width, height);
                     }
                 }
             }
@@ -209,11 +187,13 @@ fn process_window_events(backend: &mut WaylandBackend) {
                 }
             }
             WindowEvent::WindowClosed { window_id } => {
-                if let Some(wm) = backend.window_manager.as_mut() {
+                // Send close to the Wayland client
+                if let Some(wm) = backend.window_manager.as_ref() {
                     if let Some(window) = wm.windows.get(&window_id) {
-                        // Tell the Wayland client to close
                         window.toplevel.send_close();
                     }
+                }
+                if let Some(wm) = backend.window_manager.as_mut() {
                     wm.remove_window(window_id);
                 }
             }
@@ -239,7 +219,6 @@ fn process_window_events(backend: &mut WaylandBackend) {
 
 /// Render each Activity window's toplevel to its EGL surface.
 fn render_activity_windows(backend: &mut WaylandBackend) {
-    // Collect window IDs that have an EGL surface ready
     let window_ids: Vec<u32> = backend
         .window_manager
         .as_ref()
@@ -252,112 +231,111 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
         })
         .unwrap_or_default();
 
+    let time = backend.compositor.start_time.elapsed().as_millis() as u32;
+
     for window_id in window_ids {
-        // Split borrows: get mutable refs to both graphic_renderer and window_manager
-        let (winit, wm) = match (
-            backend.graphic_renderer.as_mut(),
-            backend.window_manager.as_mut(),
-        ) {
-            (Some(winit), Some(wm)) => (winit, wm),
-            _ => continue,
+        // Get the toplevel and size from window manager
+        let (toplevel, size) = {
+            let wm = match backend.window_manager.as_ref() {
+                Some(wm) => wm,
+                None => continue,
+            };
+            let window = match wm.windows.get(&window_id) {
+                Some(w) => w,
+                None => continue,
+            };
+            (window.toplevel.clone(), window.size)
         };
 
-        let window = match wm.windows.get_mut(&window_id) {
-            Some(w) => w,
-            None => continue,
-        };
-
-        let egl_surface = match window.egl_surface.as_mut() {
-            Some(s) => s,
-            None => continue,
-        };
-
-        let size = window.size;
         let damage = Rectangle::from_size(size);
-        let toplevel = window.toplevel.clone();
 
-        // Bind renderer to this window's EGL surface
-        let (renderer, mut framebuffer) = match winit.bind_surface(egl_surface) {
-            Ok(r) => r,
-            Err(e) => {
-                log::error!("Failed to bind surface for window_id={}: {:?}", window_id, e);
+        // Render in a scoped block so borrows are released before submit
+        {
+            let wm = backend.window_manager.as_mut().unwrap();
+            let window = wm.windows.get_mut(&window_id).unwrap();
+            let egl_surface = window.egl_surface.as_mut().unwrap();
+            let winit = backend.graphic_renderer.as_mut().unwrap();
+
+            let Ok((renderer, mut framebuffer)) = winit.bind_surface(egl_surface) else {
+                log::error!("Failed to bind surface for window_id={}", window_id);
                 continue;
-            }
-        };
+            };
 
-        // Render this toplevel
-        let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
-            render_elements_from_surface_tree(
-                renderer,
-                toplevel.wl_surface(),
-                (0, 0),
-                1.0,
-                1.0,
-                Kind::Unspecified,
-            );
+            let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+                render_elements_from_surface_tree(
+                    renderer,
+                    toplevel.wl_surface(),
+                    (0, 0),
+                    1.0,
+                    1.0,
+                    Kind::Unspecified,
+                );
 
-        let mut frame = match renderer.render(&mut framebuffer, size, Transform::Flipped180) {
-            Ok(f) => f,
-            Err(e) => {
-                log::error!("Failed to begin render for window_id={}: {:?}", window_id, e);
+            let Ok(mut frame) = renderer.render(&mut framebuffer, size, Transform::Flipped180)
+            else {
+                log::error!("Failed to begin render for window_id={}", window_id);
                 continue;
-            }
-        };
+            };
 
-        let _ = frame.clear(Color32F::new(0.0, 0.0, 0.0, 1.0), &[damage]);
-        let _ = draw_render_elements(&mut frame, 1.0, &elements, &[damage]);
-        let _ = frame.finish();
+            let _ = frame.clear(Color32F::new(0.0, 0.0, 0.0, 1.0), &[damage]);
+            let _ = draw_render_elements(&mut frame, 1.0, &elements, &[damage]);
+            let _ = frame.finish();
 
-        // Send frame callbacks
-        let time = backend.compositor.start_time.elapsed().as_millis() as u32;
-        send_frames_surface_tree(toplevel.wl_surface(), time);
-
-        // Swap buffers for this window
-        // Need to re-borrow winit after the renderer borrow is released
-        if let Some(wm) = backend.window_manager.as_mut() {
-            if let Some(window) = wm.windows.get_mut(&window_id) {
-                if let Some(egl_surface) = &window.egl_surface {
-                    if let Some(winit) = backend.graphic_renderer.as_ref() {
-                        let _ = winit.submit_surface(egl_surface);
-                    }
-                }
-            }
+            send_frames_surface_tree(toplevel.wl_surface(), time);
+        }
+        // Borrows released — now swap buffers
+        {
+            let wm = backend.window_manager.as_ref().unwrap();
+            let window = wm.windows.get(&window_id).unwrap();
+            let egl_surface = window.egl_surface.as_ref().unwrap();
+            let winit = backend.graphic_renderer.as_ref().unwrap();
+            let _ = winit.submit_surface(egl_surface);
         }
     }
 }
 
-/// Render the main NativeActivity window (background/status).
+/// Render the main NativeActivity window (dark background).
 fn render_main_window(backend: &mut WaylandBackend) {
-    if let Some(winit) = backend.graphic_renderer.as_mut() {
-        let size = winit.window_size();
-        let damage = Rectangle::from_size(size);
+    let winit = match backend.graphic_renderer.as_mut() {
+        Some(w) => w,
+        None => return,
+    };
 
-        let (renderer, mut framebuffer) = match winit.bind() {
-            Ok(r) => r,
-            Err(e) => {
-                log::error!("Failed to bind main window: {:?}", e);
-                return;
-            }
+    let size = winit.window_size();
+    let damage = Rectangle::from_size(size);
+
+    {
+        let Ok((renderer, mut framebuffer)) = winit.bind() else {
+            return;
         };
-
-        // Dark background for main window
-        let mut frame = renderer
-            .render(&mut framebuffer, size, Transform::Flipped180)
-            .unwrap();
-        frame
-            .clear(Color32F::new(0.05, 0.05, 0.1, 1.0), &[damage])
-            .unwrap();
+        let Ok(mut frame) = renderer.render(&mut framebuffer, size, Transform::Flipped180) else {
+            return;
+        };
+        let _ = frame.clear(Color32F::new(0.05, 0.05, 0.1, 1.0), &[damage]);
         let _ = frame.finish();
-
-        winit.submit(Some(&[damage])).unwrap();
     }
+    // bind() borrows released — now submit
+    let winit = backend.graphic_renderer.as_mut().unwrap();
+    winit.submit(Some(&[damage])).unwrap();
 }
 
 /// Handle touch events from a WaylandWindowActivity.
-fn handle_activity_touch(backend: &mut WaylandBackend, window_id: u32, action: i32, x: f32, y: f32) {
-    let toplevel = match get_surface_for_window(backend, window_id) {
-        Some(t) => t,
-        None => return,
+fn handle_activity_touch(
+    backend: &mut WaylandBackend,
+    window_id: u32,
+    action: i32,
+    x: f32,
+    y: f32,
+) {
+    let toplevel = {
+        let wm = match backend.window_manager.as_ref() {
+            Some(wm) => wm,
+            None => return,
+        };
+        match wm.windows.get(&window_id) {
+            Some(w) => w.toplevel.clone(),
+            None => return,
+        }
     };
 
     let compositor = &mut backend.compositor;
@@ -371,13 +349,11 @@ fn handle_activity_touch(backend: &mut WaylandBackend, window_id: u32, action: i
 
     match action {
         ACTION_DOWN => {
-            // Set keyboard focus to this surface
             compositor.keyboard.set_focus(
                 &mut compositor.state,
                 Some(toplevel.wl_surface().clone()),
                 serial,
             );
-            // Send pointer motion + button down (emulate pointer from touch)
             let pointer = compositor.pointer.clone();
             pointer.motion(
                 &mut compositor.state,
@@ -392,7 +368,9 @@ fn handle_activity_touch(backend: &mut WaylandBackend, window_id: u32, action: i
                 &mut compositor.state,
                 &pointer::ButtonEvent {
                     button: 0x110, // BTN_LEFT
-                    state: smithay::backend::input::ButtonState::Pressed.try_into().unwrap(),
+                    state: smithay::backend::input::ButtonState::Pressed
+                        .try_into()
+                        .unwrap(),
                     serial,
                     time,
                 },
@@ -405,7 +383,9 @@ fn handle_activity_touch(backend: &mut WaylandBackend, window_id: u32, action: i
                 &mut compositor.state,
                 &pointer::ButtonEvent {
                     button: 0x110,
-                    state: smithay::backend::input::ButtonState::Released.try_into().unwrap(),
+                    state: smithay::backend::input::ButtonState::Released
+                        .try_into()
+                        .unwrap(),
                     serial,
                     time,
                 },
@@ -430,26 +410,35 @@ fn handle_activity_touch(backend: &mut WaylandBackend, window_id: u32, action: i
 }
 
 /// Handle key events from a WaylandWindowActivity.
-fn handle_activity_key(backend: &mut WaylandBackend, window_id: u32, key_code: i32, action: i32) {
-    let toplevel = match get_surface_for_window(backend, window_id) {
-        Some(t) => t,
-        None => return,
+fn handle_activity_key(
+    backend: &mut WaylandBackend,
+    window_id: u32,
+    key_code: i32,
+    action: i32,
+) {
+    let toplevel = {
+        let wm = match backend.window_manager.as_ref() {
+            Some(wm) => wm,
+            None => return,
+        };
+        match wm.windows.get(&window_id) {
+            Some(w) => w.toplevel.clone(),
+            None => return,
+        }
     };
 
     let compositor = &mut backend.compositor;
     let serial = SERIAL_COUNTER.next_serial();
     let time = compositor.start_time.elapsed().as_millis() as u32;
 
-    // Set keyboard focus
     compositor.keyboard.set_focus(
         &mut compositor.state,
         Some(toplevel.wl_surface().clone()),
         serial,
     );
 
-    // Android KeyEvent: ACTION_DOWN=0, ACTION_UP=1
-    // Convert Android keycode to Linux keycode (approximate, offset by 7 for common keys)
-    let linux_keycode = android_keycode_to_linux(key_code);
+    // Android keycode to Linux keycode (rough offset)
+    let linux_keycode = (key_code - 7).max(0) as u32;
     let key_state = if action == 0 {
         smithay::backend::input::KeyState::Pressed
     } else {
@@ -458,7 +447,7 @@ fn handle_activity_key(backend: &mut WaylandBackend, window_id: u32, key_code: i
 
     compositor.keyboard.input::<(), _>(
         &mut compositor.state,
-        linux_keycode,
+        linux_keycode.into(),
         key_state,
         serial,
         time,
@@ -466,22 +455,8 @@ fn handle_activity_key(backend: &mut WaylandBackend, window_id: u32, key_code: i
     );
 }
 
-/// Rough Android keycode to Linux keycode conversion.
-/// Android keycodes are offset from Linux keycodes by ~7 for alphanumeric keys.
-fn android_keycode_to_linux(android_keycode: i32) -> u32 {
-    // Android KEYCODE values → Linux KEY_ values
-    // This covers the common cases; a full mapping table would be needed for production.
-    let code = match android_keycode {
-        // KEYCODE_0..KEYCODE_9 (7..16) → KEY_0..KEY_9 (11..20) — offset -4 doesn't work uniformly
-        // Use the standard offset: Android keycodes are Linux keycodes + 7 for letter keys
-        // But it's not a simple offset for all keys. For now, subtract 7.
-        _ => (android_keycode - 7).max(0) as u32,
-    };
-    code
-}
-
 /// Handle input from the main NativeActivity (winit) — routes to first toplevel as fallback.
-fn handle_winit_input(event: InputEvent<impl 'static>, backend: &mut WaylandBackend) {
+fn handle_winit_input(event: InputEvent<WinitInput>, backend: &mut WaylandBackend) {
     match event {
         InputEvent::Keyboard { event } => {
             let compositor = &mut backend.compositor;
