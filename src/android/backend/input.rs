@@ -194,13 +194,7 @@ impl PointerButtonEvent<WinitInput> for WinitMouseInputEvent {
             WinitMouseButton::Middle => 0x112,
             WinitMouseButton::Forward => 0x115,
             WinitMouseButton::Back => 0x116,
-            WinitMouseButton::Other(b) => {
-                if self.is_x11 {
-                    xorg_mouse_to_libinput(b as u32)
-                } else {
-                    b as u32
-                }
-            }
+            _ => 0x110, // fallback to BTN_LEFT for unknown buttons
         }
     }
 
@@ -401,12 +395,3 @@ impl InputBackend for WinitInput {
     type SpecialEvent = UnusedEvent;
 }
 
-fn xorg_mouse_to_libinput(xorg: u32) -> u32 {
-    match xorg {
-        0 => 0,
-        1 => 0x110,            // BTN_LEFT
-        2 => 0x112,            // BTN_MIDDLE
-        3 => 0x111,            // BTN_RIGHT
-        _ => xorg - 8 + 0x113, // BTN_SIZE
-    }
-}

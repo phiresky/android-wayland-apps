@@ -36,8 +36,10 @@ fn android_main(android_app: AndroidApp) {
 
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let mut app = App::build(android_app);
-    event_loop.run_app(&mut app).expect("Failed to run app");
+    let app = App::build(android_app);
+    // winit 0.31 requires 'static for run_app; leak to satisfy that.
+    let app: &'static mut App = Box::leak(Box::new(app));
+    event_loop.run_app(app).expect("Failed to run app");
 }
 
 /// Ported from localdesktop `src/android/proot/setup.rs:fix_xkb_symlink`.

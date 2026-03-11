@@ -37,7 +37,7 @@ fn get_first_surface(state: &State) -> Option<ToplevelSurface> {
 pub fn handle(
     event: CentralizedEvent,
     backend: &mut WaylandBackend,
-    event_loop: &ActiveEventLoop,
+    event_loop: &dyn ActiveEventLoop,
 ) {
     match event {
         CentralizedEvent::CloseRequested => {

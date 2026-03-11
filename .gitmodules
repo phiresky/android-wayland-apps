@@ -1,0 +1,8 @@
+[submodule "patches/winit"]
+	path = patches/winit
+	url = https://github.com/phiresky/winit.git
+	branch = android-patches-rebased
+[submodule "patches/smithay"]
+	path = patches/smithay
+	url = https://github.com/phiresky/smithay.git
+	branch = android-patches-rebased

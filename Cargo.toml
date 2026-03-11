@@ -15,7 +15,7 @@ codegen-units = 1
 [target.'cfg(target_os = "android")'.dependencies]
 log = "0.4"
 android_logger = { version = "0.14", default-features = false }
-winit = { version = "0.30.11", features = [
+winit = { version = "0.31.0-beta.2", features = [
     "android-native-activity",
     "wayland",
 ] }
@@ -23,7 +23,7 @@ wayland-protocols = "0.32.6"
 khronos-egl = { version = "6.0.0", features = ["dynamic"] }
 libloading = "0.8.6"
 jni = "0.21.1"
-smithay = { version = "0.5.0", default-features = false, features = [
+smithay = { version = "0.7.0", default-features = false, features = [
     "wayland-protocols",
     "wayland-server",
     "renderer_glow",
@@ -36,5 +36,5 @@ serde = { version = "1.0", features = ["derive"] }
 toml = "0.8.12"
 
 [patch.crates-io]
-smithay = { path = "refs/localdesktop/patches/smithay" }
-winit = { path = "refs/localdesktop/patches/winit" }
+smithay = { path = "patches/smithay" }
+winit = { path = "patches/winit/winit" }

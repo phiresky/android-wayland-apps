@@ -21,7 +21,7 @@ use smithay::{
         output::OutputHandler,
         selection::{
             data_device::{
-                ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
+                DataDeviceHandler, DataDeviceState, WaylandDndGrabHandler,
             },
             SelectionHandler,
         },
@@ -39,7 +39,7 @@ use smithay::{
         Client, ListeningSocket,
     },
 };
-use std::{error::Error, os::unix::io::OwnedFd, time::Instant};
+use std::{error::Error, time::Instant};
 
 pub struct Compositor {
     pub state: State,
@@ -108,15 +108,12 @@ impl SelectionHandler for State {
 }
 
 impl DataDeviceHandler for State {
-    fn data_device_state(&self) -> &DataDeviceState {
-        &self.data_device_state
+    fn data_device_state(&mut self) -> &mut DataDeviceState {
+        &mut self.data_device_state
     }
 }
 
-impl ClientDndGrabHandler for State {}
-impl ServerDndGrabHandler for State {
-    fn send(&mut self, _mime_type: String, _fd: OwnedFd, _seat: Seat<Self>) {}
-}
+impl WaylandDndGrabHandler for State {}
 
 impl CompositorHandler for State {
     fn compositor_state(&mut self) -> &mut CompositorState {

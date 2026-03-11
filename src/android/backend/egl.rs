@@ -67,7 +67,7 @@ unsafe impl EGLNativeSurface for AndroidNativeSurface {
 }
 
 fn create_egl_display(
-    handle: AndroidNdkWindowHandle,
+    _handle: AndroidNdkWindowHandle,
 ) -> Result<EGLDisplay, Box<dyn std::error::Error>> {
     // Load the EGL library
     let lib = unsafe { libloading::Library::new("libEGL.so") }?;
@@ -78,7 +78,7 @@ fn create_egl_display(
         .expect("Failed to get EGL display");
 
     // Initialize the display
-    let (major, minor) = egl.initialize(display)?;
+    let (_major, _minor) = egl.initialize(display)?;
 
     // Choose an EGL configuration
     let config_attribs = [khronos_egl::NONE];
@@ -103,15 +103,12 @@ fn create_egl_display(
 /// trait, from a given [`WindowAttributes`] struct, as well as given
 /// [`GlAttributes`] for further customization of the rendering pipeline and a
 /// corresponding [`WinitEventLoop`].
-pub fn bind_egl(event_loop: &ActiveEventLoop) -> WinitGraphicsBackend<GlesRenderer> {
-    #[allow(deprecated)]
-    let window = Arc::new(
-        event_loop
-            .create_window(WindowAttributes::default())
-            .expect("Failed to create window"),
-    );
+pub fn bind_egl(event_loop: &dyn ActiveEventLoop) -> WinitGraphicsBackend<GlesRenderer> {
+    let window: Box<dyn WinitWindow> = event_loop
+        .create_window(WindowAttributes::default())
+        .expect("Failed to create window");
 
-    let handle = window.window_handle().map(|handle| handle.as_raw());
+    let handle = (&*window).window_handle().map(|handle| handle.as_raw());
     let (display, context, surface) = match handle {
         Ok(RawWindowHandle::AndroidNdk(handle)) => {
             let display = create_egl_display(handle);
@@ -165,7 +162,7 @@ pub fn bind_egl(event_loop: &ActiveEventLoop) -> WinitGraphicsBackend<GlesRender
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
 
     WinitGraphicsBackend {
-        window: window.clone(),
+        window,
         display,
         egl_surface: surface,
         damage_tracking,
@@ -197,7 +194,7 @@ pub struct WinitGraphicsBackend<R> {
     renderer: R,
     display: EGLDisplay,
     egl_surface: EGLSurface,
-    window: Arc<WinitWindow>,
+    window: Box<dyn WinitWindow>,
     damage_tracking: bool,
     bind_size: Option<Size<i32, Physical>>,
 }
@@ -209,7 +206,7 @@ where
 {
     /// Window size of the underlying window
     pub fn window_size(&self) -> Size<i32, Physical> {
-        let (w, h): (i32, i32) = self.window.inner_size().into();
+        let (w, h): (i32, i32) = self.window.surface_size().into();
         (w, h).into()
     }
 
@@ -219,8 +216,8 @@ where
     }
 
     /// Reference to the underlying window
-    pub fn window(&self) -> &WinitWindow {
-        &self.window
+    pub fn window(&self) -> &dyn WinitWindow {
+        &*self.window
     }
 
     /// Access the underlying renderer

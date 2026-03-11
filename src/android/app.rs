@@ -36,7 +36,9 @@ impl App {
 }
 
 impl ApplicationHandler for App {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+    fn can_create_surfaces(&mut self, _event_loop: &dyn ActiveEventLoop) {}
+
+    fn resumed(&mut self, event_loop: &dyn ActiveEventLoop) {
         // Initialize the Wayland backend by binding EGL to the winit window.
         let winit = bind_egl(event_loop);
         let window_size = winit.window_size();
@@ -53,6 +55,7 @@ impl ApplicationHandler for App {
                 subpixel: Subpixel::HorizontalRgb,
                 make: "Android".into(),
                 model: "Wayland Launcher".into(),
+                serial_number: String::new(),
             },
         );
 
@@ -77,7 +80,7 @@ impl ApplicationHandler for App {
         launch();
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &dyn ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         let event = centralize(event, &mut self.backend);
         handle(event, &mut self.backend, event_loop);
     }
