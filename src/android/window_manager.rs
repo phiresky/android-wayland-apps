@@ -25,7 +25,7 @@ pub enum WindowEvent {
     SurfaceCreated { window_id: u32, native_window: *mut c_void },
     SurfaceChanged { window_id: u32, width: i32, height: i32 },
     SurfaceDestroyed { window_id: u32 },
-    WindowClosed { window_id: u32 },
+    WindowClosed { window_id: u32, is_finishing: bool },
     Touch { window_id: u32, action: i32, x: f32, y: f32 },
     Key { window_id: u32, key_code: i32, action: i32, meta_state: i32 },
 }
@@ -254,10 +254,12 @@ extern "system" fn Java_io_github_phiresky_wayland_1android_WaylandWindowActivit
     _env: JNIEnv,
     _class: JObject,
     window_id: i32,
+    is_finishing: bool,
 ) {
-    log::info!("JNI: windowClosed window_id={}", window_id);
+    log::info!("JNI: windowClosed window_id={} is_finishing={}", window_id, is_finishing);
     send_event(WindowEvent::WindowClosed {
         window_id: window_id as u32,
+        is_finishing,
     });
 }
 

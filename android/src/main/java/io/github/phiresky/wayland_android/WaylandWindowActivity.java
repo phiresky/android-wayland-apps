@@ -58,7 +58,9 @@ public class WaylandWindowActivity extends Activity implements SurfaceHolder.Cal
     @Override
     protected void onDestroy() {
         super.onDestroy();
-        nativeWindowClosed(windowId);
+        // isFinishing() = true when user closed the window (back, X button, finish())
+        // isFinishing() = false when Android is destroying for config change / memory
+        nativeWindowClosed(windowId, isFinishing());
     }
 
     @Override
@@ -89,7 +91,7 @@ public class WaylandWindowActivity extends Activity implements SurfaceHolder.Cal
     private static native void nativeSurfaceCreated(int windowId, Surface surface);
     private static native void nativeSurfaceChanged(int windowId, int width, int height);
     private static native void nativeSurfaceDestroyed(int windowId);
-    private static native void nativeWindowClosed(int windowId);
+    private static native void nativeWindowClosed(int windowId, boolean isFinishing);
     private static native boolean nativeOnTouchEvent(int windowId, int action, float x, float y);
     private static native boolean nativeOnKeyEvent(int windowId, int keyCode, int action, int metaState);
 }

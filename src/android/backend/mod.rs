@@ -14,11 +14,13 @@ use smithay::{
 };
 use crate::android::compositor::Compositor;
 use crate::android::window_manager::WindowManager;
+use winit::platform::android::activity::AndroidApp;
 
 pub struct WaylandBackend {
     pub compositor: Compositor,
     pub graphic_renderer: Option<WinitGraphicsBackend<GlesRenderer>>,
     pub window_manager: Option<WindowManager>,
+    pub android_app: AndroidApp,
     pub clock: Clock<Monotonic>,
     pub key_counter: u32,
     pub scale_factor: f64,

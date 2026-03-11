@@ -195,14 +195,15 @@ impl OutputHandler for State {}
 
 impl XdgDecorationHandler for State {
     fn new_decoration(&mut self, toplevel: ToplevelSurface) {
-        // Tell clients we handle decorations server-side (i.e. no CSD needed)
+        log::info!("new_decoration: telling client to use server-side decorations");
         toplevel.with_pending_state(|state| {
             state.decoration_mode = Some(DecorationMode::ServerSide);
         });
+        toplevel.send_pending_configure();
     }
 
-    fn request_mode(&mut self, toplevel: ToplevelSurface, _mode: DecorationMode) {
-        // Always force server-side (no CSD) regardless of client preference
+    fn request_mode(&mut self, toplevel: ToplevelSurface, mode: DecorationMode) {
+        log::info!("request_mode: client requested {:?}, forcing ServerSide", mode);
         toplevel.with_pending_state(|state| {
             state.decoration_mode = Some(DecorationMode::ServerSide);
         });
@@ -212,6 +213,7 @@ impl XdgDecorationHandler for State {
     }
 
     fn unset_mode(&mut self, toplevel: ToplevelSurface) {
+        log::info!("unset_mode: forcing ServerSide");
         toplevel.with_pending_state(|state| {
             state.decoration_mode = Some(DecorationMode::ServerSide);
         });

@@ -35,6 +35,7 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = true  // required for extractNativeLibs=true
+            keepDebugSymbols += "**/*.so"
         }
     }
 }

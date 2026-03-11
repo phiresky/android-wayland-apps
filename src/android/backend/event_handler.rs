@@ -12,7 +12,8 @@ use smithay::backend::renderer::{Color32F, Frame, Renderer};
 use smithay::input::keyboard::FilterResult;
 use smithay::input::{pointer, touch};
 use smithay::utils::{Rectangle, Transform, SERIAL_COUNTER};
-use smithay::wayland::shell::xdg::ToplevelSurface;
+use smithay::wayland::compositor as wl_compositor;
+use smithay::wayland::shell::xdg::{ToplevelSurface, XdgToplevelSurfaceData};
 use smithay::{
     backend::input::{
         AbsolutePositionEvent, Axis, ButtonState, Event, InputEvent, KeyboardKeyEvent,
@@ -21,6 +22,7 @@ use smithay::{
     output::{Mode, Scale},
 };
 use std::sync::Arc;
+use std::time::Instant;
 use winit::event_loop::ActiveEventLoop;
 
 /// Get the first toplevel (fallback for main window / single-window mode).
@@ -94,6 +96,9 @@ pub fn handle(
             // --- 5. Render main window (background) ---
             render_main_window(backend);
 
+            // --- 6. Update status overlay ---
+            update_status_overlay(backend);
+
             // Request next frame
             if let Some(winit) = backend.graphic_renderer.as_ref() {
                 winit.window().request_redraw();
@@ -115,7 +120,10 @@ pub fn handle(
                 );
             }
         }
-        _ => (),
+        CentralizedEvent::Focus(focused) => {
+            log::info!("Focus changed: {focused}");
+        }
+        CentralizedEvent::Unsupported => {}
     }
 }
 
@@ -185,14 +193,18 @@ fn process_window_events(backend: &mut WaylandBackend) {
                         log::info!("Surface destroyed for window_id={}", window_id);
                     }
             }
-            WindowEvent::WindowClosed { window_id } => {
-                // Send close to the Wayland client
-                if let Some(wm) = backend.window_manager.as_ref()
-                    && let Some(window) = wm.windows.get(&window_id) {
-                        window.toplevel.send_close();
+            WindowEvent::WindowClosed { window_id, is_finishing } => {
+                if is_finishing {
+                    // User actually closed the window — tell the Wayland client
+                    if let Some(wm) = backend.window_manager.as_ref()
+                        && let Some(window) = wm.windows.get(&window_id) {
+                            window.toplevel.send_close();
+                        }
+                    if let Some(wm) = backend.window_manager.as_mut() {
+                        wm.remove_window(window_id);
                     }
-                if let Some(wm) = backend.window_manager.as_mut() {
-                    wm.remove_window(window_id);
+                } else {
+                    log::info!("Window {} destroyed by Android (config change), keeping toplevel alive", window_id);
                 }
             }
             WindowEvent::Touch {
@@ -306,6 +318,84 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
             let _ = winit.submit_surface(egl_surface);
         }
     }
+}
+
+/// Update the status overlay on the main NativeActivity with client info.
+fn update_status_overlay(backend: &WaylandBackend) {
+    static LAST_UPDATE: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+
+    let Ok(mut last) = LAST_UPDATE.lock() else { return };
+    let now = Instant::now();
+    if let Some(t) = *last {
+        if now.duration_since(t).as_millis() < 1000 {
+            return;
+        }
+    }
+    *last = Some(now);
+    drop(last);
+
+    let toplevels = backend.compositor.state.xdg_shell_state.toplevel_surfaces();
+    let num_clients = backend.compositor.clients.len();
+    let num_toplevels = toplevels.len();
+
+    let mut info = format!("Clients: {}  Toplevels: {}\n", num_clients, num_toplevels);
+
+    if let Some(wm) = backend.window_manager.as_ref() {
+        for (id, window) in &wm.windows {
+            let title = wl_compositor::with_states(window.toplevel.wl_surface(), |states| {
+                states
+                    .data_map
+                    .get::<XdgToplevelSurfaceData>()
+                    .and_then(|data| data.lock().ok())
+                    .and_then(|attrs| attrs.title.clone())
+                    .unwrap_or_default()
+            });
+            let has_surface = window.egl_surface.is_some();
+            info.push_str(&format!(
+                "  [{}] {}  {}x{}  {}\n",
+                id,
+                if title.is_empty() { "(untitled)" } else { &title },
+                window.size.w,
+                window.size.h,
+                if has_surface { "visible" } else { "hidden" },
+            ));
+        }
+    }
+
+    if let Err(e) = send_status_jni(&backend.android_app, &info) {
+        log::error!("Status overlay JNI call failed: {e}");
+    } else {
+        log::info!("Status overlay: {}", info.trim());
+    }
+}
+
+fn send_status_jni(android_app: &winit::platform::android::activity::AndroidApp, text: &str) -> Result<(), jni::errors::Error> {
+    let vm = unsafe { jni::JavaVM::from_raw(android_app.vm_as_ptr() as *mut _) }?;
+    let mut env = vm.attach_current_thread()?;
+    let activity = unsafe { jni::objects::JObject::from_raw(android_app.activity_as_ptr() as *mut _) };
+
+    let class_loader = env
+        .call_method(&activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])?
+        .l()?;
+    let class_name = env.new_string("io.github.phiresky.wayland_android.MainActivity")?;
+    let main_class = env
+        .call_method(
+            &class_loader,
+            "loadClass",
+            "(Ljava/lang/String;)Ljava/lang/Class;",
+            &[jni::objects::JValue::Object(&class_name)],
+        )?
+        .l()?;
+
+    let jtext = env.new_string(text)?;
+    env.call_static_method(
+        unsafe { jni::objects::JClass::from_raw(main_class.as_raw()) },
+        "updateStatus",
+        "(Ljava/lang/String;)V",
+        &[jni::objects::JValue::Object(&jtext)],
+    )?;
+
+    Ok(())
 }
 
 /// Render the main NativeActivity window (dark background).
@@ -588,6 +678,11 @@ fn handle_winit_input(event: InputEvent<WinitInput>, backend: &mut WaylandBacken
                 },
             );
             pointer.frame(&mut compositor.state);
+        }
+        other @ (InputEvent::DeviceAdded { .. }
+        | InputEvent::DeviceRemoved { .. }
+        | InputEvent::TouchFrame { .. }) => {
+            log::info!("Unhandled input event: {:?}", other);
         }
         InputEvent::PointerAxis { event } => {
             let horizontal_amount = event

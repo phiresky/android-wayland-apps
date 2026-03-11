@@ -31,6 +31,7 @@ impl App {
                 compositor,
                 graphic_renderer: None,
                 window_manager: None,
+                android_app: android_app.clone(),
                 clock: Clock::<Monotonic>::new(),
                 key_counter: 0,
                 scale_factor: 1.0,
@@ -114,5 +115,17 @@ impl ApplicationHandler for App {
 
         let event = centralize(event, &mut self.backend);
         handle(event, &mut self.backend, event_loop);
+    }
+
+    fn destroy_surfaces(&mut self, _event_loop: &dyn ActiveEventLoop) {
+        log::info!("destroy_surfaces called");
+    }
+
+    fn suspended(&mut self, _event_loop: &dyn ActiveEventLoop) {
+        log::info!("App suspended");
+    }
+
+    fn memory_warning(&mut self, _event_loop: &dyn ActiveEventLoop) {
+        log::warn!("Memory warning received");
     }
 }

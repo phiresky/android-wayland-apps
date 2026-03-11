@@ -87,6 +87,10 @@ fn android_main(android_app: AndroidApp) {
     if let Err(e) = event_loop.run_app(app) {
         log::error!("Failed to run app: {e}");
     }
+
+    // Exit the process so Android starts fresh on next launch.
+    // ndk-context panics if ANativeActivity_onCreate runs twice in the same process.
+    std::process::exit(0);
 }
 
 // ---- JNI helpers for SetupOverlay ----

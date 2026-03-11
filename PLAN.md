@@ -55,53 +55,74 @@ Goal: `weston-terminal` (or `foot`) renders in the single NativeActivity window.
 - [x] Fix absolute symlink to relative (so it resolves outside proot)
 - [x] Remove manual `adb push` workaround
 
-## Milestone 2: Multi-window (Activity-per-toplevel)
+## Milestone 2: Multi-window (Activity-per-toplevel) [DONE]
 
 Goal: each XDG toplevel gets its own Android Activity.
 
-### 2a. Java Activity class
+### 2a. Java Activity class [DONE]
 
-- [ ] Create a Java/Kotlin WaylandWindowActivity class
-- [ ] Activity receives a window ID via Intent extras
-- [ ] Activity creates a SurfaceView and passes the Surface to native code via JNI
-- [ ] Register JNI functions for native code to call back (create activity, destroy activity)
+- [x] WaylandWindowActivity class with SurfaceView
+- [x] Activity receives window_id via Intent extras
+- [x] SurfaceHolder callbacks → JNI (nativeSurfaceCreated/Changed/Destroyed)
+- [x] Touch and key events forwarded via JNI
+- [x] FLAG_ACTIVITY_NEW_DOCUMENT | FLAG_ACTIVITY_MULTIPLE_TASK for separate recents
 
-### 2b. Compositor window management
+### 2b. Compositor window management [DONE]
 
-- [ ] When xdg_toplevel is created, call JNI to launch new WaylandWindowActivity
-- [ ] Map each toplevel to an Activity (window_id → surface mapping)
-- [ ] Create a separate EGL surface for each Activity's window
-- [ ] Render each client's buffer to its own Activity's EGL surface
-- [ ] When xdg_toplevel is destroyed, finish the corresponding Activity
+- [x] WindowManager maps toplevel → window_id → Activity
+- [x] Launch Activity via JNI (using app classloader, not system classloader)
+- [x] Create separate EGLSurface per Activity via ANativeWindow
+- [x] Render each client's buffer to its own Activity's EGL surface
+- [x] xdg_toplevel destroy → finish the corresponding Activity
 
-### 2c. Display/output per window
+### 2c. Display/output per window [DONE]
 
-- [ ] Each Activity reports its size to the compositor
-- [ ] Compositor sends xdg_toplevel configure with the Activity's dimensions
-- [ ] Handle Activity lifecycle: pause/resume/destroy
+- [x] SurfaceChanged → configure toplevel with Activity dimensions
+- [x] Handle Activity lifecycle (isFinishing vs config change)
 
-## Milestone 3: Input routing
+## Milestone 3: Input routing [DONE]
 
 Goal: each Activity correctly routes input to its Wayland client.
 
-- [ ] Each Activity forwards touch/key events via JNI to compositor
-- [ ] Compositor identifies which client owns the Activity and dispatches events
+- [x] Each Activity forwards touch/key events via JNI with window_id
+- [x] Compositor dispatches to correct toplevel based on window_id
+- [x] Touch → pointer motion/button (ACTION_DOWN/UP/MOVE)
+- [x] Key events → keyboard input (Android keycode → Linux keycode)
+- [x] Keyboard focus set on touch-down per window
 - [ ] Handle focus: Android focus changes map to Wayland keyboard enter/leave
-- [ ] Handle pointer motion, button press, scroll
-- [ ] Handle touch (multi-touch passthrough)
-- [ ] Handle keyboard with proper keymap
+- [ ] Multi-touch passthrough (currently single-touch only)
 
-## Milestone 4: Resize
+## Milestone 4: Resize [MOSTLY DONE]
 
 Goal: Activity resize triggers proper Wayland configure round-trip.
 
-- [ ] Activity resize callback → compositor gets new dimensions
-- [ ] Compositor sends xdg_toplevel configure(width, height) to client
-- [ ] Client acks configure, submits buffer at new size
-- [ ] Compositor resizes EGL surface and renders new buffer
-- [ ] Handle split-screen, freeform window mode
+- [x] SurfaceChanged callback → compositor gets new dimensions
+- [x] Compositor sends xdg_toplevel configure(width, height) to client
+- [x] Client acks configure, submits buffer at new size
+- [x] Compositor re-renders at new size
+- [x] Works in DeX freeform window mode
+- [ ] Handle split-screen transitions gracefully
 
-## Milestone 5: Zero-copy GPU rendering
+## Milestone 5: Drop winit from main Activity
+
+Goal: the main Activity no longer needs NativeActivity or winit.
+
+Currently the main NativeActivity hosts the winit event loop which:
+1. Drives the compositor (accept clients, dispatch protocol, render)
+2. Creates the EGL context (shared by all window surfaces)
+3. Renders a useless dark background every frame (busy loop at 60fps)
+
+Each WaylandWindowActivity already has its own EGL surface. The shared EGL context
+can be created headless (PBuffer surface) without needing a window.
+
+- [ ] Create headless EGL context (PBuffer) instead of window-backed
+- [ ] Replace winit event loop with a simple loop on a background thread
+- [ ] Convert MainActivity from NativeActivity to plain Activity
+- [ ] Remove render_main_window() (eliminates busy-loop GPU waste)
+- [ ] Drive rendering from damage (Wayland commits, window events) not vsync polling
+- [ ] Status overlay shows directly in Activity layout (no EGL surface to fight)
+
+## Milestone 6: Zero-copy GPU rendering
 
 Goal: eliminate CPU copy in the rendering path.
 
@@ -112,37 +133,29 @@ Goal: eliminate CPU copy in the rendering path.
 - [ ] Fallback to SHM path for clients that don't support dmabuf
 - [ ] Benchmark: measure latency and throughput improvement
 
-## Milestone 6: Polish
+## Milestone 7: Polish
 
 - [ ] Window titles: xdg_toplevel title → Activity label (visible in recents)
 - [ ] App icons: extract client app icon → Activity icon
 - [ ] Clipboard: bridge Wayland clipboard (wl_data_device) ↔ Android clipboard
 - [ ] Lifecycle: handle Android app suspend/resume gracefully
-- [ ] First-run setup: download and extract Arch rootfs automatically
 - [ ] Error handling: graceful error messages instead of panics
-- [ ] Build automation: single command builds cargo + gradle + installs APK
 
-## Build & Deploy
+## Recent Fixes
 
-```bash
-# Build native library
-source .env
-cargo ndk -t arm64-v8a --platform 35 build --release
-
-# Build APK
-cd android && ./gradlew assembleDebug
-
-# Install and run
-adb install -r android/build/outputs/apk/debug/wayland-launcher-debug.apk
-adb shell am start -n io.github.phiresky.wayland_android/android.app.NativeActivity
-
-# View logs
-adb logcat | grep -E "android_wayland_launc|RustStdoutStderr|RustPanic|smithay"
-```
+- [x] Automated first-run setup (download rootfs, install weston via pacman)
+- [x] Setup progress overlay (SetupOverlay.java, WindowManager panel)
+- [x] bwrap shim for glycin/gdk-pixbuf (proot can't do namespaces)
+- [x] xdg-decoration: send_pending_configure in new_decoration (fixes CSD in gedit)
+- [x] Activity lifecycle: isFinishing check prevents fullscreen toggle killing apps
+- [x] process::exit(0) after event loop (prevents ndk-context double-init panic)
+- [x] keepDebugSymbols in Gradle (readable stack traces)
+- [x] Status overlay via JNI (client/toplevel info on main activity)
 
 ## Known Issues
 
-- xkb data must be manually pushed to device (workaround until bundled in APK)
-- libxkbcommon.so has hardcoded path from localdesktop (app.polarbear); overridden via XKB_CONFIG_ROOT env var
-- proot launch silently fails when Arch filesystem is not installed
-- Lots of trace-level smithay logging (should reduce to info/warn for production)
+- Main activity EGL surface renders over status overlay (needs Milestone 5)
+- Busy render loop at 60fps even when nothing changes (needs Milestone 5)
+- libxkbcommon.so has hardcoded path from localdesktop; overridden via XKB_CONFIG_ROOT
+- Single-touch only (no multi-touch passthrough yet)
+- No Wayland keyboard enter/leave on Activity focus changes
