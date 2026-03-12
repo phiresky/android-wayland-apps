@@ -166,15 +166,28 @@ fn process_window_events(backend: &mut WaylandBackend) {
                 width,
                 height,
             } => {
+                let scale = backend.scale_factor;
                 if let Some(wm) = backend.window_manager.as_mut()
                     && let Some(window) = wm.windows.get_mut(&window_id) {
                         window.size = (width, height).into();
                         window.needs_redraw = true;
+                        // Configure toplevel with logical size so apps render
+                        // at the right scale for the display density.
+                        let logical_w = (width as f64 / scale).round() as i32;
+                        let logical_h = (height as f64 / scale).round() as i32;
                         window.toplevel.with_pending_state(|state| {
-                            state.size = Some((width, height).into());
+                            state.size = Some((logical_w, logical_h).into());
                         });
                         window.toplevel.send_configure();
-                        log::info!("Window {} resized to {}x{}", window_id, width, height);
+                        // Set preferred fractional scale on the toplevel surface.
+                        wl_compositor::with_states(window.toplevel.wl_surface(), |states| {
+                            smithay::wayland::fractional_scale::with_fractional_scale(
+                                states,
+                                |fs| fs.set_preferred_scale(scale),
+                            );
+                        });
+                        log::info!("Window {} resized to {}x{} (logical {}x{}, scale {})",
+                            window_id, width, height, logical_w, logical_h, scale);
                     }
             }
             WindowEvent::SurfaceDestroyed { window_id } => {
@@ -234,6 +247,7 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
         .unwrap_or_default();
 
     let time = backend.compositor.start_time.elapsed().as_millis() as u32;
+    let scale = backend.scale_factor;
 
     for window_id in window_ids {
         // Get the toplevel and size from window manager
@@ -279,14 +293,17 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                 continue;
             };
 
-            // Offset by negative geometry origin to crop CSD shadows.
-            let render_offset = (-geo_offset.x, -geo_offset.y);
+            // Offset by negative geometry origin, scaled to physical pixels.
+            let render_offset = (
+                ((-geo_offset.x) as f64 * scale).round() as i32,
+                ((-geo_offset.y) as f64 * scale).round() as i32,
+            );
             let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
                 render_elements_from_surface_tree(
                     renderer,
                     toplevel.wl_surface(),
                     render_offset,
-                    1.0,
+                    scale,
                     1.0,
                     Kind::Unspecified,
                 );
@@ -298,7 +315,7 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
             };
 
             let _ = frame.clear(Color32F::new(0.0, 0.0, 0.0, 1.0), &[damage]);
-            let _ = draw_render_elements(&mut frame, 1.0, &elements, &[damage]);
+            let _ = draw_render_elements(&mut frame, scale, &elements, &[damage]);
             let _ = frame.finish();
 
             send_frames_surface_tree(toplevel.wl_surface(), time);
@@ -419,6 +436,11 @@ fn handle_activity_touch(
     x: f32,
     y: f32,
 ) {
+    // Convert from physical (Android) to logical (Wayland surface) coordinates.
+    let scale = backend.scale_factor;
+    let x = x as f64 / scale;
+    let y = y as f64 / scale;
+
     let toplevel = {
         let wm = match backend.window_manager.as_ref() {
             Some(wm) => wm,
@@ -453,7 +475,7 @@ fn handle_activity_touch(
                 &mut compositor.state,
                 Some((toplevel.wl_surface().clone(), (0f64, 0f64).into())),
                 &pointer::MotionEvent {
-                    location: (x as f64, y as f64).into(),
+                    location: (x, y).into(),
                     serial,
                     time,
                 },
@@ -488,7 +510,7 @@ fn handle_activity_touch(
                 &mut compositor.state,
                 Some((toplevel.wl_surface().clone(), (0f64, 0f64).into())),
                 &pointer::MotionEvent {
-                    location: (x as f64, y as f64).into(),
+                    location: (x, y).into(),
                     serial,
                     time,
                 },

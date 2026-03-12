@@ -67,8 +67,10 @@ impl ApplicationHandler for App {
         };
         let window_size = winit.window_size();
         let scale_factor = winit.scale_factor();
+        log::info!("Display: {}x{} scale={}", window_size.w, window_size.h, scale_factor);
         let size = (window_size.w, window_size.h);
         self.backend.graphic_renderer = Some(winit);
+        self.backend.scale_factor = scale_factor;
         let proxy = event_loop.create_proxy();
         self.backend.event_loop_proxy = Some(proxy.clone());
         self.backend.compositor.state.event_loop_proxy = Some(proxy);

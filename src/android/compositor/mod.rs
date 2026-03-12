@@ -3,8 +3,8 @@ pub mod bind;
 use bind::bind_socket;
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
-    delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm,
-    delegate_xdg_decoration, delegate_xdg_shell,
+    delegate_compositor, delegate_data_device, delegate_fractional_scale, delegate_output,
+    delegate_seat, delegate_shm, delegate_xdg_decoration, delegate_xdg_shell,
     input::{self, keyboard::KeyboardHandle, touch::TouchHandle, Seat, SeatHandler, SeatState},
     output::Output,
     reexports::{
@@ -33,6 +33,7 @@ use smithay::{
             PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
         },
         shm::{ShmHandler, ShmState},
+        fractional_scale::{FractionalScaleHandler, FractionalScaleManagerState},
     },
 };
 use smithay::{
@@ -63,6 +64,7 @@ pub struct State {
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
     pub xdg_decoration_state: XdgDecorationState,
+    pub fractional_scale_state: FractionalScaleManagerState,
     pub shm_state: ShmState,
     pub data_device_state: DataDeviceState,
     pub seat_state: SeatState<Self>,
@@ -198,6 +200,12 @@ impl ClientData for ClientState {
 
 impl OutputHandler for State {}
 
+impl FractionalScaleHandler for State {
+    fn new_fractional_scale(&mut self, _surface: WlSurface) {
+        // Preferred scale is set per-surface when we know the output.
+    }
+}
+
 impl XdgDecorationHandler for State {
     fn new_decoration(&mut self, toplevel: ToplevelSurface) {
         log::info!("new_decoration: telling client to use server-side decorations");
@@ -236,6 +244,7 @@ delegate_shm!(State);
 delegate_seat!(State);
 delegate_data_device!(State);
 delegate_output!(State);
+delegate_fractional_scale!(State);
 
 impl Compositor {
     pub fn build() -> Result<Compositor, Box<dyn Error>> {
@@ -257,6 +266,7 @@ impl Compositor {
             compositor_state: CompositorState::new::<State>(&dh),
             xdg_shell_state: XdgShellState::new::<State>(&dh),
             xdg_decoration_state: XdgDecorationState::new::<State>(&dh),
+            fractional_scale_state: FractionalScaleManagerState::new::<State>(&dh),
             shm_state: ShmState::new::<State>(&dh, vec![]),
             data_device_state: DataDeviceState::new::<State>(&dh),
             seat_state,
