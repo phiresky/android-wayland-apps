@@ -59,6 +59,7 @@ dependencies = [
  "anyhow",
  "jni",
  "khronos-egl",
+ "libc",
  "libloading",
  "log",
  "pathdiff",

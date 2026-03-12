@@ -95,11 +95,6 @@ pub fn handle(
 
             // --- 5. Update status overlay ---
             update_status_overlay(backend);
-
-            // Request next frame
-            if let Some(winit) = backend.graphic_renderer.as_ref() {
-                winit.window().request_redraw();
-            }
         }
         CentralizedEvent::Input(event) => {
             handle_winit_input(event, backend);
@@ -314,19 +309,24 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
             };
             let _ = winit.submit_surface(egl_surface);
         }
+        // Count rendered frame for FPS tracking.
+        if let Some(wm) = backend.window_manager.as_mut()
+            && let Some(window) = wm.windows.get_mut(&window_id)
+        {
+            window.frame_count += 1;
+        }
     }
 }
 
-/// Update the status overlay on the main NativeActivity with client info.
-fn update_status_overlay(backend: &WaylandBackend) {
+/// Update the status overlay on the main NativeActivity with client info and FPS.
+fn update_status_overlay(backend: &mut WaylandBackend) {
     static LAST_UPDATE: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
 
     let Ok(mut last) = LAST_UPDATE.lock() else { return };
     let now = Instant::now();
-    if let Some(t) = *last {
-        if now.duration_since(t).as_millis() < 1000 {
-            return;
-        }
+    let elapsed_secs = last.map(|t| now.duration_since(t).as_secs_f64()).unwrap_or(0.0);
+    if elapsed_secs > 0.0 && elapsed_secs < 1.0 {
+        return;
     }
     *last = Some(now);
     drop(last);
@@ -337,8 +337,8 @@ fn update_status_overlay(backend: &WaylandBackend) {
 
     let mut info = format!("Clients: {}  Toplevels: {}\n", num_clients, num_toplevels);
 
-    if let Some(wm) = backend.window_manager.as_ref() {
-        for (id, window) in &wm.windows {
+    if let Some(wm) = backend.window_manager.as_mut() {
+        for (id, window) in &mut wm.windows {
             let title = wl_compositor::with_states(window.toplevel.wl_surface(), |states| {
                 states
                     .data_map
@@ -348,13 +348,20 @@ fn update_status_overlay(backend: &WaylandBackend) {
                     .unwrap_or_default()
             });
             let has_surface = window.egl_surface.is_some();
+            let fps = if elapsed_secs > 0.0 {
+                window.frame_count as f64 / elapsed_secs
+            } else {
+                0.0
+            };
+            window.frame_count = 0;
             info.push_str(&format!(
-                "  [{}] {}  {}x{}  {}\n",
+                "  [{}] {}  {}x{}  {}  {:.1} fps\n",
                 id,
                 if title.is_empty() { "(untitled)" } else { &title },
                 window.size.w,
                 window.size.h,
                 if has_surface { "visible" } else { "hidden" },
+                fps,
             ));
         }
     }

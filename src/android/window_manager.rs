@@ -10,6 +10,7 @@ use jni::JNIEnv;
 use smithay::backend::egl::EGLSurface;
 use smithay::utils::{Physical, Size};
 use smithay::wayland::shell::xdg::ToplevelSurface;
+use winit::event_loop::EventLoopProxy;
 use winit::platform::android::activity::AndroidApp;
 use winit::raw_window_handle::AndroidNdkWindowHandle;
 
@@ -35,6 +36,9 @@ unsafe impl Send for WindowEvent {}
 /// Global channel sender for JNI callbacks to post events.
 static EVENT_SENDER: Mutex<Option<mpsc::Sender<WindowEvent>>> = Mutex::new(None);
 
+/// Global event loop proxy for waking the main loop from JNI callbacks.
+static EVENT_LOOP_PROXY: Mutex<Option<EventLoopProxy>> = Mutex::new(None);
+
 /// State for a single window (one per XDG toplevel).
 pub struct WindowState {
     pub window_id: u32,
@@ -43,6 +47,8 @@ pub struct WindowState {
     pub egl_surface: Option<EGLSurface>,
     pub size: Size<i32, Physical>,
     pub needs_redraw: bool,
+    /// Frames rendered since last FPS sample.
+    pub frame_count: u32,
 }
 
 /// Manages the mapping between XDG toplevels and Android Activities.
@@ -56,9 +62,8 @@ pub struct WindowManager {
 impl WindowManager {
     pub fn new(android_app: AndroidApp) -> Self {
         let (tx, rx) = mpsc::channel();
-        match EVENT_SENDER.lock() {
-            Ok(mut guard) => *guard = Some(tx),
-            Err(e) => log::error!("Failed to lock EVENT_SENDER: {e}"),
+        if let Ok(mut guard) = EVENT_SENDER.lock() {
+            *guard = Some(tx);
         }
 
         Self {
@@ -82,6 +87,7 @@ impl WindowManager {
             egl_surface: None,
             size: (0, 0).into(),
             needs_redraw: true,
+            frame_count: 0,
         });
 
         self.launch_activity(window_id);
@@ -187,14 +193,24 @@ impl WindowManager {
 // JNI exports — called from WaylandWindowActivity on UI thread
 // ============================================================
 
+/// Set the event loop proxy so JNI callbacks can wake the main loop.
+pub fn set_event_loop_proxy(proxy: EventLoopProxy) {
+    if let Ok(mut guard) = EVENT_LOOP_PROXY.lock() {
+        *guard = Some(proxy);
+    }
+}
+
 fn send_event(event: WindowEvent) {
-    match EVENT_SENDER.lock() {
-        Ok(guard) => {
-            if let Some(tx) = guard.as_ref() {
-                let _ = tx.send(event);
-            }
-        }
-        Err(e) => log::error!("Failed to lock EVENT_SENDER: {e}"),
+    if let Ok(guard) = EVENT_SENDER.lock()
+        && let Some(tx) = guard.as_ref()
+    {
+        let _ = tx.send(event);
+    }
+    // Wake the event loop so it processes the event promptly.
+    if let Ok(guard) = EVENT_LOOP_PROXY.lock()
+        && let Some(proxy) = guard.as_ref()
+    {
+        proxy.wake_up();
     }
 }
 

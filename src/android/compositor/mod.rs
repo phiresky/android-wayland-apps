@@ -44,6 +44,7 @@ use smithay::{
     },
 };
 use std::{error::Error, time::Instant};
+use winit::event_loop::EventLoopProxy;
 
 pub struct Compositor {
     pub state: State,
@@ -68,6 +69,8 @@ pub struct State {
     pub size: Size<i32, Logical>,
     /// New toplevels queued by XdgShellHandler, drained by the main loop.
     pub pending_toplevels: Vec<ToplevelSurface>,
+    /// Proxy to wake the event loop when clients commit buffers.
+    pub event_loop_proxy: Option<EventLoopProxy>,
 }
 
 impl BufferHandler for State {
@@ -134,6 +137,10 @@ impl CompositorHandler for State {
 
     fn commit(&mut self, surface: &WlSurface) {
         on_commit_buffer_handler::<Self>(surface);
+        // Wake the event loop to render the new content.
+        if let Some(proxy) = &self.event_loop_proxy {
+            proxy.wake_up();
+        }
     }
 }
 
@@ -255,6 +262,7 @@ impl Compositor {
             seat_state,
             size: (1920, 1080).into(),
             pending_toplevels: Vec::new(),
+            event_loop_proxy: None,
         };
 
         Ok(Compositor {

@@ -156,8 +156,6 @@ pub fn bind_egl(event_loop: &dyn ActiveEventLoop) -> Result<WinitGraphicsBackend
         .map_err(|e| format!("Failed to create GLES Renderer: {e}"))?;
     let damage_tracking = display.supports_damage();
 
-    event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
-
     Ok(WinitGraphicsBackend {
         window,
         display,

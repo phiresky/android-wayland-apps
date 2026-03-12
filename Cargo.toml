@@ -23,6 +23,7 @@ wayland-protocols = "0.32.6"
 khronos-egl = { version = "6.0.0", features = ["dynamic"] }
 libloading = "0.8.6"
 jni = "0.21.1"
+libc = "0.2"
 smithay = { version = "0.7.0", default-features = false, features = [
     "wayland-protocols",
     "wayland-server",

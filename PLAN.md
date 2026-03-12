@@ -118,8 +118,11 @@ can be created headless (PBuffer surface) without needing a window.
 - [ ] Create headless EGL context (PBuffer) instead of window-backed
 - [ ] Replace winit event loop with a simple loop on a background thread
 - [ ] Convert MainActivity from NativeActivity to plain Activity
-- [ ] Remove render_main_window() (eliminates busy-loop GPU waste)
-- [ ] Drive rendering from damage (Wayland commits, window events) not vsync polling
+- [x] Remove render_main_window() (eliminates busy-loop GPU waste)
+- [x] Drive rendering from damage (Wayland commits, window events) not vsync polling
+  - ControlFlow::Wait instead of Poll
+  - EventLoopProxy::wake_up() from JNI callbacks, Wayland commits, and socket watcher
+  - Background thread polls listener + display fds with libc::poll()
 - [ ] Status overlay shows directly in Activity layout (no EGL surface to fight)
 
 ## Milestone 6: Zero-copy GPU rendering
@@ -155,7 +158,6 @@ Goal: eliminate CPU copy in the rendering path.
 ## Known Issues
 
 - Main activity EGL surface renders over status overlay (needs Milestone 5)
-- Busy render loop at 60fps even when nothing changes (needs Milestone 5)
 - libxkbcommon.so has hardcoded path from localdesktop; overridden via XKB_CONFIG_ROOT
 - Single-touch only (no multi-touch passthrough yet)
 - No Wayland keyboard enter/leave on Activity focus changes

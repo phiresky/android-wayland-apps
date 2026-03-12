@@ -14,6 +14,7 @@ use smithay::{
 };
 use crate::android::compositor::Compositor;
 use crate::android::window_manager::WindowManager;
+use winit::event_loop::EventLoopProxy;
 use winit::platform::android::activity::AndroidApp;
 
 pub struct WaylandBackend {
@@ -21,6 +22,7 @@ pub struct WaylandBackend {
     pub graphic_renderer: Option<WinitGraphicsBackend<GlesRenderer>>,
     pub window_manager: Option<WindowManager>,
     pub android_app: AndroidApp,
+    pub event_loop_proxy: Option<EventLoopProxy>,
     pub clock: Clock<Monotonic>,
     pub key_counter: u32,
     pub scale_factor: f64,
