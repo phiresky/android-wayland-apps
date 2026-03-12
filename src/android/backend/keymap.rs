@@ -1,5 +1,88 @@
 use winit::keyboard::{KeyCode, NativeKeyCode, PhysicalKey};
+use winit::platform::android::activity::input::Keycode;
 
+/// Convert an Android KeyEvent keycode (raw i32 from JNI) to a keycode for smithay.
+/// Smithay expects xkb keycodes (evdev + 8), not raw evdev scancodes,
+/// because it subtracts 8 when sending to Wayland clients.
+pub fn android_keycode_to_smithay(keycode: i32) -> Option<u32> {
+    let android = Keycode::from(keycode as u32);
+    let physical = android_keycode_to_physical(android);
+    physicalkey_to_scancode(physical).map(|evdev| evdev + 8)
+}
+
+/// Map Android Keycode to winit PhysicalKey.
+/// Mirrors winit-android's keycodes.rs (to_physical_key).
+fn android_keycode_to_physical(keycode: Keycode) -> PhysicalKey {
+    use KeyCode::*;
+    PhysicalKey::Code(match keycode {
+        Keycode::A => KeyA, Keycode::B => KeyB, Keycode::C => KeyC,
+        Keycode::D => KeyD, Keycode::E => KeyE, Keycode::F => KeyF,
+        Keycode::G => KeyG, Keycode::H => KeyH, Keycode::I => KeyI,
+        Keycode::J => KeyJ, Keycode::K => KeyK, Keycode::L => KeyL,
+        Keycode::M => KeyM, Keycode::N => KeyN, Keycode::O => KeyO,
+        Keycode::P => KeyP, Keycode::Q => KeyQ, Keycode::R => KeyR,
+        Keycode::S => KeyS, Keycode::T => KeyT, Keycode::U => KeyU,
+        Keycode::V => KeyV, Keycode::W => KeyW, Keycode::X => KeyX,
+        Keycode::Y => KeyY, Keycode::Z => KeyZ,
+
+        Keycode::Keycode0 => Digit0, Keycode::Keycode1 => Digit1,
+        Keycode::Keycode2 => Digit2, Keycode::Keycode3 => Digit3,
+        Keycode::Keycode4 => Digit4, Keycode::Keycode5 => Digit5,
+        Keycode::Keycode6 => Digit6, Keycode::Keycode7 => Digit7,
+        Keycode::Keycode8 => Digit8, Keycode::Keycode9 => Digit9,
+
+        Keycode::Numpad0 => Numpad0, Keycode::Numpad1 => Numpad1,
+        Keycode::Numpad2 => Numpad2, Keycode::Numpad3 => Numpad3,
+        Keycode::Numpad4 => Numpad4, Keycode::Numpad5 => Numpad5,
+        Keycode::Numpad6 => Numpad6, Keycode::Numpad7 => Numpad7,
+        Keycode::Numpad8 => Numpad8, Keycode::Numpad9 => Numpad9,
+        Keycode::NumpadAdd => NumpadAdd, Keycode::NumpadSubtract => NumpadSubtract,
+        Keycode::NumpadMultiply => NumpadMultiply, Keycode::NumpadDivide => NumpadDivide,
+        Keycode::NumpadEnter => NumpadEnter, Keycode::NumpadEquals => NumpadEqual,
+        Keycode::NumpadComma => NumpadComma, Keycode::NumpadDot => NumpadDecimal,
+        Keycode::NumLock => NumLock,
+
+        Keycode::DpadUp => ArrowUp, Keycode::DpadDown => ArrowDown,
+        Keycode::DpadLeft => ArrowLeft, Keycode::DpadRight => ArrowRight,
+
+        Keycode::F1 => F1, Keycode::F2 => F2, Keycode::F3 => F3,
+        Keycode::F4 => F4, Keycode::F5 => F5, Keycode::F6 => F6,
+        Keycode::F7 => F7, Keycode::F8 => F8, Keycode::F9 => F9,
+        Keycode::F10 => F10, Keycode::F11 => F11, Keycode::F12 => F12,
+
+        Keycode::Space => Space, Keycode::Escape => Escape,
+        Keycode::Enter => Enter, Keycode::Tab => Tab,
+        Keycode::Del => Backspace, Keycode::ForwardDel => Delete,
+
+        Keycode::PageUp => PageUp, Keycode::PageDown => PageDown,
+        Keycode::MoveHome => Home, Keycode::MoveEnd => End, Keycode::Insert => Insert,
+
+        Keycode::Comma => Comma, Keycode::Period => Period,
+        Keycode::Minus => Minus, Keycode::Equals => Equal,
+        Keycode::LeftBracket => BracketLeft, Keycode::RightBracket => BracketRight,
+        Keycode::Backslash => Backslash, Keycode::Semicolon => Semicolon,
+        Keycode::Apostrophe => Quote, Keycode::Grave => Backquote,
+        Keycode::Slash => Slash,
+
+        Keycode::AltLeft => AltLeft, Keycode::AltRight => AltRight,
+        Keycode::ShiftLeft => ShiftLeft, Keycode::ShiftRight => ShiftRight,
+        Keycode::CtrlLeft => ControlLeft, Keycode::CtrlRight => ControlRight,
+        Keycode::CapsLock => CapsLock, Keycode::ScrollLock => ScrollLock,
+        Keycode::MetaLeft => MetaLeft, Keycode::MetaRight => MetaRight,
+
+        Keycode::MediaNext => MediaTrackNext, Keycode::MediaPrevious => MediaTrackPrevious,
+        Keycode::MediaPlayPause => MediaPlayPause, Keycode::MediaStop => MediaStop,
+        Keycode::VolumeUp => AudioVolumeUp, Keycode::VolumeDown => AudioVolumeDown,
+        Keycode::VolumeMute => AudioVolumeMute,
+
+        Keycode::Sysrq => PrintScreen, Keycode::Break => Pause,
+
+        _ => return PhysicalKey::Unidentified(NativeKeyCode::Android(u32::from(keycode))),
+    })
+}
+
+/// Map winit PhysicalKey to Linux evdev scancode.
+/// From localdesktop's keymap.rs.
 pub fn physicalkey_to_scancode(key: PhysicalKey) -> Option<u32> {
     let code = match key {
         PhysicalKey::Code(code) => code,

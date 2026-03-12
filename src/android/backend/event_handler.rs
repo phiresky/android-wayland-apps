@@ -362,7 +362,7 @@ fn update_status_overlay(backend: &mut WaylandBackend) {
     let num_clients = backend.compositor.clients.len();
     let num_toplevels = toplevels.len();
 
-    let mut info = format!("Clients: {}  Toplevels: {}\n", num_clients, num_toplevels);
+    let mut info = format!("Clients: {}  Toplevels: {}  Scale: {:.2}\n", num_clients, num_toplevels, backend.scale_factor);
 
     if let Some(wm) = backend.window_manager.as_mut() {
         for (id, window) in &mut wm.windows {
@@ -436,11 +436,6 @@ fn handle_activity_touch(
     x: f32,
     y: f32,
 ) {
-    // Convert from physical (Android) to logical (Wayland surface) coordinates.
-    let scale = backend.scale_factor;
-    let x = x as f64 / scale;
-    let y = y as f64 / scale;
-
     let toplevel = {
         let wm = match backend.window_manager.as_ref() {
             Some(wm) => wm,
@@ -451,6 +446,20 @@ fn handle_activity_touch(
             None => return,
         }
     };
+
+    // Convert from physical (Android) to logical (Wayland surface) coordinates.
+    // Add geometry offset because we render at -geo_offset to crop CSD shadows,
+    // so touch position 0,0 in the Activity corresponds to geo_offset in the surface.
+    let scale = backend.scale_factor;
+    let geo_offset = wl_compositor::with_states(toplevel.wl_surface(), |states| {
+        states.cached_state.get::<SurfaceCachedState>()
+            .current()
+            .geometry
+            .map(|g| g.loc)
+            .unwrap_or_default()
+    });
+    let x = x as f64 / scale + geo_offset.x as f64;
+    let y = y as f64 / scale + geo_offset.y as f64;
 
     let compositor = &mut backend.compositor;
     let serial = SERIAL_COUNTER.next_serial();
@@ -543,16 +552,20 @@ fn handle_activity_key(
     let serial = SERIAL_COUNTER.next_serial();
     let time = compositor.start_time.elapsed().as_millis() as u32;
 
+    // Set keyboard focus only if this surface doesn't already have it.
+    // Calling set_focus on every key event floods the client with keymap data and causes ANR.
     if let Some(kb) = &compositor.keyboard {
-        kb.set_focus(
-            &mut compositor.state,
-            Some(toplevel.wl_surface().clone()),
-            serial,
-        );
+        let wl_surface = toplevel.wl_surface().clone();
+        let needs_focus = kb.current_focus().as_ref() != Some(&wl_surface);
+        if needs_focus {
+            kb.set_focus(&mut compositor.state, Some(wl_surface), serial);
+        }
     }
 
-    // Android keycode to Linux keycode (rough offset)
-    let linux_keycode = (key_code - 7).max(0) as u32;
+    let Some(linux_keycode) = super::keymap::android_keycode_to_smithay(key_code) else {
+        log::debug!("Unmapped Android keycode: {}", key_code);
+        return;
+    };
     let key_state = if action == 0 {
         smithay::backend::input::KeyState::Pressed
     } else {
@@ -735,3 +748,4 @@ fn handle_winit_input(event: InputEvent<WinitInput>, backend: &mut WaylandBacken
         _ => {}
     }
 }
+

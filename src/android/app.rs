@@ -53,10 +53,10 @@ impl App {
 
 impl ApplicationHandler for App {
     fn can_create_surfaces(&mut self, event_loop: &dyn ActiveEventLoop) {
-        // Initialize the Wayland backend by binding EGL to the winit window.
-        // In winit 0.31, the native window is only available in can_create_surfaces.
+        // Bind EGL to the (new) winit window.
+        // This is called on first launch AND after destroy_surfaces/recreate cycles.
         if self.backend.graphic_renderer.is_some() {
-            return; // Already initialized (e.g. after suspend/resume cycle)
+            return; // Surface still valid
         }
         let winit = match bind_egl(event_loop) {
             Ok(w) => w,
@@ -76,49 +76,67 @@ impl ApplicationHandler for App {
         self.backend.compositor.state.event_loop_proxy = Some(proxy);
         self.backend.compositor.state.size = size.into();
 
-        // Create the Wayland output representing the Android display.
-        let output = Output::new(
-            "Android Wayland Launcher".into(),
-            PhysicalProperties {
-                size: size.into(),
-                subpixel: Subpixel::HorizontalRgb,
-                make: "Android".into(),
-                model: "Wayland Launcher".into(),
-                serial_number: String::new(),
-            },
-        );
+        let first_init = self.backend.compositor.output.is_none();
 
-        let dh = self.backend.compositor.display.handle();
-        let _global = output.create_global::<State>(&dh);
-        output.change_current_state(
-            Some(Mode {
-                size: size.into(),
-                refresh: 60000,
-            }),
-            Some(Transform::Normal),
-            Some(Scale::Fractional(scale_factor)),
-            Some((0, 0).into()),
-        );
+        if first_init {
+            // First-time initialization: create output, window manager, socket watcher.
+            let output = Output::new(
+                "Android Wayland Launcher".into(),
+                PhysicalProperties {
+                    size: size.into(),
+                    subpixel: Subpixel::HorizontalRgb,
+                    make: "Android".into(),
+                    model: "Wayland Launcher".into(),
+                    serial_number: String::new(),
+                },
+            );
 
-        self.backend.compositor.output.replace(output);
+            let dh = self.backend.compositor.display.handle();
+            let _global = output.create_global::<State>(&dh);
+            output.change_current_state(
+                Some(Mode {
+                    size: size.into(),
+                    refresh: 60000,
+                }),
+                Some(Transform::Normal),
+                Some(Scale::Fractional(scale_factor)),
+                Some((0, 0).into()),
+            );
 
-        // Create the window manager for multi-window support.
-        let android_app = self.backend.android_app.clone();
-        if let Some(proxy) = self.backend.event_loop_proxy.clone() {
-            window_manager::set_event_loop_proxy(proxy);
-        }
-        self.backend.window_manager = Some(WindowManager::new(android_app.clone()));
+            self.backend.compositor.output.replace(output);
 
-        // Show setup overlay now that the window is ready.
-        if !self.setup_done.load(Ordering::Acquire) {
-            let _ = show_setup_overlay(&android_app);
-        }
+            // Create the window manager for multi-window support.
+            let android_app = self.backend.android_app.clone();
+            if let Some(proxy) = self.backend.event_loop_proxy.clone() {
+                window_manager::set_event_loop_proxy(proxy);
+            }
+            self.backend.window_manager = Some(WindowManager::new(android_app.clone()));
 
-        // Spawn a background thread to watch Wayland fds and wake the event loop.
-        let listener_fd = self.backend.compositor.listener.as_raw_fd();
-        let display_fd = self.backend.compositor.display.as_fd().as_raw_fd();
-        if let Some(proxy) = self.backend.event_loop_proxy.clone() {
-            spawn_socket_watcher(listener_fd, display_fd, proxy);
+            // Show setup overlay now that the window is ready.
+            if !self.setup_done.load(Ordering::Acquire) {
+                let _ = show_setup_overlay(&android_app);
+            }
+
+            // Spawn a background thread to watch Wayland fds and wake the event loop.
+            let listener_fd = self.backend.compositor.listener.as_raw_fd();
+            let display_fd = self.backend.compositor.display.as_fd().as_raw_fd();
+            if let Some(proxy) = self.backend.event_loop_proxy.clone() {
+                spawn_socket_watcher(listener_fd, display_fd, proxy);
+            }
+        } else {
+            // Reinit after surface destruction — update output mode if size changed.
+            log::info!("Reinitializing EGL surface after destroy/recreate cycle");
+            if let Some(output) = self.backend.compositor.output.as_ref() {
+                output.change_current_state(
+                    Some(Mode {
+                        size: size.into(),
+                        refresh: 60000,
+                    }),
+                    Some(Transform::Normal),
+                    Some(Scale::Fractional(scale_factor)),
+                    Some((0, 0).into()),
+                );
+            }
         }
 
         // Launch the proot environment once setup is complete.
@@ -144,7 +162,9 @@ impl ApplicationHandler for App {
     }
 
     fn destroy_surfaces(&mut self, _event_loop: &dyn ActiveEventLoop) {
-        log::info!("destroy_surfaces called");
+        log::info!("destroy_surfaces: dropping EGL renderer");
+        // Drop the stale EGL surface so can_create_surfaces will reinitialize it.
+        self.backend.graphic_renderer = None;
     }
 
     fn suspended(&mut self, _event_loop: &dyn ActiveEventLoop) {

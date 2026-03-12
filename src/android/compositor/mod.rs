@@ -93,8 +93,12 @@ impl XdgShellHandler for State {
         self.pending_toplevels.push(surface);
     }
 
-    fn new_popup(&mut self, _surface: PopupSurface, _positioner: PositionerState) {
-        // Handle popup creation here
+    fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {
+        // Send initial configure so the client doesn't block waiting for it.
+        // Popups are rendered as subsurfaces of their parent toplevel.
+        if let Err(e) = surface.send_configure() {
+            log::warn!("Failed to send popup configure: {:?}", e);
+        }
     }
 
     fn grab(&mut self, _surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {

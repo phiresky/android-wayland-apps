@@ -14,7 +14,7 @@
         <activity
             android:name="io.github.phiresky.wayland_android.MainActivity"
             android:exported="true"
-            android:configChanges="orientation|keyboardHidden|screenSize|screenLayout|smallestScreenSize">
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|screenLayout|smallestScreenSize|uiMode|density|navigation">
 
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -35,7 +35,7 @@
             android:documentLaunchMode="always"
             android:stateNotNeeded="true"
             android:noHistory="true"
-            android:configChanges="orientation|keyboardHidden|screenSize|screenLayout|smallestScreenSize" />
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|screenLayout|smallestScreenSize|uiMode|density|navigation" />
     </application>
 
 </manifest>
