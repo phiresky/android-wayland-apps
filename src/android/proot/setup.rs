@@ -329,12 +329,7 @@ fn install_dependencies() {
     }
 }
 
-/// Remove bwrap (bubblewrap) from the rootfs.
-///
-/// glycin (used by gdk-pixbuf for image loading) tries to sandbox loaders via
-/// bwrap --unshare-all, which fails inside proot because Linux namespaces
-/// aren't available. Without the binary, glycin falls back to unsandboxed mode.
-/// Replace bwrap with a shim that runs the command directly without sandboxing.
+/// Replace bwrap (bubblewrap) with a shim that runs commands unsandboxed.
 ///
 /// glycin (gdk-pixbuf image loader) invokes bwrap to sandbox sub-processes.
 /// bwrap uses Linux namespaces (--unshare-all) which don't work inside proot.

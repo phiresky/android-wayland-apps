@@ -93,10 +93,7 @@ pub fn handle(
             // --- 4. Render each Activity window ---
             render_activity_windows(backend);
 
-            // --- 5. Render main window (background) ---
-            render_main_window(backend);
-
-            // --- 6. Update status overlay ---
+            // --- 5. Update status overlay ---
             update_status_overlay(backend);
 
             // Request next frame
@@ -362,10 +359,9 @@ fn update_status_overlay(backend: &WaylandBackend) {
         }
     }
 
+    log::debug!("Status: {}", info.trim());
     if let Err(e) = send_status_jni(&backend.android_app, &info) {
         log::error!("Status overlay JNI call failed: {e}");
-    } else {
-        log::info!("Status overlay: {}", info.trim());
     }
 }
 
@@ -396,35 +392,6 @@ fn send_status_jni(android_app: &winit::platform::android::activity::AndroidApp,
     )?;
 
     Ok(())
-}
-
-/// Render the main NativeActivity window (dark background).
-fn render_main_window(backend: &mut WaylandBackend) {
-    let winit = match backend.graphic_renderer.as_mut() {
-        Some(w) => w,
-        None => return,
-    };
-
-    let size = winit.window_size();
-    let damage = Rectangle::from_size(size);
-
-    {
-        let Ok((renderer, mut framebuffer)) = winit.bind() else {
-            return;
-        };
-        let Ok(mut frame) = renderer.render(&mut framebuffer, size, Transform::Flipped180) else {
-            return;
-        };
-        let _ = frame.clear(Color32F::new(0.05, 0.05, 0.1, 1.0), &[damage]);
-        let _ = frame.finish();
-    }
-    // bind() borrows released — now submit
-    let Some(winit) = backend.graphic_renderer.as_mut() else {
-        return;
-    };
-    if let Err(e) = winit.submit(Some(&[damage])) {
-        log::error!("Failed to submit main window: {:?}", e);
-    }
 }
 
 /// Handle touch events from a WaylandWindowActivity.

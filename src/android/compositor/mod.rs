@@ -68,8 +68,6 @@ pub struct State {
     pub size: Size<i32, Logical>,
     /// New toplevels queued by XdgShellHandler, drained by the main loop.
     pub pending_toplevels: Vec<ToplevelSurface>,
-    /// Toplevels that have been closed, drained by the main loop.
-    pub closed_toplevels: Vec<ToplevelSurface>,
 }
 
 impl BufferHandler for State {
@@ -238,7 +236,7 @@ impl Compositor {
         let dh = display.handle();
 
         let mut seat_state = SeatState::new();
-        let mut seat = seat_state.new_wl_seat(&dh, "Local Desktop");
+        let mut seat = seat_state.new_wl_seat(&dh, "Android Wayland");
 
         let listener = bind_socket()?;
         let clients = Vec::new();
@@ -257,7 +255,6 @@ impl Compositor {
             seat_state,
             size: (1920, 1080).into(),
             pending_toplevels: Vec::new(),
-            closed_toplevels: Vec::new(),
         };
 
         Ok(Compositor {

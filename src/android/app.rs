@@ -17,7 +17,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 pub struct App {
-    pub android_app: AndroidApp,
     pub backend: WaylandBackend,
     pub setup_done: Arc<AtomicBool>,
     pub launched: bool,
@@ -36,7 +35,6 @@ impl App {
                 key_counter: 0,
                 scale_factor: 1.0,
             },
-            android_app: android_app.clone(),
             setup_done,
             launched: false,
         })
@@ -98,11 +96,12 @@ impl ApplicationHandler for App {
         self.backend.compositor.output.replace(output);
 
         // Create the window manager for multi-window support.
-        self.backend.window_manager = Some(WindowManager::new(self.android_app.clone()));
+        let android_app = self.backend.android_app.clone();
+        self.backend.window_manager = Some(WindowManager::new(android_app.clone()));
 
         // Show setup overlay now that the window is ready.
         if !self.setup_done.load(Ordering::Acquire) {
-            let _ = show_setup_overlay(&self.android_app);
+            let _ = show_setup_overlay(&android_app);
         }
 
         // Launch the proot environment once setup is complete.

@@ -160,9 +160,6 @@ impl WindowManager {
         )?;
 
         log::info!("Launched WaylandWindowActivity for window_id={}", window_id);
-
-        // Prevent JNI ref leak
-        unsafe { vm.detach_current_thread() };
         Ok(())
     }
 
