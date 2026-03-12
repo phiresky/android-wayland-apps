@@ -13,7 +13,7 @@ use smithay::input::keyboard::FilterResult;
 use smithay::input::{pointer, touch};
 use smithay::utils::{Rectangle, Transform, SERIAL_COUNTER};
 use smithay::wayland::compositor as wl_compositor;
-use smithay::wayland::shell::xdg::{ToplevelSurface, XdgToplevelSurfaceData};
+use smithay::wayland::shell::xdg::{SurfaceCachedState, ToplevelSurface, XdgToplevelSurfaceData};
 use smithay::{
     backend::input::{
         AbsolutePositionEvent, Axis, ButtonState, Event, InputEvent, KeyboardKeyEvent,
@@ -237,7 +237,7 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
 
     for window_id in window_ids {
         // Get the toplevel and size from window manager
-        let (toplevel, size) = {
+        let (toplevel, size, geo_offset) = {
             let wm = match backend.window_manager.as_ref() {
                 Some(wm) => wm,
                 None => continue,
@@ -246,7 +246,15 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                 Some(w) => w,
                 None => continue,
             };
-            (window.toplevel.clone(), window.size)
+            // Get the geometry (content area excluding CSD shadows).
+            let geo_loc = wl_compositor::with_states(window.toplevel.wl_surface(), |states| {
+                states.cached_state.get::<SurfaceCachedState>()
+                    .current()
+                    .geometry
+                    .map(|g| g.loc)
+                    .unwrap_or_default()
+            });
+            (window.toplevel.clone(), window.size, geo_loc)
         };
 
         let damage = Rectangle::from_size(size);
@@ -271,11 +279,13 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                 continue;
             };
 
+            // Offset by negative geometry origin to crop CSD shadows.
+            let render_offset = (-geo_offset.x, -geo_offset.y);
             let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
                 render_elements_from_surface_tree(
                     renderer,
                     toplevel.wl_surface(),
-                    (0, 0),
+                    render_offset,
                     1.0,
                     1.0,
                     Kind::Unspecified,

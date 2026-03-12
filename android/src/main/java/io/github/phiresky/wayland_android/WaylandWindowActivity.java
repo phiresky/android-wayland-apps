@@ -2,7 +2,6 @@ package io.github.phiresky.wayland_android;
 
 import android.app.Activity;
 import android.os.Bundle;
-import android.view.MotionEvent;
 import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
@@ -37,6 +36,13 @@ public class WaylandWindowActivity extends Activity implements SurfaceHolder.Cal
         surfaceView = new SurfaceView(this);
         setContentView(surfaceView);
         surfaceView.getHolder().addCallback(this);
+
+        // Handle touch on the SurfaceView directly so coordinates are relative
+        // to the rendering surface, not the Activity window (which includes
+        // DeX title bar / window chrome).
+        surfaceView.setOnTouchListener((v, event) -> {
+            return nativeOnTouchEvent(windowId, event.getAction(), event.getX(), event.getY());
+        });
     }
 
     @Override
@@ -61,14 +67,6 @@ public class WaylandWindowActivity extends Activity implements SurfaceHolder.Cal
         // isFinishing() = true when user closed the window (back, X button, finish())
         // isFinishing() = false when Android is destroying for config change / memory
         nativeWindowClosed(windowId, isFinishing());
-    }
-
-    @Override
-    public boolean onTouchEvent(MotionEvent event) {
-        if (nativeOnTouchEvent(windowId, event.getAction(), event.getX(), event.getY())) {
-            return true;
-        }
-        return super.onTouchEvent(event);
     }
 
     @Override
