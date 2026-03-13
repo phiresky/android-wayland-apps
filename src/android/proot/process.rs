@@ -102,6 +102,7 @@ impl ArchProcess {
             .arg("--bind=/dev")
             .arg("--bind=/proc")
             .arg("--bind=/sys")
+            .arg("--bind=/storage")
             .arg(format!("--bind={}/tmp:/dev/shm", config::ARCH_FS_ROOT));
 
         process

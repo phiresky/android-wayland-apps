@@ -9,6 +9,7 @@ pub const USERNAME: &str = "alarm";
 
 /// Packages to install in the Arch rootfs during setup.
 pub const PACKAGES: &[&str] = &[
+    "ca-certificates",
     "gedit",
     "mesa-utils",
     "qt6-wayland",

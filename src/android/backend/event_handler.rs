@@ -200,11 +200,27 @@ fn process_window_events(backend: &mut WaylandBackend) {
                         window.size = (width, height).into();
                         window.needs_redraw = true;
                         let logical_w = (width as f64 / scale).round() as i32;
-                        let logical_h = (height as f64 / scale).round() as i32;
+                        let logical_h_from_content = (height as f64 / scale).round() as i32;
+                        // If the user has resized the window (width changed or height grew
+                        // beyond the initial preferred size), clear preferred_size so the
+                        // client fills the new window without artificial caps or centering.
+                        if let Some(p) = window.preferred_size {
+                            if logical_w != p.w || logical_h_from_content > p.h {
+                                window.preferred_size = None;
+                            }
+                        }
+                        // If we know the client's preferred size (set at launch), cap the
+                        // configure to that height. DeX enforces a minimum window height
+                        // larger than small dialogs need, so we avoid over-configuring.
+                        let logical_h = window.preferred_size
+                            .map(|p| p.h.min(logical_h_from_content))
+                            .unwrap_or(logical_h_from_content);
                         match &window.surface_kind {
                             SurfaceKind::Toplevel(toplevel) => {
                                 // Configure toplevel with logical size so apps render
                                 // at the right scale for the display density.
+                                log::info!("SurfaceChanged window_id={window_id}: physical={width}x{height} -> configure logical={logical_w}x{logical_h} (preferred={:?}, scale={scale})",
+                                    window.preferred_size);
                                 toplevel.with_pending_state(|state| {
                                     state.size = Some((logical_w, logical_h).into());
                                 });
@@ -297,8 +313,8 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
     let scale = backend.scale_factor;
 
     for window_id in window_ids {
-        // Get the wl_surface and size from window manager
-        let (wl_surface, size, geo_offset) = {
+        // Get the wl_surface, size, and preferred_size from window manager
+        let (wl_surface, size, geo_offset, preferred_size) = {
             let wm = match backend.window_manager.as_ref() {
                 Some(wm) => wm,
                 None => continue,
@@ -322,10 +338,16 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                 }
                 SurfaceKind::Layer(_) => Default::default(),
             };
-            (surface, window.size, geo_offset)
+            (surface, window.size, geo_offset, window.preferred_size)
         };
 
         let damage = Rectangle::from_size(size);
+
+        // If DeX gave us a taller window than the client wants, center content vertically.
+        let center_y_physical = preferred_size.map(|p| {
+            let preferred_h = (p.h as f64 * scale).round() as i32;
+            ((size.h - preferred_h) / 2).max(0)
+        }).unwrap_or(0);
 
         // Render in a scoped block so borrows are released before submit
         {
@@ -348,9 +370,11 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
             };
 
             // Offset by negative geometry origin, scaled to physical pixels.
+            // Add vertical centering so the content sits in the middle of the
+            // EGL surface when DeX enforces a minimum height larger than the client wants.
             let render_offset = (
                 ((-geo_offset.x) as f64 * scale).round() as i32,
-                ((-geo_offset.y) as f64 * scale).round() as i32,
+                ((-geo_offset.y) as f64 * scale).round() as i32 + center_y_physical,
             );
             // Collect popup elements first (rendered on top of the main surface).
             let mut elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
@@ -521,8 +545,11 @@ fn set_soft_keyboard_visible(
 /// Launch Activities for windows whose clients have committed geometry,
 /// or after a timeout for slow clients. Uses setLaunchBounds for correct DeX sizing.
 fn launch_pending_activities(backend: &mut WaylandBackend) {
+    use smithay::utils::Size;
     let scale = backend.scale_factor;
-    let pending: Vec<(u32, Option<(i32, i32)>)> = backend.window_manager.as_ref()
+    // Collect (window_id, bounds, preferred_logical_size)
+    let pending: Vec<(u32, Option<(i32, i32)>, Option<Size<i32, smithay::utils::Logical>>)> =
+        backend.window_manager.as_ref()
         .map(|wm| {
             wm.windows.iter()
                 .filter(|(_, w)| !w.activity_launched)
@@ -544,12 +571,14 @@ fn launch_pending_activities(backend: &mut WaylandBackend) {
                          (s.h as f64 * scale).round() as i32 + DEX_TITLE_BAR_HEIGHT)
                     }).filter(|&(w, h)| w > 0 && h > 0);
 
+                    log::info!("launch_pending: window_id={id} geo_size={geo_size:?} bounds={bounds:?} elapsed={}ms",
+                        w.created_time.elapsed().as_millis());
                     if bounds.is_some() {
                         // Client has committed with geometry — launch with bounds.
-                        Some((id, bounds))
+                        Some((id, bounds, geo_size))
                     } else if w.created_time.elapsed() > std::time::Duration::from_millis(500) {
                         // Timeout — launch without bounds (full-size fallback).
-                        Some((id, None))
+                        Some((id, None, None))
                     } else {
                         None // Still waiting for client to commit.
                     }
@@ -559,7 +588,15 @@ fn launch_pending_activities(backend: &mut WaylandBackend) {
         .unwrap_or_default();
 
     if let Some(wm) = backend.window_manager.as_mut() {
-        for (window_id, bounds) in pending {
+        for (window_id, bounds, preferred) in pending {
+            // Store preferred logical size so SurfaceChanged doesn't over-configure.
+            // DeX enforces a minimum window height larger than small dialogs need;
+            // we cap the Wayland configure to the client's preferred size instead.
+            if let Some(pref) = preferred {
+                if let Some(w) = wm.windows.get_mut(&window_id) {
+                    w.preferred_size = Some(pref);
+                }
+            }
             wm.launch_activity(window_id, bounds);
         }
     }
@@ -607,9 +644,14 @@ fn resolve_surface_and_coords(
     };
     // Convert from physical (Android) to logical (Wayland surface) coordinates.
     // Touch position 0,0 in the Activity corresponds to geo_offset in the surface.
+    // If content is centered vertically (due to DeX minimum height), subtract that offset.
     let scale = backend.scale_factor;
+    let center_y_logical = window.preferred_size.map(|p| {
+        let preferred_h = (p.h as f64 * scale).round() as i32;
+        ((window.size.h - preferred_h) / 2).max(0) as f64 / scale
+    }).unwrap_or(0.0);
     let lx = x as f64 / scale + geo_offset.x as f64;
-    let ly = y as f64 / scale + geo_offset.y as f64;
+    let ly = y as f64 / scale - center_y_logical + geo_offset.y as f64;
     let point: Point<f64, _> = (lx, ly).into();
 
     // Check popups first — menus/dropdowns take priority over the main surface.

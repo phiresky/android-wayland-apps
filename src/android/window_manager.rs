@@ -10,7 +10,7 @@ use jni::sys::jobject;
 use jni::JNIEnv;
 use smithay::backend::egl::EGLSurface;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::utils::{Physical, Size};
+use smithay::utils::{Logical, Physical, Size};
 use smithay::wayland::shell::wlr_layer::LayerSurface;
 use smithay::wayland::shell::xdg::ToplevelSurface;
 use raw_window_handle::AndroidNdkWindowHandle;
@@ -83,6 +83,10 @@ pub struct WindowState {
     pub activity_launched: bool,
     /// When this window was created. Used for fallback launch timeout.
     pub created_time: Instant,
+    /// The client's preferred logical size from its initial geometry commit.
+    /// DeX enforces a minimum window height larger than small dialogs need,
+    /// so we cap the Wayland configure to this size and center the content.
+    pub preferred_size: Option<Size<i32, Logical>>,
 }
 
 /// Manages the mapping between XDG toplevels and Android Activities.
@@ -122,6 +126,7 @@ impl WindowManager {
             frame_count: 0,
             activity_launched: false,
             created_time: Instant::now(),
+            preferred_size: None,
         });
 
         window_id
