@@ -5,7 +5,6 @@ pub(crate) mod keymap;
 pub use event_handler::{compositor_tick, dispatch_wayland};
 pub use egl::{init_egl_headless, CompositorRenderer};
 
-use smithay::utils::{Clock, Monotonic};
 use crate::android::compositor::Compositor;
 use crate::android::window_manager::WindowManager;
 
@@ -16,8 +15,6 @@ pub struct WaylandBackend {
     pub renderer: Option<CompositorRenderer>,
     pub window_manager: Option<WindowManager>,
     pub wake_fd: RawFd,
-    pub clock: Clock<Monotonic>,
-    pub key_counter: u32,
     pub scale_factor: f64,
 }
 

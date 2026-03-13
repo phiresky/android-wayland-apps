@@ -54,33 +54,6 @@ pub fn init(env: &mut JNIEnv, activity: &JObject) {
     });
 }
 
-/// Get the cached JavaVM.
-pub fn vm() -> &'static JavaVM {
-    match CONTEXT.get() {
-        Some(ctx) => &ctx.vm,
-        None => match VM.get() {
-            Some(vm) => vm,
-            None => panic!("JNI context not initialized"),
-        },
-    }
-}
-
-/// Get a JNIEnv for the current thread.
-pub fn attach_env() -> jni::AttachGuard<'static> {
-    match vm().attach_current_thread() {
-        Ok(env) => env,
-        Err(e) => panic!("Failed to attach JNI env: {e}"),
-    }
-}
-
-/// Get the global Activity reference.
-pub fn activity() -> &'static GlobalRef {
-    match CONTEXT.get() {
-        Some(ctx) => &ctx.activity,
-        None => panic!("JNI context not initialized — nativeInit not called yet"),
-    }
-}
-
 /// Run a closure with a JNIEnv and the Activity object.
 /// This is the primary way to make JNI calls throughout the codebase.
 pub fn with_jni<F, R>(f: F) -> Result<R, jni::errors::Error>

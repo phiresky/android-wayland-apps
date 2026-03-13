@@ -8,7 +8,7 @@ use crate::android::{
     window_manager::{self, WindowManager},
 };
 use smithay::output::{Mode, Output, PhysicalProperties, Scale, Subpixel};
-use smithay::utils::{Clock, Monotonic, Transform};
+use smithay::utils::Transform;
 use std::os::unix::io::{AsFd, AsRawFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -81,8 +81,6 @@ pub fn run_compositor_loop(setup_done: Arc<AtomicBool>) {
         renderer: Some(renderer),
         window_manager: Some(window_manager),
         wake_fd,
-        clock: Clock::<Monotonic>::new(),
-        key_counter: 0,
         scale_factor,
     };
 
