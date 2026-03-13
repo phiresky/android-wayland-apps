@@ -35,5 +35,6 @@ pub fn install_cmd() -> String {
 /// Desktop file basenames to hide from the launcher (without .desktop extension).
 pub const LAUNCHER_IGNORE: &[&str] = &["avahi-discover", "bssh", "bvnc"];
 
-/// Extra launcher entries as "name\0exec" pairs (apps without .desktop files).
-pub const LAUNCHER_EXTRA: &[(&str, &str)] = &[("EGL Gears", "eglgears_wayland")];
+/// Extra launcher entries as (name, exec, icon) triples (apps without .desktop files).
+/// Icon is the hicolor theme name (looked up in rootfs), or empty string for none.
+pub const LAUNCHER_EXTRA: &[(&str, &str, &str)] = &[("EGL Gears", "eglgears_wayland", "@drawable/ic_eglgears")];

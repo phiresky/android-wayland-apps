@@ -66,11 +66,13 @@ public class LauncherActivity extends Activity {
         if (ignore != null) ignoreList = ignore;
         String[] extraNames = getIntent().getStringArrayExtra("extra_names");
         String[] extraExecs = getIntent().getStringArrayExtra("extra_execs");
+        String[] extraIcons = getIntent().getStringArrayExtra("extra_icons");
         if (extraNames != null && extraExecs != null) {
             int len = Math.min(extraNames.length, extraExecs.length);
             extraApps = new DesktopEntry[len];
             for (int i = 0; i < len; i++) {
-                extraApps[i] = new DesktopEntry(extraNames[i], extraExecs[i], null);
+                String icon = (extraIcons != null && i < extraIcons.length) ? extraIcons[i] : null;
+                extraApps[i] = new DesktopEntry(extraNames[i], extraExecs[i], icon);
             }
         }
 
@@ -218,6 +220,17 @@ public class LauncherActivity extends Activity {
 
     private Drawable loadIcon(String iconName, int targetSize) {
         if (iconName == null || iconName.isEmpty()) return null;
+
+        // If it's a bundled APK drawable (@drawable/name), load from resources
+        if (iconName.startsWith("@drawable/")) {
+            String resName = iconName.substring("@drawable/".length());
+            int resId = getResources().getIdentifier(resName, "drawable", getPackageName());
+            if (resId != 0) {
+                Drawable d = getDrawable(resId);
+                if (d != null) return d;
+            }
+            return null;
+        }
 
         // If it's an absolute path, try it directly
         if (iconName.startsWith("/")) {

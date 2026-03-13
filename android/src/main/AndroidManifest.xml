@@ -12,6 +12,7 @@
 
     <application
         android:label="Wayland Launcher"
+        android:icon="@mipmap/ic_launcher"
         android:extractNativeLibs="true">
 
         <activity

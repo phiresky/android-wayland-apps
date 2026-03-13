@@ -35,10 +35,12 @@ fn open_launcher_activity() -> Result<(), jni::errors::Error> {
             &[JValue::Object(&env.new_string("ignore")?.into()), JValue::Object(&ignore)],
         )?;
 
-        let extra_names: Vec<&str> = config::LAUNCHER_EXTRA.iter().map(|(n, _)| *n).collect();
-        let extra_execs: Vec<&str> = config::LAUNCHER_EXTRA.iter().map(|(_, e)| *e).collect();
+        let extra_names: Vec<&str> = config::LAUNCHER_EXTRA.iter().map(|(n, _, _)| *n).collect();
+        let extra_execs: Vec<&str> = config::LAUNCHER_EXTRA.iter().map(|(_, e, _)| *e).collect();
+        let extra_icons: Vec<&str> = config::LAUNCHER_EXTRA.iter().map(|(_, _, i)| *i).collect();
         let names_arr = to_java_string_array(env, &extra_names)?;
         let execs_arr = to_java_string_array(env, &extra_execs)?;
+        let icons_arr = to_java_string_array(env, &extra_icons)?;
         env.call_method(
             &intent, "putExtra",
             "(Ljava/lang/String;[Ljava/lang/String;)Landroid/content/Intent;",
@@ -48,6 +50,11 @@ fn open_launcher_activity() -> Result<(), jni::errors::Error> {
             &intent, "putExtra",
             "(Ljava/lang/String;[Ljava/lang/String;)Landroid/content/Intent;",
             &[JValue::Object(&env.new_string("extra_execs")?.into()), JValue::Object(&execs_arr)],
+        )?;
+        env.call_method(
+            &intent, "putExtra",
+            "(Ljava/lang/String;[Ljava/lang/String;)Landroid/content/Intent;",
+            &[JValue::Object(&env.new_string("extra_icons")?.into()), JValue::Object(&icons_arr)],
         )?;
 
         env.call_method(
