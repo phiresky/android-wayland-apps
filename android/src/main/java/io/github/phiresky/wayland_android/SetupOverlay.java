@@ -16,7 +16,7 @@ import java.util.Collections;
 import java.util.List;
 
 /**
- * Adds a full-screen log overlay on top of the NativeActivity's EGL surface
+ * Adds a full-screen log overlay on top of the MainActivity's window
  * during first-run proot setup. Uses WindowManager to place the view above
  * the native rendering surface.
  */

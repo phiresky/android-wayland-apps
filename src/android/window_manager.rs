@@ -99,19 +99,8 @@ impl WindowManager {
         }
     }
 
-    /// Called when smithay creates a new XDG toplevel.
-    /// Allocates a window ID and launches a new Android Activity.
-    pub fn new_toplevel(&mut self, toplevel: ToplevelSurface) -> u32 {
-        self.new_window(SurfaceKind::Toplevel(toplevel))
-    }
-
-    /// Called when smithay creates a new layer surface.
-    /// Allocates a window ID and launches a new Android Activity.
-    pub fn new_layer_surface(&mut self, surface: LayerSurface) -> u32 {
-        self.new_window(SurfaceKind::Layer(surface))
-    }
-
-    fn new_window(&mut self, surface_kind: SurfaceKind) -> u32 {
+    /// Allocates a window ID and launches a new Android Activity for the surface.
+    pub(crate) fn new_window(&mut self, surface_kind: SurfaceKind) -> u32 {
         let window_id = self.next_id;
         self.next_id += 1;
 
@@ -162,9 +151,10 @@ impl WindowManager {
                 &[JValue::Object(&key), JValue::Int(window_id as i32)],
             )?;
 
-            // Add FLAG_ACTIVITY_NEW_DOCUMENT | FLAG_ACTIVITY_MULTIPLE_TASK
-            // so each window appears as a separate task in recents
-            let flags: i32 = 0x00080000 | 0x08000000; // NEW_DOCUMENT | MULTIPLE_TASK
+            // Each window appears as a separate task in recents.
+            const FLAG_ACTIVITY_NEW_DOCUMENT: i32 = 0x00080000;
+            const FLAG_ACTIVITY_MULTIPLE_TASK: i32 = 0x08000000;
+            let flags: i32 = FLAG_ACTIVITY_NEW_DOCUMENT | FLAG_ACTIVITY_MULTIPLE_TASK;
             env.call_method(
                 &intent,
                 "addFlags",
@@ -183,6 +173,11 @@ impl WindowManager {
             log::info!("Launched WaylandWindowActivity for window_id={}", window_id);
             Ok(())
         })
+    }
+
+    /// Find the window ID for a given Wayland surface.
+    pub fn find_window_id(&self, predicate: impl Fn(&SurfaceKind) -> bool) -> Option<u32> {
+        self.windows.iter().find_map(|(id, w)| predicate(&w.surface_kind).then_some(*id))
     }
 
     /// Remove a window and clean up its resources.

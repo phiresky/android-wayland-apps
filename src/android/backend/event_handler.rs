@@ -40,65 +40,39 @@ pub fn compositor_tick(backend: &mut WaylandBackend) {
 
 /// Process Wayland protocol: accept new clients, dispatch messages, flush responses.
 /// Called from both the redraw path and proxy_wake_up so the compositor keeps
-/// working even when the NativeActivity window is destroyed.
+/// working even when the Activity window is destroyed.
 pub fn dispatch_wayland(backend: &mut WaylandBackend) {
-    // Process pending toplevels: create Activity windows.
-    let pending: Vec<ToplevelSurface> =
-        backend.compositor.state.pending_toplevels.drain(..).collect();
+    // Process pending surfaces: create Activity windows for new toplevels and layers.
+    let pending: Vec<SurfaceKind> = backend.compositor.state.pending_toplevels
+        .drain(..).map(SurfaceKind::Toplevel)
+        .chain(backend.compositor.state.pending_layer_surfaces.drain(..).map(SurfaceKind::Layer))
+        .collect();
     if !pending.is_empty() {
         if let Some(wm) = backend.window_manager.as_mut() {
-            for toplevel in pending {
-                wm.new_toplevel(toplevel);
+            for surface in pending {
+                wm.new_window(surface);
             }
         }
     }
 
-    // Process pending layer surfaces: create Activity windows.
-    let pending_layers: Vec<LayerSurface> =
-        backend.compositor.state.pending_layer_surfaces.drain(..).collect();
-    if !pending_layers.is_empty() {
-        if let Some(wm) = backend.window_manager.as_mut() {
-            for layer in pending_layers {
-                wm.new_layer_surface(layer);
-            }
-        }
-    }
-
-    // Process destroyed toplevels: finish their Android Activities.
-    let destroyed: Vec<ToplevelSurface> =
+    // Process destroyed surfaces (toplevels and layers): finish their Android Activities.
+    let destroyed_toplevels: Vec<ToplevelSurface> =
         backend.compositor.state.destroyed_toplevels.drain(..).collect();
-    if !destroyed.is_empty() {
-        if let Some(wm) = backend.window_manager.as_mut() {
-            for toplevel in &destroyed {
-                let window_id = wm.windows.iter().find_map(|(id, w)| {
-                    matches!(&w.surface_kind, SurfaceKind::Toplevel(t) if *t == *toplevel)
-                        .then_some(*id)
-                });
-                if let Some(window_id) = window_id {
-                    log::info!("Toplevel destroyed, finishing Activity window_id={}", window_id);
-                    if let Err(e) = finish_activity(window_id) {
-                        log::error!("Failed to finish Activity for window_id={}: {e}", window_id);
-                    }
-                    wm.remove_window(window_id);
-                }
-            }
-        }
-    }
-
-    // Process destroyed layer surfaces: finish their Android Activities.
     let destroyed_layers: Vec<LayerSurface> =
         backend.compositor.state.destroyed_layer_surfaces.drain(..).collect();
-    if !destroyed_layers.is_empty() {
+    if !destroyed_toplevels.is_empty() || !destroyed_layers.is_empty() {
         if let Some(wm) = backend.window_manager.as_mut() {
-            for layer in &destroyed_layers {
-                let window_id = wm.windows.iter().find_map(|(id, w)| {
-                    matches!(&w.surface_kind, SurfaceKind::Layer(l) if *l == *layer)
-                        .then_some(*id)
-                });
+            // Build predicates that match the destroyed surface to its window.
+            let lookups: Vec<(&str, Option<u32>)> = destroyed_toplevels.iter()
+                .map(|t| ("Toplevel", wm.find_window_id(|sk| matches!(sk, SurfaceKind::Toplevel(wt) if *wt == *t))))
+                .chain(destroyed_layers.iter()
+                    .map(|l| ("Layer surface", wm.find_window_id(|sk| matches!(sk, SurfaceKind::Layer(wl) if *wl == *l)))))
+                .collect();
+            for (kind, window_id) in lookups {
                 if let Some(window_id) = window_id {
-                    log::info!("Layer surface destroyed, finishing Activity window_id={}", window_id);
+                    log::info!("{kind} destroyed, finishing Activity window_id={window_id}");
                     if let Err(e) = finish_activity(window_id) {
-                        log::error!("Failed to finish Activity for window_id={}: {e}", window_id);
+                        log::error!("Failed to finish Activity for window_id={window_id}: {e}");
                     }
                     wm.remove_window(window_id);
                 }
@@ -182,7 +156,7 @@ fn process_window_events(backend: &mut WaylandBackend) {
                     && let Some(window) = wm.windows.get_mut(&window_id) {
                         window.native_window = Some(native_window);
                     }
-                // Now create EGL surface (needs both winit and wm)
+                // Now create EGL surface (needs both renderer and wm)
                 let handle = backend
                     .window_manager
                     .as_ref()
@@ -421,7 +395,7 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
     }
 }
 
-/// Update the status overlay on the main NativeActivity with client info and FPS.
+/// Update the status overlay on the MainActivity with client info and FPS.
 fn update_status_overlay(backend: &mut WaylandBackend) {
     static LAST_UPDATE: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
 

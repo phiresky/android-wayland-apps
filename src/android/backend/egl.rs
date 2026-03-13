@@ -60,10 +60,6 @@ pub struct CompositorRenderer {
 }
 
 impl CompositorRenderer {
-    pub fn renderer(&mut self) -> &mut GlesRenderer {
-        &mut self.renderer
-    }
-
     pub fn create_surface_for_native_window(
         &self,
         handle: AndroidNdkWindowHandle,

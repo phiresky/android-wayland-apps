@@ -12,7 +12,7 @@ import androidx.core.app.NotificationCompat;
 
 /**
  * Foreground service that keeps the compositor process alive.
- * Without this, DeX kills the NativeActivity when more than ~5 windows are open
+ * Without this, DeX kills the MainActivity when more than ~5 windows are open
  * because it's the "oldest" window.
  */
 public class CompositorService extends Service {
