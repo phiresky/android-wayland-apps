@@ -1,13 +1,8 @@
-use winit::application::ApplicationHandler;
-use winit::event::WindowEvent;
-use winit::event_loop::ActiveEventLoop;
-use winit::platform::android::activity::AndroidApp;
-use winit::window::WindowId;
-
 use crate::android::{
-    backend::{bind_egl, centralize, handle, WaylandBackend},
+    backend::{
+        compositor_tick, dispatch_wayland, drain_wake, init_egl_headless, WaylandBackend,
+    },
     compositor::{Compositor, State},
-    main::show_setup_overlay,
     proot::launch::launch,
     window_manager::{self, WindowManager},
 };
@@ -16,199 +11,151 @@ use smithay::utils::{Clock, Monotonic, Transform};
 use std::os::unix::io::{AsFd, AsRawFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
+use android_activity::AndroidApp;
 
-pub struct App {
-    pub backend: WaylandBackend,
-    pub setup_done: Arc<AtomicBool>,
-    pub launched: bool,
-}
-
-impl App {
-    pub fn build(android_app: AndroidApp, setup_done: Arc<AtomicBool>) -> Result<Self, Box<dyn std::error::Error>> {
-        let compositor = Compositor::build()?;
-        Ok(Self {
-            backend: WaylandBackend {
-                compositor,
-                graphic_renderer: None,
-                window_manager: None,
-                android_app: android_app.clone(),
-                event_loop_proxy: None,
-                clock: Clock::<Monotonic>::new(),
-                key_counter: 0,
-                scale_factor: 1.0,
-            },
-            setup_done,
-            launched: false,
-        })
+/// Run the compositor event loop on the current thread.
+/// Called from a background thread spawned in android_main.
+/// Independent of NativeActivity lifecycle — keeps running even if the Activity is destroyed.
+pub fn run_compositor_loop(android_app: AndroidApp, setup_done: Arc<AtomicBool>) {
+    // Create eventfd for waking the compositor from JNI/Wayland commits.
+    let wake_fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK) };
+    if wake_fd < 0 {
+        log::error!("Failed to create eventfd");
+        return;
     }
 
-    fn try_launch(&mut self) {
-        if !self.launched && self.setup_done.load(Ordering::Acquire) {
-            self.backend.compositor.init_keyboard();
-            launch();
-            self.launched = true;
+    // Init headless EGL (no window surface needed).
+    let renderer = match init_egl_headless() {
+        Ok(r) => r,
+        Err(e) => {
+            log::error!("Failed to init headless EGL: {e}");
+            return;
         }
+    };
+
+    // Build compositor.
+    let mut compositor = match Compositor::build() {
+        Ok(c) => c,
+        Err(e) => {
+            log::error!("Failed to build compositor: {e}");
+            return;
+        }
+    };
+    compositor.state.wake_fd = Some(wake_fd);
+
+    // Query display density via JNI.
+    let scale_factor = get_display_density(&android_app).unwrap_or(2.0);
+    log::info!("Display density: {scale_factor}");
+
+    // Create wl_output with default size (updated when activities report dimensions).
+    let output = Output::new(
+        "Android Wayland Launcher".into(),
+        PhysicalProperties {
+            size: (1920, 1080).into(),
+            subpixel: Subpixel::HorizontalRgb,
+            make: "Android".into(),
+            model: "Wayland Launcher".into(),
+            serial_number: String::new(),
+        },
+    );
+    let dh = compositor.display.handle();
+    let _global = output.create_global::<State>(&dh);
+    output.change_current_state(
+        Some(Mode {
+            size: (1920, 1080).into(),
+            refresh: 60000,
+        }),
+        Some(Transform::Normal),
+        Some(Scale::Fractional(scale_factor)),
+        Some((0, 0).into()),
+    );
+    compositor.output = Some(output);
+
+    // Set up window manager.
+    window_manager::set_wake_fd(wake_fd);
+    let window_manager = WindowManager::new(android_app.clone());
+
+    let mut backend = WaylandBackend {
+        compositor,
+        renderer: Some(renderer),
+        window_manager: Some(window_manager),
+        android_app,
+        wake_fd,
+        clock: Clock::<Monotonic>::new(),
+        key_counter: 0,
+        scale_factor,
+    };
+
+    // Wait for rootfs setup to complete, then init keyboard and launch proot.
+    while !setup_done.load(Ordering::Acquire) {
+        // Still dispatch Wayland protocol while waiting (clients might connect early).
+        dispatch_wayland(&mut backend);
+        std::thread::sleep(Duration::from_millis(100));
     }
-}
+    backend.compositor.init_keyboard();
+    launch();
+    log::info!("Compositor loop started");
 
-impl ApplicationHandler for App {
-    fn can_create_surfaces(&mut self, event_loop: &dyn ActiveEventLoop) {
-        // Bind EGL to the (new) winit window.
-        // This is called on first launch AND after destroy_surfaces/recreate cycles.
-        if self.backend.graphic_renderer.is_some() {
-            return; // Surface still valid
+    // Main poll loop.
+    let listener_fd = backend.compositor.listener.as_raw_fd();
+    let display_fd = backend.compositor.display.as_fd().as_raw_fd();
+
+    let mut fds = [
+        libc::pollfd { fd: wake_fd, events: libc::POLLIN, revents: 0 },
+        libc::pollfd { fd: listener_fd, events: libc::POLLIN, revents: 0 },
+        libc::pollfd { fd: display_fd, events: libc::POLLIN, revents: 0 },
+    ];
+
+    loop {
+        for fd in &mut fds {
+            fd.revents = 0;
         }
-        let winit = match bind_egl(event_loop) {
-            Ok(w) => w,
-            Err(e) => {
-                log::error!("Failed to bind EGL: {:?}", e);
-                return;
+        // Timeout of 1000ms so status overlay updates even with no activity.
+        let ret = unsafe { libc::poll(fds.as_mut_ptr(), 3, 1000) };
+
+        if ret < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() != std::io::ErrorKind::Interrupted {
+                log::error!("Compositor poll failed: {err}");
+                break;
             }
-        };
-        let window_size = winit.window_size();
-        let scale_factor = winit.scale_factor();
-        log::info!("Display: {}x{} scale={}", window_size.w, window_size.h, scale_factor);
-        let size = (window_size.w, window_size.h);
-        self.backend.graphic_renderer = Some(winit);
-        self.backend.scale_factor = scale_factor;
-        let proxy = event_loop.create_proxy();
-        self.backend.event_loop_proxy = Some(proxy.clone());
-        self.backend.compositor.state.event_loop_proxy = Some(proxy);
-        self.backend.compositor.state.size = size.into();
-
-        let first_init = self.backend.compositor.output.is_none();
-
-        if first_init {
-            // First-time initialization: create output, window manager, socket watcher.
-            let output = Output::new(
-                "Android Wayland Launcher".into(),
-                PhysicalProperties {
-                    size: size.into(),
-                    subpixel: Subpixel::HorizontalRgb,
-                    make: "Android".into(),
-                    model: "Wayland Launcher".into(),
-                    serial_number: String::new(),
-                },
-            );
-
-            let dh = self.backend.compositor.display.handle();
-            let _global = output.create_global::<State>(&dh);
-            output.change_current_state(
-                Some(Mode {
-                    size: size.into(),
-                    refresh: 60000,
-                }),
-                Some(Transform::Normal),
-                Some(Scale::Fractional(scale_factor)),
-                Some((0, 0).into()),
-            );
-
-            self.backend.compositor.output.replace(output);
-
-            // Create the window manager for multi-window support.
-            let android_app = self.backend.android_app.clone();
-            if let Some(proxy) = self.backend.event_loop_proxy.clone() {
-                window_manager::set_event_loop_proxy(proxy);
-            }
-            self.backend.window_manager = Some(WindowManager::new(android_app.clone()));
-
-            // Show setup overlay now that the window is ready.
-            if !self.setup_done.load(Ordering::Acquire) {
-                let _ = show_setup_overlay(&android_app);
-            }
-
-            // Spawn a background thread to watch Wayland fds and wake the event loop.
-            let listener_fd = self.backend.compositor.listener.as_raw_fd();
-            let display_fd = self.backend.compositor.display.as_fd().as_raw_fd();
-            if let Some(proxy) = self.backend.event_loop_proxy.clone() {
-                spawn_socket_watcher(listener_fd, display_fd, proxy);
-            }
-        } else {
-            // Reinit after surface destruction — update output mode if size changed.
-            log::info!("Reinitializing EGL surface after destroy/recreate cycle");
-            if let Some(output) = self.backend.compositor.output.as_ref() {
-                output.change_current_state(
-                    Some(Mode {
-                        size: size.into(),
-                        refresh: 60000,
-                    }),
-                    Some(Transform::Normal),
-                    Some(Scale::Fractional(scale_factor)),
-                    Some((0, 0).into()),
-                );
-            }
+            continue;
         }
 
-        // Launch the proot environment once setup is complete.
-        self.try_launch();
-    }
-
-    fn proxy_wake_up(&mut self, event_loop: &dyn ActiveEventLoop) {
-        // Woken by JNI events or Wayland commits — trigger a redraw cycle.
-        self.try_launch();
-        if let Some(winit) = self.backend.graphic_renderer.as_ref() {
-            winit.window().request_redraw();
+        // Drain eventfd.
+        if fds[0].revents & libc::POLLIN != 0 {
+            drain_wake(wake_fd);
         }
-        // Also handle any pending events that arrived since last wake.
-        let _ = event_loop;
-    }
 
-    fn window_event(&mut self, event_loop: &dyn ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        // Check if background setup has completed and we can launch proot.
-        self.try_launch();
-
-        let event = centralize(event, &mut self.backend);
-        handle(event, &mut self.backend, event_loop);
-    }
-
-    fn destroy_surfaces(&mut self, _event_loop: &dyn ActiveEventLoop) {
-        log::info!("destroy_surfaces: dropping EGL renderer");
-        // Drop the stale EGL surface so can_create_surfaces will reinitialize it.
-        self.backend.graphic_renderer = None;
-    }
-
-    fn suspended(&mut self, _event_loop: &dyn ActiveEventLoop) {
-        log::info!("App suspended");
-    }
-
-    fn memory_warning(&mut self, _event_loop: &dyn ActiveEventLoop) {
-        log::warn!("Memory warning received");
+        compositor_tick(&mut backend);
     }
 }
 
-/// Watch Wayland socket fds and wake the event loop when there's activity.
-///
-/// Monitors both the listener socket (new client connections) and the display fd
-/// (client protocol messages). Without this, the event loop in `Wait` mode would
-/// never notice new connections or protocol messages that don't trigger a commit.
-fn spawn_socket_watcher(
-    listener_fd: std::os::unix::io::RawFd,
-    display_fd: std::os::unix::io::RawFd,
-    proxy: winit::event_loop::EventLoopProxy,
-) {
-    let _ = std::thread::Builder::new()
-        .name("wayland-fd-watcher".into())
-        .spawn(move || {
-            let mut fds = [
-                libc::pollfd { fd: listener_fd, events: libc::POLLIN, revents: 0 },
-                libc::pollfd { fd: display_fd, events: libc::POLLIN, revents: 0 },
-            ];
-            loop {
-                fds[0].revents = 0;
-                fds[1].revents = 0;
-                let ret = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
-                if ret > 0 {
-                    proxy.wake_up();
-                    // Brief pause to let the main loop process before re-polling.
-                    // Without this, we'd spin while the fd is still readable.
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                } else if ret < 0 {
-                    let err = std::io::Error::last_os_error();
-                    if err.kind() != std::io::ErrorKind::Interrupted {
-                        log::error!("Wayland fd watcher poll failed: {}", err);
-                        break;
-                    }
-                }
-            }
-        });
+/// Query the display density (scale factor) from Android DisplayMetrics via JNI.
+fn get_display_density(android_app: &AndroidApp) -> Result<f64, jni::errors::Error> {
+    let vm = unsafe { jni::JavaVM::from_raw(android_app.vm_as_ptr() as *mut _) }?;
+    let mut env = vm.attach_current_thread()?;
+    let activity =
+        unsafe { jni::objects::JObject::from_raw(android_app.activity_as_ptr() as *mut _) };
+
+    // activity.getResources().getDisplayMetrics().density
+    let resources = env
+        .call_method(
+            &activity,
+            "getResources",
+            "()Landroid/content/res/Resources;",
+            &[],
+        )?
+        .l()?;
+    let metrics = env
+        .call_method(
+            &resources,
+            "getDisplayMetrics",
+            "()Landroid/util/DisplayMetrics;",
+            &[],
+        )?
+        .l()?;
+    let density = env.get_field(&metrics, "density", "F")?.f()?;
+    Ok(density as f64)
 }

@@ -1,237 +1,92 @@
-use winit::keyboard::{KeyCode, NativeKeyCode, PhysicalKey};
-use winit::platform::android::activity::input::Keycode;
+use android_activity::input::Keycode;
 
 /// Convert an Android KeyEvent keycode (raw i32 from JNI) to a keycode for smithay.
 /// Smithay expects xkb keycodes (evdev + 8), not raw evdev scancodes,
 /// because it subtracts 8 when sending to Wayland clients.
 pub fn android_keycode_to_smithay(keycode: i32) -> Option<u32> {
     let android = Keycode::from(keycode as u32);
-    let physical = android_keycode_to_physical(android);
-    physicalkey_to_scancode(physical).map(|evdev| evdev + 8)
+    android_keycode_to_evdev(android).map(|evdev| evdev + 8)
 }
 
-/// Map Android Keycode to winit PhysicalKey.
-/// Mirrors winit-android's keycodes.rs (to_physical_key).
-fn android_keycode_to_physical(keycode: Keycode) -> PhysicalKey {
-    use KeyCode::*;
-    PhysicalKey::Code(match keycode {
-        Keycode::A => KeyA, Keycode::B => KeyB, Keycode::C => KeyC,
-        Keycode::D => KeyD, Keycode::E => KeyE, Keycode::F => KeyF,
-        Keycode::G => KeyG, Keycode::H => KeyH, Keycode::I => KeyI,
-        Keycode::J => KeyJ, Keycode::K => KeyK, Keycode::L => KeyL,
-        Keycode::M => KeyM, Keycode::N => KeyN, Keycode::O => KeyO,
-        Keycode::P => KeyP, Keycode::Q => KeyQ, Keycode::R => KeyR,
-        Keycode::S => KeyS, Keycode::T => KeyT, Keycode::U => KeyU,
-        Keycode::V => KeyV, Keycode::W => KeyW, Keycode::X => KeyX,
-        Keycode::Y => KeyY, Keycode::Z => KeyZ,
+/// Map Android Keycode directly to Linux evdev scancode.
+fn android_keycode_to_evdev(keycode: Keycode) -> Option<u32> {
+    match keycode {
+        // Letters
+        Keycode::A => Some(30), Keycode::B => Some(48), Keycode::C => Some(46),
+        Keycode::D => Some(32), Keycode::E => Some(18), Keycode::F => Some(33),
+        Keycode::G => Some(34), Keycode::H => Some(35), Keycode::I => Some(23),
+        Keycode::J => Some(36), Keycode::K => Some(37), Keycode::L => Some(38),
+        Keycode::M => Some(50), Keycode::N => Some(49), Keycode::O => Some(24),
+        Keycode::P => Some(25), Keycode::Q => Some(16), Keycode::R => Some(19),
+        Keycode::S => Some(31), Keycode::T => Some(20), Keycode::U => Some(22),
+        Keycode::V => Some(47), Keycode::W => Some(17), Keycode::X => Some(45),
+        Keycode::Y => Some(21), Keycode::Z => Some(44),
 
-        Keycode::Keycode0 => Digit0, Keycode::Keycode1 => Digit1,
-        Keycode::Keycode2 => Digit2, Keycode::Keycode3 => Digit3,
-        Keycode::Keycode4 => Digit4, Keycode::Keycode5 => Digit5,
-        Keycode::Keycode6 => Digit6, Keycode::Keycode7 => Digit7,
-        Keycode::Keycode8 => Digit8, Keycode::Keycode9 => Digit9,
+        // Digits
+        Keycode::Keycode0 => Some(11), Keycode::Keycode1 => Some(2),
+        Keycode::Keycode2 => Some(3),  Keycode::Keycode3 => Some(4),
+        Keycode::Keycode4 => Some(5),  Keycode::Keycode5 => Some(6),
+        Keycode::Keycode6 => Some(7),  Keycode::Keycode7 => Some(8),
+        Keycode::Keycode8 => Some(9),  Keycode::Keycode9 => Some(10),
 
-        Keycode::Numpad0 => Numpad0, Keycode::Numpad1 => Numpad1,
-        Keycode::Numpad2 => Numpad2, Keycode::Numpad3 => Numpad3,
-        Keycode::Numpad4 => Numpad4, Keycode::Numpad5 => Numpad5,
-        Keycode::Numpad6 => Numpad6, Keycode::Numpad7 => Numpad7,
-        Keycode::Numpad8 => Numpad8, Keycode::Numpad9 => Numpad9,
-        Keycode::NumpadAdd => NumpadAdd, Keycode::NumpadSubtract => NumpadSubtract,
-        Keycode::NumpadMultiply => NumpadMultiply, Keycode::NumpadDivide => NumpadDivide,
-        Keycode::NumpadEnter => NumpadEnter, Keycode::NumpadEquals => NumpadEqual,
-        Keycode::NumpadComma => NumpadComma, Keycode::NumpadDot => NumpadDecimal,
-        Keycode::NumLock => NumLock,
+        // Numpad
+        Keycode::Numpad0 => Some(82), Keycode::Numpad1 => Some(79),
+        Keycode::Numpad2 => Some(80), Keycode::Numpad3 => Some(81),
+        Keycode::Numpad4 => Some(75), Keycode::Numpad5 => Some(76),
+        Keycode::Numpad6 => Some(77), Keycode::Numpad7 => Some(71),
+        Keycode::Numpad8 => Some(72), Keycode::Numpad9 => Some(73),
+        Keycode::NumpadAdd => Some(78), Keycode::NumpadSubtract => Some(74),
+        Keycode::NumpadMultiply => Some(55), Keycode::NumpadDivide => Some(98),
+        Keycode::NumpadEnter => Some(96), Keycode::NumpadEquals => Some(117),
+        Keycode::NumpadComma => Some(121), Keycode::NumpadDot => Some(83),
+        Keycode::NumLock => Some(69),
 
-        Keycode::DpadUp => ArrowUp, Keycode::DpadDown => ArrowDown,
-        Keycode::DpadLeft => ArrowLeft, Keycode::DpadRight => ArrowRight,
+        // Arrow keys
+        Keycode::DpadUp => Some(103), Keycode::DpadDown => Some(108),
+        Keycode::DpadLeft => Some(105), Keycode::DpadRight => Some(106),
 
-        Keycode::F1 => F1, Keycode::F2 => F2, Keycode::F3 => F3,
-        Keycode::F4 => F4, Keycode::F5 => F5, Keycode::F6 => F6,
-        Keycode::F7 => F7, Keycode::F8 => F8, Keycode::F9 => F9,
-        Keycode::F10 => F10, Keycode::F11 => F11, Keycode::F12 => F12,
+        // Function keys
+        Keycode::F1 => Some(59), Keycode::F2 => Some(60), Keycode::F3 => Some(61),
+        Keycode::F4 => Some(62), Keycode::F5 => Some(63), Keycode::F6 => Some(64),
+        Keycode::F7 => Some(65), Keycode::F8 => Some(66), Keycode::F9 => Some(67),
+        Keycode::F10 => Some(68), Keycode::F11 => Some(87), Keycode::F12 => Some(88),
 
-        Keycode::Space => Space, Keycode::Escape => Escape,
-        Keycode::Enter => Enter, Keycode::Tab => Tab,
-        Keycode::Del => Backspace, Keycode::ForwardDel => Delete,
+        // Common keys
+        Keycode::Space => Some(57), Keycode::Escape => Some(1),
+        Keycode::Enter => Some(28), Keycode::Tab => Some(15),
+        Keycode::Del => Some(14), // Backspace
+        Keycode::ForwardDel => Some(111), // Delete
 
-        Keycode::PageUp => PageUp, Keycode::PageDown => PageDown,
-        Keycode::MoveHome => Home, Keycode::MoveEnd => End, Keycode::Insert => Insert,
+        // Navigation
+        Keycode::PageUp => Some(104), Keycode::PageDown => Some(109),
+        Keycode::MoveHome => Some(102), Keycode::MoveEnd => Some(107),
+        Keycode::Insert => Some(110),
 
-        Keycode::Comma => Comma, Keycode::Period => Period,
-        Keycode::Minus => Minus, Keycode::Equals => Equal,
-        Keycode::LeftBracket => BracketLeft, Keycode::RightBracket => BracketRight,
-        Keycode::Backslash => Backslash, Keycode::Semicolon => Semicolon,
-        Keycode::Apostrophe => Quote, Keycode::Grave => Backquote,
-        Keycode::Slash => Slash,
+        // Punctuation
+        Keycode::Comma => Some(51), Keycode::Period => Some(52),
+        Keycode::Minus => Some(12), Keycode::Equals => Some(13),
+        Keycode::LeftBracket => Some(26), Keycode::RightBracket => Some(27),
+        Keycode::Backslash => Some(43), Keycode::Semicolon => Some(39),
+        Keycode::Apostrophe => Some(40), Keycode::Grave => Some(41),
+        Keycode::Slash => Some(53),
 
-        Keycode::AltLeft => AltLeft, Keycode::AltRight => AltRight,
-        Keycode::ShiftLeft => ShiftLeft, Keycode::ShiftRight => ShiftRight,
-        Keycode::CtrlLeft => ControlLeft, Keycode::CtrlRight => ControlRight,
-        Keycode::CapsLock => CapsLock, Keycode::ScrollLock => ScrollLock,
-        Keycode::MetaLeft => MetaLeft, Keycode::MetaRight => MetaRight,
+        // Modifiers
+        Keycode::AltLeft => Some(56), Keycode::AltRight => Some(100),
+        Keycode::ShiftLeft => Some(42), Keycode::ShiftRight => Some(54),
+        Keycode::CtrlLeft => Some(29), Keycode::CtrlRight => Some(97),
+        Keycode::CapsLock => Some(58), Keycode::ScrollLock => Some(70),
+        Keycode::MetaLeft => Some(125), Keycode::MetaRight => Some(126),
 
-        Keycode::MediaNext => MediaTrackNext, Keycode::MediaPrevious => MediaTrackPrevious,
-        Keycode::MediaPlayPause => MediaPlayPause, Keycode::MediaStop => MediaStop,
-        Keycode::VolumeUp => AudioVolumeUp, Keycode::VolumeDown => AudioVolumeDown,
-        Keycode::VolumeMute => AudioVolumeMute,
+        // Media
+        Keycode::MediaNext => Some(163), Keycode::MediaPrevious => Some(165),
+        Keycode::MediaPlayPause => Some(164), Keycode::MediaStop => Some(166),
+        Keycode::VolumeUp => Some(115), Keycode::VolumeDown => Some(114),
+        Keycode::VolumeMute => Some(113),
 
-        Keycode::Sysrq => PrintScreen, Keycode::Break => Pause,
+        // Misc
+        Keycode::Sysrq => Some(99), // PrintScreen
+        Keycode::Break => Some(119), // Pause
 
-        _ => return PhysicalKey::Unidentified(NativeKeyCode::Android(u32::from(keycode))),
-    })
-}
-
-/// Map winit PhysicalKey to Linux evdev scancode.
-/// From localdesktop's keymap.rs.
-pub fn physicalkey_to_scancode(key: PhysicalKey) -> Option<u32> {
-    let code = match key {
-        PhysicalKey::Code(code) => code,
-        PhysicalKey::Unidentified(code) => {
-            return match code {
-                NativeKeyCode::Unidentified => Some(240),
-                NativeKeyCode::Xkb(raw) => Some(raw),
-                _ => None,
-            };
-        }
-    };
-
-    match code {
-        KeyCode::Escape => Some(1),
-        KeyCode::Digit1 => Some(2),
-        KeyCode::Digit2 => Some(3),
-        KeyCode::Digit3 => Some(4),
-        KeyCode::Digit4 => Some(5),
-        KeyCode::Digit5 => Some(6),
-        KeyCode::Digit6 => Some(7),
-        KeyCode::Digit7 => Some(8),
-        KeyCode::Digit8 => Some(9),
-        KeyCode::Digit9 => Some(10),
-        KeyCode::Digit0 => Some(11),
-        KeyCode::Minus => Some(12),
-        KeyCode::Equal => Some(13),
-        KeyCode::Backspace => Some(14),
-        KeyCode::Tab => Some(15),
-        KeyCode::KeyQ => Some(16),
-        KeyCode::KeyW => Some(17),
-        KeyCode::KeyE => Some(18),
-        KeyCode::KeyR => Some(19),
-        KeyCode::KeyT => Some(20),
-        KeyCode::KeyY => Some(21),
-        KeyCode::KeyU => Some(22),
-        KeyCode::KeyI => Some(23),
-        KeyCode::KeyO => Some(24),
-        KeyCode::KeyP => Some(25),
-        KeyCode::BracketLeft => Some(26),
-        KeyCode::BracketRight => Some(27),
-        KeyCode::Enter => Some(28),
-        KeyCode::ControlLeft => Some(29),
-        KeyCode::KeyA => Some(30),
-        KeyCode::KeyS => Some(31),
-        KeyCode::KeyD => Some(32),
-        KeyCode::KeyF => Some(33),
-        KeyCode::KeyG => Some(34),
-        KeyCode::KeyH => Some(35),
-        KeyCode::KeyJ => Some(36),
-        KeyCode::KeyK => Some(37),
-        KeyCode::KeyL => Some(38),
-        KeyCode::Semicolon => Some(39),
-        KeyCode::Quote => Some(40),
-        KeyCode::Backquote => Some(41),
-        KeyCode::ShiftLeft => Some(42),
-        KeyCode::Backslash => Some(43),
-        KeyCode::KeyZ => Some(44),
-        KeyCode::KeyX => Some(45),
-        KeyCode::KeyC => Some(46),
-        KeyCode::KeyV => Some(47),
-        KeyCode::KeyB => Some(48),
-        KeyCode::KeyN => Some(49),
-        KeyCode::KeyM => Some(50),
-        KeyCode::Comma => Some(51),
-        KeyCode::Period => Some(52),
-        KeyCode::Slash => Some(53),
-        KeyCode::ShiftRight => Some(54),
-        KeyCode::NumpadMultiply => Some(55),
-        KeyCode::AltLeft => Some(56),
-        KeyCode::Space => Some(57),
-        KeyCode::CapsLock => Some(58),
-        KeyCode::F1 => Some(59),
-        KeyCode::F2 => Some(60),
-        KeyCode::F3 => Some(61),
-        KeyCode::F4 => Some(62),
-        KeyCode::F5 => Some(63),
-        KeyCode::F6 => Some(64),
-        KeyCode::F7 => Some(65),
-        KeyCode::F8 => Some(66),
-        KeyCode::F9 => Some(67),
-        KeyCode::F10 => Some(68),
-        KeyCode::NumLock => Some(69),
-        KeyCode::ScrollLock => Some(70),
-        KeyCode::Numpad7 => Some(71),
-        KeyCode::Numpad8 => Some(72),
-        KeyCode::Numpad9 => Some(73),
-        KeyCode::NumpadSubtract => Some(74),
-        KeyCode::Numpad4 => Some(75),
-        KeyCode::Numpad5 => Some(76),
-        KeyCode::Numpad6 => Some(77),
-        KeyCode::NumpadAdd => Some(78),
-        KeyCode::Numpad1 => Some(79),
-        KeyCode::Numpad2 => Some(80),
-        KeyCode::Numpad3 => Some(81),
-        KeyCode::Numpad0 => Some(82),
-        KeyCode::NumpadDecimal => Some(83),
-        KeyCode::Lang5 => Some(85),
-        KeyCode::IntlBackslash => Some(86),
-        KeyCode::F11 => Some(87),
-        KeyCode::F12 => Some(88),
-        KeyCode::IntlRo => Some(89),
-        KeyCode::Lang3 => Some(90),
-        KeyCode::Lang4 => Some(91),
-        KeyCode::Convert => Some(92),
-        KeyCode::KanaMode => Some(93),
-        KeyCode::NonConvert => Some(94),
-        KeyCode::NumpadEnter => Some(96),
-        KeyCode::ControlRight => Some(97),
-        KeyCode::NumpadDivide => Some(98),
-        KeyCode::PrintScreen => Some(99),
-        KeyCode::AltRight => Some(100),
-        KeyCode::Home => Some(102),
-        KeyCode::ArrowUp => Some(103),
-        KeyCode::PageUp => Some(104),
-        KeyCode::ArrowLeft => Some(105),
-        KeyCode::ArrowRight => Some(106),
-        KeyCode::End => Some(107),
-        KeyCode::ArrowDown => Some(108),
-        KeyCode::PageDown => Some(109),
-        KeyCode::Insert => Some(110),
-        KeyCode::Delete => Some(111),
-        KeyCode::AudioVolumeMute => Some(113),
-        KeyCode::AudioVolumeDown => Some(114),
-        KeyCode::AudioVolumeUp => Some(115),
-        KeyCode::NumpadEqual => Some(117),
-        KeyCode::Pause => Some(119),
-        KeyCode::NumpadComma => Some(121),
-        KeyCode::Lang1 => Some(122),
-        KeyCode::Lang2 => Some(123),
-        KeyCode::IntlYen => Some(124),
-        KeyCode::MetaLeft => Some(125),
-        KeyCode::MetaRight => Some(126),
-        KeyCode::ContextMenu => Some(127),
-        KeyCode::MediaTrackNext => Some(163),
-        KeyCode::MediaPlayPause => Some(164),
-        KeyCode::MediaTrackPrevious => Some(165),
-        KeyCode::MediaStop => Some(166),
-        KeyCode::F13 => Some(183),
-        KeyCode::F14 => Some(184),
-        KeyCode::F15 => Some(185),
-        KeyCode::F16 => Some(186),
-        KeyCode::F17 => Some(187),
-        KeyCode::F18 => Some(188),
-        KeyCode::F19 => Some(189),
-        KeyCode::F20 => Some(190),
-        KeyCode::F21 => Some(191),
-        KeyCode::F22 => Some(192),
-        KeyCode::F23 => Some(193),
-        KeyCode::F24 => Some(194),
         _ => None,
     }
 }

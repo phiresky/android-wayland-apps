@@ -1,16 +1,14 @@
 use crate::android::{
-    app::App,
+    app::run_compositor_loop,
     proot::setup,
     utils::application_context::ApplicationContext,
 };
 use crate::core::config;
+use android_activity::{AndroidApp, MainEvent, PollEvent};
 use jni::objects::{JClass, JObject, JValue};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use winit::{
-    event_loop::{ControlFlow, EventLoop},
-    platform::android::{activity::AndroidApp, EventLoopBuilderExtAndroid},
-};
+use std::time::Duration;
 
 #[unsafe(no_mangle)]
 fn android_main(android_app: AndroidApp) {
@@ -62,30 +60,35 @@ fn android_main(android_app: AndroidApp) {
         });
     }
 
-    let event_loop = match EventLoop::builder()
-        .with_android_app(android_app.clone())
-        .build()
-    {
-        Ok(el) => el,
-        Err(e) => {
-            log::error!("Failed to create event loop: {e}");
-            return;
-        }
-    };
+    // Spawn the compositor on a background thread, independent of NativeActivity lifecycle.
+    let compositor_app = android_app.clone();
+    let compositor_done = setup_done.clone();
+    let _ = std::thread::Builder::new()
+        .name("compositor".into())
+        .spawn(move || {
+            run_compositor_loop(compositor_app, compositor_done);
+        });
 
-    event_loop.set_control_flow(ControlFlow::Wait);
-
-    let app = match App::build(android_app, setup_done) {
-        Ok(a) => a,
-        Err(e) => {
-            log::error!("Failed to build App: {e}");
-            return;
-        }
-    };
-    // winit 0.31 requires 'static for run_app; leak to satisfy that.
-    let app: &'static mut App = Box::leak(Box::new(app));
-    if let Err(e) = event_loop.run_app(app) {
-        log::error!("Failed to run app: {e}");
+    // Run a minimal event loop to handle NativeActivity lifecycle.
+    // This keeps the native thread alive and processes Android lifecycle events.
+    // The compositor runs independently on its own thread.
+    let mut overlay_shown = false;
+    let mut destroyed = false;
+    while !destroyed {
+        android_app.poll_events(Some(Duration::from_secs(1)), |event| {
+            match event {
+                PollEvent::Main(MainEvent::InitWindow { .. }) => {
+                    if !overlay_shown && !setup_done.load(Ordering::Acquire) {
+                        let _ = show_setup_overlay(&android_app);
+                        overlay_shown = true;
+                    }
+                }
+                PollEvent::Main(MainEvent::Destroy) => {
+                    destroyed = true;
+                }
+                _ => {}
+            }
+        });
     }
 
     // Exit the process so Android starts fresh on next launch.

@@ -47,7 +47,8 @@ use smithay::{
     },
 };
 use std::{error::Error, time::Instant};
-use winit::event_loop::EventLoopProxy;
+use std::os::unix::io::RawFd;
+use crate::android::backend::signal_wake;
 
 pub struct Compositor {
     pub state: State,
@@ -73,8 +74,8 @@ pub struct State {
     pub size: Size<i32, Logical>,
     /// New toplevels queued by XdgShellHandler, drained by the main loop.
     pub pending_toplevels: Vec<ToplevelSurface>,
-    /// Proxy to wake the event loop when clients commit buffers.
-    pub event_loop_proxy: Option<EventLoopProxy>,
+    /// Eventfd to wake the compositor thread when clients commit buffers.
+    pub wake_fd: Option<RawFd>,
     /// Text input state for soft keyboard integration.
     pub text_input_state: TextInputState,
     /// Pending soft keyboard show/hide request from text_input_v3.
@@ -149,9 +150,9 @@ impl CompositorHandler for State {
 
     fn commit(&mut self, surface: &WlSurface) {
         on_commit_buffer_handler::<Self>(surface);
-        // Wake the event loop to render the new content.
-        if let Some(proxy) = &self.event_loop_proxy {
-            proxy.wake_up();
+        // Wake the compositor thread to render the new content.
+        if let Some(&fd) = self.wake_fd.as_ref() {
+            signal_wake(fd);
         }
     }
 }
@@ -286,7 +287,7 @@ impl Compositor {
             seat_state,
             size: (1920, 1080).into(),
             pending_toplevels: Vec::new(),
-            event_loop_proxy: None,
+            wake_fd: None,
             text_input_state: TextInputState::default(),
             soft_keyboard_request: None,
         };

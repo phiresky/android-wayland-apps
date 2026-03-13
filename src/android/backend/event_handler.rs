@@ -1,7 +1,7 @@
-use crate::android::backend::{CentralizedEvent, WaylandBackend};
-use crate::android::backend::input::WinitInput;
-use crate::android::compositor::{send_frames_surface_tree, ClientState, State};
+use crate::android::backend::WaylandBackend;
+use crate::android::compositor::{send_frames_surface_tree, ClientState};
 use crate::android::window_manager::WindowEvent;
+use smithay::backend::input::ButtonState;
 use smithay::backend::renderer::element::surface::{
     render_elements_from_surface_tree, WaylandSurfaceRenderElement,
 };
@@ -10,20 +10,19 @@ use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::utils::draw_render_elements;
 use smithay::backend::renderer::{Color32F, Frame, Renderer};
 use smithay::input::keyboard::FilterResult;
-use smithay::input::{pointer, touch};
+use smithay::input::pointer;
 use smithay::utils::{Rectangle, Transform, SERIAL_COUNTER};
 use smithay::wayland::compositor as wl_compositor;
 use smithay::wayland::shell::xdg::{SurfaceCachedState, ToplevelSurface, XdgToplevelSurfaceData};
-use smithay::{
-    backend::input::{
-        AbsolutePositionEvent, Axis, ButtonState, Event, InputEvent, KeyboardKeyEvent,
-        PointerAxisEvent, PointerButtonEvent, TouchEvent,
-    },
-    output::{Mode, Scale},
-};
 use std::sync::Arc;
 use std::time::Instant;
-use winit::event_loop::ActiveEventLoop;
+
+/// One iteration of the compositor loop: dispatch protocol, render, update status.
+pub fn compositor_tick(backend: &mut WaylandBackend) {
+    dispatch_wayland(backend);
+    render_activity_windows(backend);
+    update_status_overlay(backend);
+}
 
 /// Process Wayland protocol: accept new clients, dispatch messages, flush responses.
 /// Called from both the redraw path and proxy_wake_up so the compositor keeps
@@ -97,57 +96,6 @@ pub fn dispatch_wayland(backend: &mut WaylandBackend) {
     }
 }
 
-/// Get the first toplevel (fallback for main window / single-window mode).
-fn get_first_surface(state: &State) -> Option<ToplevelSurface> {
-    state
-        .xdg_shell_state
-        .toplevel_surfaces()
-        .iter()
-        .next()
-        .cloned()
-}
-
-pub fn handle(
-    event: CentralizedEvent,
-    backend: &mut WaylandBackend,
-    event_loop: &dyn ActiveEventLoop,
-) {
-    match event {
-        CentralizedEvent::CloseRequested => {
-            event_loop.exit();
-        }
-        CentralizedEvent::Redraw => {
-            dispatch_wayland(backend);
-
-            // --- Render each Activity window ---
-            render_activity_windows(backend);
-
-            // --- 5. Update status overlay ---
-            update_status_overlay(backend);
-        }
-        CentralizedEvent::Input(event) => {
-            handle_winit_input(event, backend);
-        }
-        CentralizedEvent::Resized { size, scale_factor } => {
-            if let Some(output) = &backend.compositor.output {
-                output.change_current_state(
-                    Some(Mode {
-                        size: size,
-                        refresh: 60000,
-                    }),
-                    Some(Transform::Normal),
-                    Some(Scale::Fractional(scale_factor)),
-                    Some((0, 0).into()),
-                );
-            }
-        }
-        CentralizedEvent::Focus(focused) => {
-            log::info!("Focus changed: {focused}");
-        }
-        CentralizedEvent::Unsupported => {}
-    }
-}
-
 /// Process events from WaylandWindowActivity JNI callbacks.
 fn process_window_events(backend: &mut WaylandBackend) {
     let events: Vec<WindowEvent> = backend
@@ -175,9 +123,9 @@ fn process_window_events(backend: &mut WaylandBackend) {
 
                 if let Some(handle) = handle {
                     let surface = backend
-                        .graphic_renderer
+                        .renderer
                         .as_ref()
-                        .and_then(|winit| winit.create_surface_for_native_window(handle).ok());
+                        .and_then(|r| r.create_surface_for_native_window(handle).ok());
 
                     if let Some(surface) = surface {
                         log::info!("Created EGL surface for window_id={}", window_id);
@@ -313,11 +261,11 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
             let Some(egl_surface) = window.egl_surface.as_mut() else {
                 continue;
             };
-            let Some(winit) = backend.graphic_renderer.as_mut() else {
+            let Some(cr) = backend.renderer.as_mut() else {
                 continue;
             };
 
-            let Ok((renderer, mut framebuffer)) = winit.bind_surface(egl_surface) else {
+            let Ok((renderer, mut framebuffer)) = cr.bind_surface(egl_surface) else {
                 log::error!("Failed to bind surface for window_id={}", window_id);
                 continue;
             };
@@ -360,10 +308,10 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
             let Some(egl_surface) = window.egl_surface.as_ref() else {
                 continue;
             };
-            let Some(winit) = backend.graphic_renderer.as_ref() else {
+            let Some(cr) = backend.renderer.as_ref() else {
                 continue;
             };
-            let _ = winit.submit_surface(egl_surface);
+            let _ = cr.submit_surface(egl_surface);
         }
         // Count rendered frame for FPS tracking.
         if let Some(wm) = backend.window_manager.as_mut()
@@ -428,7 +376,7 @@ fn update_status_overlay(backend: &mut WaylandBackend) {
     }
 }
 
-fn send_status_jni(android_app: &winit::platform::android::activity::AndroidApp, text: &str) -> Result<(), jni::errors::Error> {
+fn send_status_jni(android_app: &android_activity::AndroidApp, text: &str) -> Result<(), jni::errors::Error> {
     let vm = unsafe { jni::JavaVM::from_raw(android_app.vm_as_ptr() as *mut _) }?;
     let mut env = vm.attach_current_thread()?;
     let activity = unsafe { jni::objects::JObject::from_raw(android_app.activity_as_ptr() as *mut _) };
@@ -459,7 +407,7 @@ fn send_status_jni(android_app: &winit::platform::android::activity::AndroidApp,
 
 /// Show or hide the Android soft keyboard on a specific WaylandWindowActivity.
 fn set_soft_keyboard_visible(
-    android_app: &winit::platform::android::activity::AndroidApp,
+    android_app: &android_activity::AndroidApp,
     window_id: u32,
     visible: bool,
 ) -> Result<(), jni::errors::Error> {
@@ -656,168 +604,4 @@ fn handle_activity_key(
     }
 }
 
-/// Handle input from the main NativeActivity (winit) — routes to first toplevel as fallback.
-fn handle_winit_input(event: InputEvent<WinitInput>, backend: &mut WaylandBackend) {
-    match event {
-        InputEvent::Keyboard { event } => {
-            let compositor = &mut backend.compositor;
-            let serial = SERIAL_COUNTER.next_serial();
-            let time = compositor.start_time.elapsed().as_millis() as u32;
-            if let Some(kb) = &compositor.keyboard {
-                kb.input::<(), _>(
-                    &mut compositor.state,
-                    event.key_code(),
-                    event.state(),
-                    serial,
-                    time,
-                    |_, _, _| FilterResult::Forward,
-                );
-            }
-        }
-        InputEvent::TouchDown { event } => {
-            let compositor = &mut backend.compositor;
-            if let Some(surface) = get_first_surface(&compositor.state) {
-                if let Some(kb) = &compositor.keyboard {
-                    kb.set_focus(
-                        &mut compositor.state,
-                        Some(surface.wl_surface().clone()),
-                        0.into(),
-                    );
-                }
-                let serial = SERIAL_COUNTER.next_serial();
-                let time = compositor.start_time.elapsed().as_millis() as u32;
-                compositor.touch.down(
-                    &mut compositor.state,
-                    Some((surface.wl_surface().clone(), (0f64, 0f64).into())),
-                    &touch::DownEvent {
-                        slot: event.slot(),
-                        location: (event.x(), event.y()).into(),
-                        serial,
-                        time,
-                    },
-                );
-            }
-        }
-        InputEvent::TouchUp { event } => {
-            let compositor = &mut backend.compositor;
-            if get_first_surface(&compositor.state).is_some() {
-                let serial = SERIAL_COUNTER.next_serial();
-                let time = compositor.start_time.elapsed().as_millis() as u32;
-                compositor.touch.up(
-                    &mut compositor.state,
-                    &touch::UpEvent {
-                        slot: event.slot(),
-                        serial,
-                        time,
-                    },
-                );
-            }
-        }
-        InputEvent::TouchMotion { event } => {
-            let compositor = &mut backend.compositor;
-            if let Some(surface) = get_first_surface(&compositor.state) {
-                let time = compositor.start_time.elapsed().as_millis() as u32;
-                compositor.touch.motion(
-                    &mut compositor.state,
-                    Some((surface.wl_surface().clone(), (0f64, 0f64).into())),
-                    &touch::MotionEvent {
-                        slot: event.slot(),
-                        location: (event.x(), event.y()).into(),
-                        time,
-                    },
-                );
-            }
-        }
-        InputEvent::PointerMotionAbsolute { event, .. } => {
-            let compositor = &mut backend.compositor;
-            let pointer = compositor.pointer.clone();
-            let serial = SERIAL_COUNTER.next_serial();
-            if let Some(surface) = get_first_surface(&compositor.state) {
-                pointer.motion(
-                    &mut compositor.state,
-                    Some((surface.wl_surface().clone(), (0f64, 0f64).into())),
-                    &pointer::MotionEvent {
-                        location: (event.x(), event.y()).into(),
-                        serial,
-                        time: event.time_msec(),
-                    },
-                );
-            }
-            pointer.frame(&mut compositor.state);
-        }
-        InputEvent::PointerButton { event, .. } => {
-            let serial = SERIAL_COUNTER.next_serial();
-            let button = event.button_code();
-            let state = event.state();
-            let compositor = &mut backend.compositor;
-            let pointer = compositor.pointer.clone();
-            if let Some(surface) = get_first_surface(&compositor.state)
-                && let Some(kb) = &compositor.keyboard {
-                    kb.set_focus(
-                        &mut compositor.state,
-                        Some(surface.wl_surface().clone()),
-                        0.into(),
-                    );
-                }
-            pointer.button(
-                &mut compositor.state,
-                &pointer::ButtonEvent {
-                    button,
-                    state,
-                    serial,
-                    time: event.time_msec(),
-                },
-            );
-            pointer.frame(&mut compositor.state);
-        }
-        other @ (InputEvent::DeviceAdded { .. }
-        | InputEvent::DeviceRemoved { .. }
-        | InputEvent::TouchFrame { .. }) => {
-            log::info!("Unhandled input event: {:?}", other);
-        }
-        InputEvent::PointerAxis { event } => {
-            let horizontal_amount = event
-                .amount(Axis::Horizontal)
-                .unwrap_or_else(|| event.amount_v120(Axis::Horizontal).unwrap_or(0.0) / 120.);
-            let vertical_amount = event
-                .amount(Axis::Vertical)
-                .unwrap_or_else(|| event.amount_v120(Axis::Vertical).unwrap_or(0.0) / 120.);
-            let horizontal_amount_discrete = event.amount_v120(Axis::Horizontal);
-            let vertical_amount_discrete = event.amount_v120(Axis::Vertical);
-
-            let mut frame = pointer::AxisFrame::new(event.time_msec()).source(event.source());
-            if horizontal_amount != 0.0 {
-                frame = frame.relative_direction(
-                    Axis::Horizontal,
-                    event.relative_direction(Axis::Horizontal),
-                );
-                frame = frame.value(Axis::Horizontal, horizontal_amount);
-                if let Some(discrete) = horizontal_amount_discrete {
-                    frame = frame.v120(Axis::Horizontal, discrete as i32);
-                }
-            }
-            if vertical_amount != 0.0 {
-                frame = frame.relative_direction(
-                    Axis::Vertical,
-                    event.relative_direction(Axis::Vertical),
-                );
-                frame = frame.value(Axis::Vertical, vertical_amount);
-                if let Some(discrete) = vertical_amount_discrete {
-                    frame = frame.v120(Axis::Vertical, discrete as i32);
-                }
-            }
-            if event.amount(Axis::Horizontal) == Some(0.0) {
-                frame = frame.stop(Axis::Horizontal);
-            }
-            if event.amount(Axis::Vertical) == Some(0.0) {
-                frame = frame.stop(Axis::Vertical);
-            }
-            let compositor = &mut backend.compositor;
-            let pointer = compositor.pointer.clone();
-            pointer.axis(&mut compositor.state, frame);
-            pointer.frame(&mut compositor.state);
-        }
-        _ => {}
-    }
-}
 

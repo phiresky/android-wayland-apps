@@ -1,6 +1,9 @@
 package io.github.phiresky.wayland_android;
 
+import android.Manifest;
 import android.app.NativeActivity;
+import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.graphics.PixelFormat;
 import android.graphics.Typeface;
 import android.os.Bundle;
@@ -33,6 +36,23 @@ public class MainActivity extends NativeActivity {
                         ViewGroup.LayoutParams.MATCH_PARENT));
 
         reportFullyDrawn();
+
+        // Request notification permission (required on Android 13+), then start
+        // the foreground service to prevent DeX from killing the compositor.
+        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 1);
+        } else {
+            startForegroundService(new Intent(this, CompositorService.class));
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        // Start service regardless — it works without notification permission,
+        // the notification just won't be visible.
+        startForegroundService(new Intent(this, CompositorService.class));
     }
 
     @Override
@@ -63,6 +83,14 @@ public class MainActivity extends NativeActivity {
 
         getWindowManager().addView(statusView, params);
         sStatusView = statusView;
+    }
+
+    @Override
+    public void finish() {
+        // Don't destroy the NativeActivity — move to background instead.
+        // Destroying it kills winit's event loop, which stops all Wayland
+        // protocol processing and rendering, causing ANR.
+        moveTaskToBack(true);
     }
 
     @Override

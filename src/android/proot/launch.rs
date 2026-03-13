@@ -17,7 +17,7 @@ pub fn launch() {
     });
 
     // Launch demo apps after a short delay to let the terminal connect first.
-    for (delay_ms, cmd) in [(1500, "weston-simple-egl"), (2000, "gedit")] {
+    for (delay_ms, cmd) in [(1500, "eglgears_wayland"), (2000, "gedit")] {
         thread::spawn(move || {
             thread::sleep(Duration::from_millis(delay_ms));
             log::info!("Launching: {}", cmd);

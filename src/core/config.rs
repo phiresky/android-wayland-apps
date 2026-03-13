@@ -6,6 +6,6 @@ pub const ARCH_FS_ARCHIVE: &str = "https://github.com/termux/proot-distro/releas
 pub const WAYLAND_SOCKET_NAME: &str = "wayland-0";
 
 pub const DEFAULT_USERNAME: &str = "root";
-pub const CHECK_CMD: &str = "sh -c 'pacman -Q weston gedit mesa-demos && test -f /usr/share/mime/mime.cache'";
-pub const INSTALL_CMD: &str = "stdbuf -oL sh -c '(pacman -Syu --needed --noconfirm weston gedit mesa-demos && pacman -S --noconfirm shared-mime-info gdk-pixbuf2) 2>&1 | tee /tmp/install.log'";
+pub const CHECK_CMD: &str = "sh -c 'pacman -Q weston gedit mesa-utils && test -f /usr/share/mime/mime.cache'";
+pub const INSTALL_CMD: &str = "stdbuf -oL sh -c '(pacman -Syu --needed --noconfirm weston gedit mesa-utils && pacman -S --noconfirm shared-mime-info gdk-pixbuf2) 2>&1 | tee /tmp/install.log'";
 pub const LAUNCH_CMD: &str = "weston-terminal";

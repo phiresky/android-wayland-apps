@@ -1,29 +1,36 @@
 pub mod egl;
-mod event_centralizer;
 mod event_handler;
-mod input;
-mod keymap;
+pub(crate) mod keymap;
 
-pub use event_centralizer::{centralize, CentralizedEvent};
-pub use event_handler::handle;
-pub use egl::{bind_egl, WinitGraphicsBackend};
+pub use event_handler::{compositor_tick, dispatch_wayland};
+pub use egl::{init_egl_headless, CompositorRenderer};
 
-use smithay::{
-    backend::renderer::gles::GlesRenderer,
-    utils::{Clock, Monotonic},
-};
+use smithay::utils::{Clock, Monotonic};
 use crate::android::compositor::Compositor;
 use crate::android::window_manager::WindowManager;
-use winit::event_loop::EventLoopProxy;
-use winit::platform::android::activity::AndroidApp;
+use android_activity::AndroidApp;
+
+use std::os::unix::io::RawFd;
 
 pub struct WaylandBackend {
     pub compositor: Compositor,
-    pub graphic_renderer: Option<WinitGraphicsBackend<GlesRenderer>>,
+    pub renderer: Option<CompositorRenderer>,
     pub window_manager: Option<WindowManager>,
     pub android_app: AndroidApp,
-    pub event_loop_proxy: Option<EventLoopProxy>,
+    pub wake_fd: RawFd,
     pub clock: Clock<Monotonic>,
     pub key_counter: u32,
     pub scale_factor: f64,
+}
+
+/// Signal the compositor thread to wake up via eventfd.
+pub fn signal_wake(fd: RawFd) {
+    let val: u64 = 1;
+    unsafe { libc::write(fd, &val as *const u64 as *const libc::c_void, 8) };
+}
+
+/// Drain the eventfd after waking.
+pub fn drain_wake(fd: RawFd) {
+    let mut val: u64 = 0;
+    unsafe { libc::read(fd, &mut val as *mut u64 as *mut libc::c_void, 8) };
 }

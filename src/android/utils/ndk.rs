@@ -1,6 +1,6 @@
 use jni::sys::JNIInvokeInterface_;
 use jni::{JNIEnv, JavaVM};
-use winit::platform::android::activity::AndroidApp;
+use android_activity::AndroidApp;
 
 /// A higher-order function to run a provided JNI function within the JVM context.
 pub fn run_in_jvm<F, T>(jni_function: F, android_app: AndroidApp) -> Result<T, jni::errors::Error>

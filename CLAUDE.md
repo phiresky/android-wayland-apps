@@ -1,14 +1,15 @@
 # Project: android-wayland-apps
 
-Rust-based Wayland compositor on Android. Linux apps run in proot+Arch ARM, render via smithay compositor to Android NativeActivity EGL surface.
+Rust-based Wayland compositor on Android. Linux apps run in proot+Arch ARM, render via smithay compositor to Android Activity EGL surfaces.
 
-## Build
+## Scripts
 
 ```sh
-source .env
-cargo ndk build          # debug build (default for dev)
-cd android && ./gradlew installDebug
-adb shell am start -n io.github.phiresky.wayland_android/io.github.phiresky.wayland_android.MainActivity
+./build.sh               # source .env, cargo ndk build, gradlew installDebug
+./build.sh --release      # pass extra args to cargo ndk build
+./run.sh                  # force-stop, start app, stream filtered logcat
+./adb_runas.sh            # interactive shell in proot Arch rootfs
+./adb_runas.sh pacman -S mesa-demos   # run a command in proot
 ```
 
 - `cargo ndk` args (`-t arm64-v8a --platform 35`) are set in `.env` via `CARGO_NDK_TARGET`/`CARGO_NDK_PLATFORM`
@@ -45,15 +46,16 @@ WARNING: `pm clear` wipes the rootfs! Use `am force-stop` instead.
 
 ### Running proot from adb shell
 
-A helper script can be pushed to the device - see `run_proot.sh` pattern in the codebase.
+Use `./adb_runas.sh` to get a shell or run commands inside the proot rootfs.
 The app's proot setup is in `src/android/proot/process.rs` (ArchProcess).
 
 ## Architecture
 
-- `MainActivity` extends `NativeActivity` (for splash screen handling, `reportFullyDrawn()`)
-- Setup overlay uses `WindowManager.addView(TYPE_APPLICATION_PANEL)` to draw on top of native EGL surface
-- Overlay must be shown from `can_create_surfaces` callback (window token not available earlier)
-- Setup runs in background thread; event loop starts immediately to dismiss Android 12+ splash screen
+- **Compositor thread**: runs independently on a background thread with headless EGL (no window surface). Polls on eventfd + Wayland fds. Survives NativeActivity destruction.
+- **NativeActivity/winit**: minimal lifecycle handler for splash screen and setup overlay only. Not used for rendering or input.
+- **WaylandWindowActivity**: one per XDG toplevel. Each has its own Android Surface + EGL surface. Input via JNI callbacks → mpsc channel → compositor thread.
+- **Foreground service** (`CompositorService`): keeps the process alive when NativeActivity is backgrounded.
+- **Wake mechanism**: eventfd replaces winit's EventLoopProxy. JNI callbacks and Wayland commits signal the eventfd to wake the compositor poll loop.
 - Keyboard init deferred until xkb data directory exists (prevents SIGSEGV)
 - Don't use immersive fullscreen on WaylandWindowActivity — breaks in DeX windowed mode
 

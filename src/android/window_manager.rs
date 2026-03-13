@@ -10,9 +10,11 @@ use jni::JNIEnv;
 use smithay::backend::egl::EGLSurface;
 use smithay::utils::{Physical, Size};
 use smithay::wayland::shell::xdg::ToplevelSurface;
-use winit::event_loop::EventLoopProxy;
-use winit::platform::android::activity::AndroidApp;
-use winit::raw_window_handle::AndroidNdkWindowHandle;
+use android_activity::AndroidApp;
+use raw_window_handle::AndroidNdkWindowHandle;
+
+use std::os::unix::io::RawFd;
+use crate::android::backend::signal_wake;
 
 // FFI for ANativeWindow
 unsafe extern "C" {
@@ -36,8 +38,8 @@ unsafe impl Send for WindowEvent {}
 /// Global channel sender for JNI callbacks to post events.
 static EVENT_SENDER: Mutex<Option<mpsc::Sender<WindowEvent>>> = Mutex::new(None);
 
-/// Global event loop proxy for waking the main loop from JNI callbacks.
-static EVENT_LOOP_PROXY: Mutex<Option<EventLoopProxy>> = Mutex::new(None);
+/// Global eventfd for waking the compositor thread from JNI callbacks.
+static WAKE_FD: Mutex<Option<RawFd>> = Mutex::new(None);
 
 /// State for a single window (one per XDG toplevel).
 pub struct WindowState {
@@ -193,10 +195,10 @@ impl WindowManager {
 // JNI exports — called from WaylandWindowActivity on UI thread
 // ============================================================
 
-/// Set the event loop proxy so JNI callbacks can wake the main loop.
-pub fn set_event_loop_proxy(proxy: EventLoopProxy) {
-    if let Ok(mut guard) = EVENT_LOOP_PROXY.lock() {
-        *guard = Some(proxy);
+/// Set the eventfd so JNI callbacks can wake the compositor thread.
+pub fn set_wake_fd(fd: RawFd) {
+    if let Ok(mut guard) = WAKE_FD.lock() {
+        *guard = Some(fd);
     }
 }
 
@@ -206,11 +208,11 @@ fn send_event(event: WindowEvent) {
     {
         let _ = tx.send(event);
     }
-    // Wake the event loop so it processes the event promptly.
-    if let Ok(guard) = EVENT_LOOP_PROXY.lock()
-        && let Some(proxy) = guard.as_ref()
+    // Wake the compositor thread so it processes the event promptly.
+    if let Ok(guard) = WAKE_FD.lock()
+        && let Some(&fd) = guard.as_ref()
     {
-        proxy.wake_up();
+        signal_wake(fd);
     }
 }
 

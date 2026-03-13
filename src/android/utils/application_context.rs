@@ -5,7 +5,7 @@ use jni::{
 };
 use std::path::PathBuf;
 use std::sync::RwLock;
-use winit::platform::android::activity::AndroidApp;
+use android_activity::AndroidApp;
 
 #[derive(Debug, Clone)]
 pub struct ApplicationContext {
