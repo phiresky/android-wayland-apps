@@ -80,6 +80,8 @@ pub struct State {
     pub text_input_state: TextInputState,
     /// Pending soft keyboard show/hide request from text_input_v3.
     pub soft_keyboard_request: Option<bool>,
+    /// Toplevels destroyed by the client, queued for Activity cleanup.
+    pub destroyed_toplevels: Vec<ToplevelSurface>,
 }
 
 impl BufferHandler for State {
@@ -106,6 +108,10 @@ impl XdgShellHandler for State {
         if let Err(e) = surface.send_configure() {
             log::warn!("Failed to send popup configure: {:?}", e);
         }
+    }
+
+    fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
+        self.destroyed_toplevels.push(surface);
     }
 
     fn grab(&mut self, _surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {
@@ -290,6 +296,7 @@ impl Compositor {
             wake_fd: None,
             text_input_state: TextInputState::default(),
             soft_keyboard_request: None,
+            destroyed_toplevels: Vec::new(),
         };
 
         Ok(Compositor {

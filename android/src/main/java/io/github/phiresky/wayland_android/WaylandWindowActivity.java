@@ -166,6 +166,21 @@ public class WaylandWindowActivity extends Activity implements SurfaceHolder.Cal
     }
 
     /**
+     * Finish the Activity for the given window ID.
+     * Called from native code when the Wayland client destroys its toplevel.
+     */
+    public static void finishByWindowId(int windowId) {
+        WeakReference<WaylandWindowActivity> ref = sInstances.get(windowId);
+        if (ref == null) return;
+        WaylandWindowActivity activity = ref.get();
+        if (activity == null) {
+            sInstances.remove(windowId);
+            return;
+        }
+        activity.runOnUiThread(activity::finish);
+    }
+
+    /**
      * Show or hide the Android soft keyboard on the Activity for the given window.
      * Called from native code when a Wayland client enables/disables text_input_v3.
      */

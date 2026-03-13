@@ -39,6 +39,27 @@ pub fn dispatch_wayland(backend: &mut WaylandBackend) {
         }
     }
 
+    // Process destroyed toplevels: finish their Android Activities.
+    let destroyed: Vec<ToplevelSurface> =
+        backend.compositor.state.destroyed_toplevels.drain(..).collect();
+    if !destroyed.is_empty() {
+        if let Some(wm) = backend.window_manager.as_mut() {
+            for toplevel in &destroyed {
+                // Find the window_id for this toplevel.
+                let window_id = wm.windows.iter().find_map(|(id, w)| {
+                    (w.toplevel == *toplevel).then_some(*id)
+                });
+                if let Some(window_id) = window_id {
+                    log::info!("Toplevel destroyed, finishing Activity window_id={}", window_id);
+                    if let Err(e) = finish_activity(window_id) {
+                        log::error!("Failed to finish Activity for window_id={}: {e}", window_id);
+                    }
+                    wm.remove_window(window_id);
+                }
+            }
+        }
+    }
+
     // Process window events from JNI.
     process_window_events(backend);
 
@@ -443,6 +464,34 @@ fn set_soft_keyboard_visible(
                 jni::objects::JValue::Int(window_id as i32),
                 jni::objects::JValue::Bool(u8::from(visible)),
             ],
+        )?;
+
+        Ok(())
+    })
+}
+
+/// Finish the Android Activity for a given window ID via JNI.
+fn finish_activity(window_id: u32) -> Result<(), jni::errors::Error> {
+    crate::android::utils::jni_context::with_jni(|env, activity| {
+        let class_loader = env
+            .call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])?
+            .l()?;
+        let class_name =
+            env.new_string("io.github.phiresky.wayland_android.WaylandWindowActivity")?;
+        let window_class = env
+            .call_method(
+                &class_loader,
+                "loadClass",
+                "(Ljava/lang/String;)Ljava/lang/Class;",
+                &[jni::objects::JValue::Object(&class_name)],
+            )?
+            .l()?;
+
+        env.call_static_method(
+            unsafe { jni::objects::JClass::from_raw(window_class.as_raw()) },
+            "finishByWindowId",
+            "(I)V",
+            &[jni::objects::JValue::Int(window_id as i32)],
         )?;
 
         Ok(())
