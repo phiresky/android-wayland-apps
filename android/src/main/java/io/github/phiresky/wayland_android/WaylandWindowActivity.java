@@ -118,20 +118,24 @@ public class WaylandWindowActivity extends Activity implements SurfaceHolder.Cal
         menuAnchor.setX(x);
         menuAnchor.setY(y);
 
+        InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+        boolean keyboardVisible = imm != null && imm.isActive(surfaceView);
         PopupMenu popup = new PopupMenu(this, menuAnchor);
         popup.getMenu().add(0, 1, 0, "Right click");
-        popup.getMenu().add(0, 2, 0, "Show keyboard");
+        popup.getMenu().add(0, 2, 0, keyboardVisible ? "Hide keyboard" : "Show keyboard");
         popup.setOnMenuItemClickListener(item -> {
             switch (item.getItemId()) {
                 case 1:
                     nativeRightClick(windowId, x, y);
                     return true;
                 case 2:
-                    InputMethodManager imm =
-                            (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
                     if (imm != null) {
-                        surfaceView.requestFocus();
-                        imm.showSoftInput(surfaceView, InputMethodManager.SHOW_IMPLICIT);
+                        if (keyboardVisible) {
+                            imm.hideSoftInputFromWindow(surfaceView.getWindowToken(), 0);
+                        } else {
+                            surfaceView.requestFocus();
+                            imm.showSoftInput(surfaceView, InputMethodManager.SHOW_IMPLICIT);
+                        }
                     }
                     return true;
             }
