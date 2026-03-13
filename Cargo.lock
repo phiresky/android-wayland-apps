@@ -13,7 +13,6 @@ name = "android-wayland-launcher"
 version = "0.1.0"
 dependencies = [
  "android_logger",
- "anyhow",
  "jni",
  "khronos-egl",
  "libc",

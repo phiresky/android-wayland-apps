@@ -690,16 +690,9 @@ fn handle_activity_key(
     key_code: i32,
     action: i32,
 ) {
-    let wl_surface = {
-        let wm = match backend.window_manager.as_ref() {
-            Some(wm) => wm,
-            None => return,
-        };
-        match wm.windows.get(&window_id) {
-            Some(w) => w.surface_kind.wl_surface().clone(),
-            None => return,
-        }
-    };
+    let Some(wm) = backend.window_manager.as_ref() else { return };
+    let Some(window) = wm.windows.get(&window_id) else { return };
+    let wl_surface = window.surface_kind.wl_surface().clone();
 
     let compositor = &mut backend.compositor;
     let serial = SERIAL_COUNTER.next_serial();
@@ -718,7 +711,7 @@ fn handle_activity_key(
         log::debug!("Unmapped Android keycode: {}", key_code);
         return;
     };
-    let key_state = if action == 0 {
+    let key_state = if action == ACTION_DOWN {
         smithay::backend::input::KeyState::Pressed
     } else {
         smithay::backend::input::KeyState::Released

@@ -72,14 +72,13 @@ pub fn get_application_context() -> ApplicationContext {
     let guard = match APPLICATION_CONTEXT.read() {
         Ok(g) => g,
         Err(e) => {
-            log::error!("Failed to read application context: {e}");
             panic!("Failed to read application context: {e}");
         }
     };
-    match guard.clone() {
-        Some(ctx) => ctx,
+    match guard.as_ref() {
+        Some(ctx) => ctx.clone(),
         None => {
-            panic!("ApplicationContext is not initialized. Please make sure `ApplicationContext::build()` is called in `nativeInit`.");
+            panic!("ApplicationContext is not initialized");
         }
     }
 }

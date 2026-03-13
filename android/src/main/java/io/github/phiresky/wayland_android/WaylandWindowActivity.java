@@ -165,18 +165,24 @@ public class WaylandWindowActivity extends Activity implements SurfaceHolder.Cal
         nativeWindowClosed(windowId, isFinishing());
     }
 
+    /** Look up a live Activity by window ID, cleaning up stale references. */
+    private static WaylandWindowActivity getByWindowId(int windowId) {
+        WeakReference<WaylandWindowActivity> ref = sInstances.get(windowId);
+        if (ref == null) return null;
+        WaylandWindowActivity activity = ref.get();
+        if (activity == null) {
+            sInstances.remove(windowId);
+        }
+        return activity;
+    }
+
     /**
      * Finish the Activity for the given window ID.
      * Called from native code when the Wayland client destroys its toplevel.
      */
     public static void finishByWindowId(int windowId) {
-        WeakReference<WaylandWindowActivity> ref = sInstances.get(windowId);
-        if (ref == null) return;
-        WaylandWindowActivity activity = ref.get();
-        if (activity == null) {
-            sInstances.remove(windowId);
-            return;
-        }
+        WaylandWindowActivity activity = getByWindowId(windowId);
+        if (activity == null) return;
         activity.runOnUiThread(activity::finish);
     }
 
@@ -185,13 +191,8 @@ public class WaylandWindowActivity extends Activity implements SurfaceHolder.Cal
      * Called from native code when a Wayland client enables/disables text_input_v3.
      */
     public static void setSoftKeyboardVisible(int windowId, boolean visible) {
-        WeakReference<WaylandWindowActivity> ref = sInstances.get(windowId);
-        if (ref == null) return;
-        WaylandWindowActivity activity = ref.get();
-        if (activity == null) {
-            sInstances.remove(windowId);
-            return;
-        }
+        WaylandWindowActivity activity = getByWindowId(windowId);
+        if (activity == null) return;
         activity.runOnUiThread(() -> {
             InputMethodManager imm =
                     (InputMethodManager) activity.getSystemService(INPUT_METHOD_SERVICE);
