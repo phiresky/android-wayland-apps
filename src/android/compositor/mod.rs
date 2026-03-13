@@ -123,7 +123,7 @@ impl XdgShellHandler for State {
     }
 
     fn grab(&mut self, _surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {
-        // Handle popup grab here
+        // No-op: popup grabs not needed — Android handles window focus.
     }
 
     fn reposition_request(
@@ -132,7 +132,7 @@ impl XdgShellHandler for State {
         _positioner: PositionerState,
         _token: u32,
     ) {
-        // Handle popup reposition here
+        // No-op: popups render as subsurfaces, no repositioning needed.
     }
 }
 
@@ -169,6 +169,7 @@ impl DataDeviceHandler for State {
     }
 }
 
+// No-op: drag-and-drop not supported between Android and Wayland clients.
 impl WaylandDndGrabHandler for State {}
 
 impl CompositorHandler for State {
@@ -212,6 +213,7 @@ impl SeatHandler for State {
     fn focus_changed(&mut self, _seat: &Seat<Self>, focused: Option<&WlSurface>) {
         self.text_input_state.focus_changed(focused.cloned());
     }
+    // No-op: Android renders its own cursor; compositor doesn't need to track it.
     fn cursor_image(&mut self, _seat: &Seat<Self>, _image: input::pointer::CursorImageStatus) {}
 }
 

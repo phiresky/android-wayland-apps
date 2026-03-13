@@ -4,7 +4,7 @@ use crate::android::{
     utils::{application_context::ApplicationContext, jni_context},
 };
 use crate::core::config;
-use jni::objects::{JClass, JObject, JValue};
+use jni::objects::{JObject, JValue};
 use jni::sys::jint;
 use jni::JNIEnv;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -101,52 +101,31 @@ extern "system" fn Java_io_github_phiresky_wayland_1android_MainActivity_nativeI
 
 // ---- JNI helpers for SetupOverlay ----
 
-fn get_overlay_class<'a>(
-    env: &mut jni::JNIEnv<'a>,
-    activity: &JObject,
-) -> Result<JObject<'a>, jni::errors::Error> {
-    let class_loader = env
-        .call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])?
-        .l()?;
-    let class_name = env.new_string("io.github.phiresky.wayland_android.SetupOverlay")?;
-    env.call_method(
-        &class_loader,
-        "loadClass",
-        "(Ljava/lang/String;)Ljava/lang/Class;",
-        &[JValue::Object(&class_name)],
-    )?
-    .l()
-}
+const SETUP_OVERLAY_CLASS: &str = "io.github.phiresky.wayland_android.SetupOverlay";
 
 fn send_setup_log_jni(msg: &str) -> Result<(), jni::errors::Error> {
     jni_context::with_jni(|env, activity| {
-        let overlay_class = get_overlay_class(env, activity)?;
-        let overlay_jclass: JClass = unsafe { JClass::from_raw(overlay_class.as_raw()) };
-
+        let class = jni_context::load_class(env, activity, SETUP_OVERLAY_CLASS)?;
         let jmsg = env.new_string(msg)?;
         env.call_static_method(
-            overlay_jclass,
+            class,
             "appendLog",
             "(Ljava/lang/String;)V",
             &[JValue::Object(&jmsg)],
         )?;
-
         Ok(())
     })
 }
 
 fn hide_setup_overlay() -> Result<(), jni::errors::Error> {
     jni_context::with_jni(|env, activity| {
-        let overlay_class = get_overlay_class(env, activity)?;
-        let overlay_jclass: JClass = unsafe { JClass::from_raw(overlay_class.as_raw()) };
-
+        let class = jni_context::load_class(env, activity, SETUP_OVERLAY_CLASS)?;
         env.call_static_method(
-            overlay_jclass,
+            class,
             "hide",
             "(Landroid/app/Activity;)V",
             &[JValue::Object(activity)],
         )?;
-
         log::info!("Setup overlay hidden");
         Ok(())
     })

@@ -10,7 +10,6 @@ import android.os.Bundle;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
-import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.widget.TextView;
 
@@ -114,7 +113,10 @@ public class MainActivity extends Activity {
         if (view != null) {
             try {
                 getWindowManager().removeView(view);
-            } catch (Exception ignored) {}
+            } catch (Exception e) {
+                // View may already be detached if the window was destroyed.
+                android.util.Log.w("MainActivity", "removeView failed", e);
+            }
             sStatusView = null;
         }
     }

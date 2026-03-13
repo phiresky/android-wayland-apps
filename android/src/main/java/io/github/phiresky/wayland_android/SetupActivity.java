@@ -5,7 +5,6 @@ import android.graphics.Typeface;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.util.Log;
 import android.util.TypedValue;
 import android.widget.ScrollView;
 import android.widget.TextView;

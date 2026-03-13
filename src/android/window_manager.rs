@@ -138,21 +138,9 @@ impl WindowManager {
 
     fn launch_activity_inner(&self, window_id: u32) -> Result<(), jni::errors::Error> {
         crate::android::utils::jni_context::with_jni(|env, activity| {
-            // Use the Activity's classloader (not the system one) to find our Java class.
-            // env.find_class() uses the system classloader which doesn't know about app classes.
-            let class_loader = env
-                .call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])?
-                .l()?;
-            let class_name = env
-                .new_string("io.github.phiresky.wayland_android.WaylandWindowActivity")?;
-            let activity_class = env
-                .call_method(
-                    &class_loader,
-                    "loadClass",
-                    "(Ljava/lang/String;)Ljava/lang/Class;",
-                    &[JValue::Object(&class_name)],
-                )?
-                .l()?;
+            let activity_class = crate::android::utils::jni_context::load_class(
+                env, activity, "io.github.phiresky.wayland_android.WaylandWindowActivity",
+            )?;
 
             // Create Intent for WaylandWindowActivity
             let intent_class = env.find_class("android/content/Intent")?;

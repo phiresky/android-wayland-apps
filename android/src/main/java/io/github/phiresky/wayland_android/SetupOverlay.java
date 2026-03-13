@@ -86,11 +86,8 @@ public class SetupOverlay {
 
     /** Called from native code via JNI when setup is complete. Removes the overlay. */
     public static void hide(Activity activity) {
-        if (sHandler != null) {
-            sHandler.removeCallbacksAndMessages(null);
-        }
         activity.runOnUiThread(() -> {
-            // Flush remaining lines
+            // Flush remaining lines before removing the overlay.
             flushLines();
             if (sHandler != null) {
                 sHandler.removeCallbacksAndMessages(null);

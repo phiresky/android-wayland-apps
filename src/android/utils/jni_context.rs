@@ -96,3 +96,27 @@ where
     let mut env = ctx.vm.attach_current_thread()?;
     f(&mut env, ctx.activity.as_obj())
 }
+
+/// Load an app class by name using the Activity's ClassLoader.
+///
+/// `env.find_class()` uses the system classloader which doesn't know about app classes,
+/// so we go through the Activity's classloader instead.
+pub fn load_class<'a>(
+    env: &mut JNIEnv<'a>,
+    activity: &JObject,
+    class_name: &str,
+) -> Result<jni::objects::JClass<'a>, jni::errors::Error> {
+    let class_loader = env
+        .call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])?
+        .l()?;
+    let jname = env.new_string(class_name)?;
+    let class_obj = env
+        .call_method(
+            &class_loader,
+            "loadClass",
+            "(Ljava/lang/String;)Ljava/lang/Class;",
+            &[jni::objects::JValue::Object(&jname)],
+        )?
+        .l()?;
+    Ok(unsafe { jni::objects::JClass::from_raw(class_obj.as_raw()) })
+}

@@ -15,8 +15,21 @@ use smithay::utils::{Rectangle, Transform, SERIAL_COUNTER};
 use smithay::wayland::compositor as wl_compositor;
 use smithay::wayland::shell::wlr_layer::LayerSurface;
 use smithay::wayland::shell::xdg::{SurfaceCachedState, ToplevelSurface, XdgToplevelSurfaceData};
+use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+use smithay::utils::Point;
 use std::sync::Arc;
 use std::time::Instant;
+
+const WINDOW_ACTIVITY_CLASS: &str = "io.github.phiresky.wayland_android.WaylandWindowActivity";
+
+// Linux input event button codes.
+const BTN_LEFT: u32 = 0x110;
+const BTN_RIGHT: u32 = 0x111;
+
+// Android MotionEvent action constants.
+const ACTION_DOWN: i32 = 0;
+const ACTION_UP: i32 = 1;
+const ACTION_MOVE: i32 = 2;
 
 /// One iteration of the compositor loop: dispatch protocol, render, update status.
 pub fn compositor_tick(backend: &mut WaylandBackend) {
@@ -267,7 +280,7 @@ fn process_window_events(backend: &mut WaylandBackend) {
                 window_id,
                 key_code,
                 action,
-                meta_state: _,
+                ..
             } => {
                 handle_activity_key(backend, window_id, key_code, action);
             }
@@ -371,9 +384,15 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                 continue;
             };
 
-            let _ = frame.clear(Color32F::new(0.0, 0.0, 0.0, 1.0), &[damage]);
-            let _ = draw_render_elements(&mut frame, scale, &elements, &[damage]);
-            let _ = frame.finish();
+            if let Err(e) = frame.clear(Color32F::new(0.0, 0.0, 0.0, 1.0), &[damage]) {
+                log::warn!("frame.clear failed for window_id={}: {e:?}", window_id);
+            }
+            if let Err(e) = draw_render_elements(&mut frame, scale, &elements, &[damage]) {
+                log::warn!("draw_render_elements failed for window_id={}: {e:?}", window_id);
+            }
+            if let Err(e) = frame.finish() {
+                log::warn!("frame.finish failed for window_id={}: {e:?}", window_id);
+            }
 
             send_frames_surface_tree(&wl_surface, time);
         }
@@ -458,27 +477,16 @@ fn update_status_overlay(backend: &mut WaylandBackend) {
 
 fn send_status_jni(text: &str) -> Result<(), jni::errors::Error> {
     crate::android::utils::jni_context::with_jni(|env, activity| {
-        let class_loader = env
-            .call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])?
-            .l()?;
-        let class_name = env.new_string("io.github.phiresky.wayland_android.MainActivity")?;
-        let main_class = env
-            .call_method(
-                &class_loader,
-                "loadClass",
-                "(Ljava/lang/String;)Ljava/lang/Class;",
-                &[jni::objects::JValue::Object(&class_name)],
-            )?
-            .l()?;
-
+        let class = crate::android::utils::jni_context::load_class(
+            env, activity, "io.github.phiresky.wayland_android.MainActivity",
+        )?;
         let jtext = env.new_string(text)?;
         env.call_static_method(
-            unsafe { jni::objects::JClass::from_raw(main_class.as_raw()) },
+            class,
             "updateStatus",
             "(Ljava/lang/String;)V",
             &[jni::objects::JValue::Object(&jtext)],
         )?;
-
         Ok(())
     })
 }
@@ -489,27 +497,11 @@ fn set_soft_keyboard_visible(
     visible: bool,
 ) -> Result<(), jni::errors::Error> {
     crate::android::utils::jni_context::with_jni(|env, activity| {
-        let class_loader = env
-            .call_method(
-                activity,
-                "getClassLoader",
-                "()Ljava/lang/ClassLoader;",
-                &[],
-            )?
-            .l()?;
-        let class_name =
-            env.new_string("io.github.phiresky.wayland_android.WaylandWindowActivity")?;
-        let window_class = env
-            .call_method(
-                &class_loader,
-                "loadClass",
-                "(Ljava/lang/String;)Ljava/lang/Class;",
-                &[jni::objects::JValue::Object(&class_name)],
-            )?
-            .l()?;
-
+        let class = crate::android::utils::jni_context::load_class(
+            env, activity, WINDOW_ACTIVITY_CLASS,
+        )?;
         env.call_static_method(
-            unsafe { jni::objects::JClass::from_raw(window_class.as_raw()) },
+            class,
             "setSoftKeyboardVisible",
             "(IZ)V",
             &[
@@ -517,7 +509,6 @@ fn set_soft_keyboard_visible(
                 jni::objects::JValue::Bool(u8::from(visible)),
             ],
         )?;
-
         Ok(())
     })
 }
@@ -525,29 +516,49 @@ fn set_soft_keyboard_visible(
 /// Finish the Android Activity for a given window ID via JNI.
 fn finish_activity(window_id: u32) -> Result<(), jni::errors::Error> {
     crate::android::utils::jni_context::with_jni(|env, activity| {
-        let class_loader = env
-            .call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])?
-            .l()?;
-        let class_name =
-            env.new_string("io.github.phiresky.wayland_android.WaylandWindowActivity")?;
-        let window_class = env
-            .call_method(
-                &class_loader,
-                "loadClass",
-                "(Ljava/lang/String;)Ljava/lang/Class;",
-                &[jni::objects::JValue::Object(&class_name)],
-            )?
-            .l()?;
-
+        let class = crate::android::utils::jni_context::load_class(
+            env, activity, WINDOW_ACTIVITY_CLASS,
+        )?;
         env.call_static_method(
-            unsafe { jni::objects::JClass::from_raw(window_class.as_raw()) },
+            class,
             "finishByWindowId",
             "(I)V",
             &[jni::objects::JValue::Int(window_id as i32)],
         )?;
-
         Ok(())
     })
+}
+
+/// Look up a window's WlSurface and geometry offset, converting physical touch
+/// coordinates to logical Wayland coordinates.
+fn resolve_surface_and_coords(
+    backend: &WaylandBackend,
+    window_id: u32,
+    x: f32,
+    y: f32,
+) -> Option<(WlSurface, f64, f64)> {
+    let wm = backend.window_manager.as_ref()?;
+    let window = wm.windows.get(&window_id)?;
+    let surface = window.surface_kind.wl_surface().clone();
+    let geo_offset: Point<i32, _> = match &window.surface_kind {
+        SurfaceKind::Toplevel(_) => {
+            wl_compositor::with_states(&surface, |states| {
+                states.cached_state.get::<SurfaceCachedState>()
+                    .current()
+                    .geometry
+                    .map(|g| g.loc)
+                    .unwrap_or_default()
+            })
+        }
+        SurfaceKind::Layer(_) => Default::default(),
+    };
+    // Convert from physical (Android) to logical (Wayland surface) coordinates.
+    // Add geometry offset because we render at -geo_offset to crop CSD shadows,
+    // so touch position 0,0 in the Activity corresponds to geo_offset in the surface.
+    let scale = backend.scale_factor;
+    let lx = x as f64 / scale + geo_offset.x as f64;
+    let ly = y as f64 / scale + geo_offset.y as f64;
+    Some((surface, lx, ly))
 }
 
 /// Handle touch events from a WaylandWindowActivity.
@@ -558,46 +569,14 @@ fn handle_activity_touch(
     x: f32,
     y: f32,
 ) {
-    let (wl_surface, geo_offset) = {
-        let wm = match backend.window_manager.as_ref() {
-            Some(wm) => wm,
-            None => return,
-        };
-        let window = match wm.windows.get(&window_id) {
-            Some(w) => w,
-            None => return,
-        };
-        let surface = window.surface_kind.wl_surface().clone();
-        let geo = match &window.surface_kind {
-            SurfaceKind::Toplevel(_) => {
-                wl_compositor::with_states(&surface, |states| {
-                    states.cached_state.get::<SurfaceCachedState>()
-                        .current()
-                        .geometry
-                        .map(|g| g.loc)
-                        .unwrap_or_default()
-                })
-            }
-            SurfaceKind::Layer(_) => Default::default(),
-        };
-        (surface, geo)
+    let Some((wl_surface, x, y)) = resolve_surface_and_coords(backend, window_id, x, y) else {
+        return;
     };
-
-    // Convert from physical (Android) to logical (Wayland surface) coordinates.
-    // Add geometry offset because we render at -geo_offset to crop CSD shadows,
-    // so touch position 0,0 in the Activity corresponds to geo_offset in the surface.
-    let scale = backend.scale_factor;
-    let x = x as f64 / scale + geo_offset.x as f64;
-    let y = y as f64 / scale + geo_offset.y as f64;
 
     let compositor = &mut backend.compositor;
     let serial = SERIAL_COUNTER.next_serial();
     let time = compositor.start_time.elapsed().as_millis() as u32;
-
-    // Android MotionEvent actions
-    const ACTION_DOWN: i32 = 0;
-    const ACTION_UP: i32 = 1;
-    const ACTION_MOVE: i32 = 2;
+    let pointer = compositor.pointer.clone();
 
     match action {
         ACTION_DOWN => {
@@ -608,7 +587,6 @@ fn handle_activity_touch(
                     serial,
                 );
             }
-            let pointer = compositor.pointer.clone();
             pointer.motion(
                 &mut compositor.state,
                 Some((wl_surface.clone(), (0f64, 0f64).into())),
@@ -621,7 +599,7 @@ fn handle_activity_touch(
             pointer.button(
                 &mut compositor.state,
                 &pointer::ButtonEvent {
-                    button: 0x110, // BTN_LEFT
+                    button: BTN_LEFT,
                     state: ButtonState::Pressed,
                     serial,
                     time,
@@ -630,11 +608,10 @@ fn handle_activity_touch(
             pointer.frame(&mut compositor.state);
         }
         ACTION_UP => {
-            let pointer = compositor.pointer.clone();
             pointer.button(
                 &mut compositor.state,
                 &pointer::ButtonEvent {
-                    button: 0x110,
+                    button: BTN_LEFT,
                     state: ButtonState::Released,
                     serial,
                     time,
@@ -643,7 +620,6 @@ fn handle_activity_touch(
             pointer.frame(&mut compositor.state);
         }
         ACTION_MOVE => {
-            let pointer = compositor.pointer.clone();
             pointer.motion(
                 &mut compositor.state,
                 Some((wl_surface.clone(), (0f64, 0f64).into())),
@@ -667,42 +643,15 @@ fn handle_activity_right_click(
     x: f32,
     y: f32,
 ) {
-    let (wl_surface, geo_offset) = {
-        let wm = match backend.window_manager.as_ref() {
-            Some(wm) => wm,
-            None => return,
-        };
-        let window = match wm.windows.get(&window_id) {
-            Some(w) => w,
-            None => return,
-        };
-        let surface = window.surface_kind.wl_surface().clone();
-        let geo = match &window.surface_kind {
-            SurfaceKind::Toplevel(_) => {
-                wl_compositor::with_states(&surface, |states| {
-                    states.cached_state.get::<SurfaceCachedState>()
-                        .current()
-                        .geometry
-                        .map(|g| g.loc)
-                        .unwrap_or_default()
-                })
-            }
-            SurfaceKind::Layer(_) => Default::default(),
-        };
-        (surface, geo)
+    let Some((wl_surface, x, y)) = resolve_surface_and_coords(backend, window_id, x, y) else {
+        return;
     };
-
-    let scale = backend.scale_factor;
-    let x = x as f64 / scale + geo_offset.x as f64;
-    let y = y as f64 / scale + geo_offset.y as f64;
 
     let compositor = &mut backend.compositor;
     let serial = SERIAL_COUNTER.next_serial();
     let time = compositor.start_time.elapsed().as_millis() as u32;
-
     let pointer = compositor.pointer.clone();
 
-    // Move pointer to the right-click position.
     pointer.motion(
         &mut compositor.state,
         Some((wl_surface.clone(), (0f64, 0f64).into())),
@@ -712,22 +661,20 @@ fn handle_activity_right_click(
             time,
         },
     );
-    // Press BTN_RIGHT.
     pointer.button(
         &mut compositor.state,
         &pointer::ButtonEvent {
-            button: 0x111, // BTN_RIGHT
+            button: BTN_RIGHT,
             state: ButtonState::Pressed,
             serial,
             time,
         },
     );
-    // Release BTN_RIGHT.
     let serial = SERIAL_COUNTER.next_serial();
     pointer.button(
         &mut compositor.state,
         &pointer::ButtonEvent {
-            button: 0x111,
+            button: BTN_RIGHT,
             state: ButtonState::Released,
             serial,
             time,
