@@ -4,6 +4,7 @@ use crate::android::{
     },
     compositor::{Compositor, State},
     proot::launch::launch,
+    utils::jni_context,
     window_manager::{self, WindowManager},
 };
 use smithay::output::{Mode, Output, PhysicalProperties, Scale, Subpixel};
@@ -12,12 +13,11 @@ use std::os::unix::io::{AsFd, AsRawFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use android_activity::AndroidApp;
 
 /// Run the compositor event loop on the current thread.
-/// Called from a background thread spawned in android_main.
-/// Independent of NativeActivity lifecycle — keeps running even if the Activity is destroyed.
-pub fn run_compositor_loop(android_app: AndroidApp, setup_done: Arc<AtomicBool>) {
+/// Called from a background thread spawned in nativeInit.
+/// Independent of Activity lifecycle — keeps running even if the Activity is destroyed.
+pub fn run_compositor_loop(setup_done: Arc<AtomicBool>) {
     // Create eventfd for waking the compositor from JNI/Wayland commits.
     let wake_fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK) };
     if wake_fd < 0 {
@@ -45,7 +45,7 @@ pub fn run_compositor_loop(android_app: AndroidApp, setup_done: Arc<AtomicBool>)
     compositor.state.wake_fd = Some(wake_fd);
 
     // Query display density via JNI.
-    let scale_factor = get_display_density(&android_app).unwrap_or(2.0);
+    let scale_factor = get_display_density().unwrap_or(2.0);
     log::info!("Display density: {scale_factor}");
 
     // Create wl_output with default size (updated when activities report dimensions).
@@ -74,13 +74,12 @@ pub fn run_compositor_loop(android_app: AndroidApp, setup_done: Arc<AtomicBool>)
 
     // Set up window manager.
     window_manager::set_wake_fd(wake_fd);
-    let window_manager = WindowManager::new(android_app.clone());
+    let window_manager = WindowManager::new();
 
     let mut backend = WaylandBackend {
         compositor,
         renderer: Some(renderer),
         window_manager: Some(window_manager),
-        android_app,
         wake_fd,
         clock: Clock::<Monotonic>::new(),
         key_counter: 0,
@@ -133,29 +132,26 @@ pub fn run_compositor_loop(android_app: AndroidApp, setup_done: Arc<AtomicBool>)
 }
 
 /// Query the display density (scale factor) from Android DisplayMetrics via JNI.
-fn get_display_density(android_app: &AndroidApp) -> Result<f64, jni::errors::Error> {
-    let vm = unsafe { jni::JavaVM::from_raw(android_app.vm_as_ptr() as *mut _) }?;
-    let mut env = vm.attach_current_thread()?;
-    let activity =
-        unsafe { jni::objects::JObject::from_raw(android_app.activity_as_ptr() as *mut _) };
-
-    // activity.getResources().getDisplayMetrics().density
-    let resources = env
-        .call_method(
-            &activity,
-            "getResources",
-            "()Landroid/content/res/Resources;",
-            &[],
-        )?
-        .l()?;
-    let metrics = env
-        .call_method(
-            &resources,
-            "getDisplayMetrics",
-            "()Landroid/util/DisplayMetrics;",
-            &[],
-        )?
-        .l()?;
-    let density = env.get_field(&metrics, "density", "F")?.f()?;
-    Ok(density as f64)
+fn get_display_density() -> Result<f64, jni::errors::Error> {
+    jni_context::with_jni(|env, activity| {
+        // activity.getResources().getDisplayMetrics().density
+        let resources = env
+            .call_method(
+                activity,
+                "getResources",
+                "()Landroid/content/res/Resources;",
+                &[],
+            )?
+            .l()?;
+        let metrics = env
+            .call_method(
+                &resources,
+                "getDisplayMetrics",
+                "()Landroid/util/DisplayMetrics;",
+                &[],
+            )?
+            .l()?;
+        let density = env.get_field(&metrics, "density", "F")?.f()?;
+        Ok(density as f64)
+    })
 }

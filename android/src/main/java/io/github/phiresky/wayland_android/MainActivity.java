@@ -1,7 +1,7 @@
 package io.github.phiresky.wayland_android;
 
 import android.Manifest;
-import android.app.NativeActivity;
+import android.app.Activity;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.PixelFormat;
@@ -15,13 +15,21 @@ import android.view.WindowManager;
 import android.widget.TextView;
 
 /**
- * Subclass of NativeActivity that forces a first frame draw to dismiss
- * the Android 12+ splash screen before native setup blocks android_main.
- *
- * Also hosts a status overlay showing connected Wayland client info.
+ * Main entry point for the Wayland compositor.
+ * Loads the native library and calls nativeInit() to start the compositor
+ * on a background thread. Also hosts setup and status overlays.
  */
-public class MainActivity extends NativeActivity {
+public class MainActivity extends Activity {
     private static volatile TextView sStatusView;
+    private boolean needsSetup = false;
+    private boolean overlayShown = false;
+
+    static {
+        System.loadLibrary("android_wayland_launcher");
+    }
+
+    // Native method: initializes compositor, returns true if first-run setup is needed.
+    private static native boolean nativeInit(Activity activity);
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -30,12 +38,13 @@ public class MainActivity extends NativeActivity {
         // Force the window to draw a frame, which dismisses the splash screen.
         View placeholder = new View(this);
         placeholder.setBackgroundColor(0xFF111111);
-        addContentView(placeholder,
-                new ViewGroup.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT));
-
+        setContentView(placeholder);
         reportFullyDrawn();
+
+        // Initialize native compositor (only on first create, not config changes).
+        if (savedInstanceState == null) {
+            needsSetup = nativeInit(this);
+        }
 
         // Request notification permission (required on Android 13+), then start
         // the foreground service to prevent DeX from killing the compositor.
@@ -58,8 +67,14 @@ public class MainActivity extends NativeActivity {
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
-        if (hasFocus && sStatusView == null) {
-            addStatusOverlay();
+        if (hasFocus) {
+            if (needsSetup && !overlayShown) {
+                SetupOverlay.show(this);
+                overlayShown = true;
+            }
+            if (sStatusView == null) {
+                addStatusOverlay();
+            }
         }
     }
 
@@ -87,9 +102,8 @@ public class MainActivity extends NativeActivity {
 
     @Override
     public void finish() {
-        // Don't destroy the NativeActivity — move to background instead.
-        // Destroying it kills winit's event loop, which stops all Wayland
-        // protocol processing and rendering, causing ANR.
+        // Don't destroy the Activity — move to background instead.
+        // The compositor runs independently on its own thread.
         moveTaskToBack(true);
     }
 

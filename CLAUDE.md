@@ -5,8 +5,8 @@ Rust-based Wayland compositor on Android. Linux apps run in proot+Arch ARM, rend
 ## Scripts
 
 ```sh
-./build.sh               # source .env, cargo ndk build, gradlew installDebug
-./build.sh --release      # pass extra args to cargo ndk build
+./build-install.sh               # source .env, cargo ndk build, gradlew installDebug
+./build-install.sh --release      # pass extra args to cargo ndk build
 ./run.sh                  # force-stop, start app, stream filtered logcat
 ./adb_runas.sh            # interactive shell in proot Arch rootfs
 ./adb_runas.sh pacman -S mesa-demos   # run a command in proot

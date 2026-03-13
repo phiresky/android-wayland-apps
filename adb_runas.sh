@@ -12,23 +12,28 @@ APK_DIR=$(adb shell pm path "$PKG" | grep base.apk | head -1 | sed 's|package:||
 LIBDIR="$APK_DIR/lib/arm64"
 
 # Interactive: run bash login shell directly; command: use sh -c
+# Use --noediting when rlwrap handles readline locally (avoids broken
+# tcsetattr through run-as UID mismatch)
 if [ $# -eq 0 ]; then
-    SHELL_CMD="bash -li"
+    if [ -t 0 ] && command -v rlwrap &>/dev/null; then
+        SHELL_CMD="bash --noediting -li"
+        USE_RLWRAP=1
+    else
+        SHELL_CMD="bash -li"
+        USE_RLWRAP=0
+    fi
 else
     SHELL_CMD="sh -c \"$*\""
+    USE_RLWRAP=0
 fi
 
-# Force PTY allocation when stdin is a terminal
-ADB_TTY=()
-if [ -t 0 ]; then
-    ADB_TTY=(-t)
-fi
-
-# Outer double quotes: local shell expands $PKG, $LIBDIR, $ROOTFS, $SHELL_CMD
-# Inner single quotes: device shell passes content literally to sh -c
-adb shell "${ADB_TTY[@]}" "run-as $PKG sh -c '
-export PROOT_LOADER=$LIBDIR/libproot_loader.so &&
-export PROOT_TMP_DIR=./files &&
+# Write a launcher script to the device so adb shell gets a simple command
+# (complex quoted commands prevent proper PTY/raw-mode handling)
+LAUNCHER=./files/.proot_launcher.sh
+adb shell run-as "$PKG" sh -c "'cat > $LAUNCHER'" << EOF
+#!/bin/sh
+export PROOT_LOADER=$LIBDIR/libproot_loader.so
+export PROOT_TMP_DIR=./files
 exec $LIBDIR/libproot.so \
     -r $ROOTFS \
     -L \
@@ -61,4 +66,17 @@ exec $LIBDIR/libproot.so \
     LOGNAME=root \
     XDG_RUNTIME_DIR=/tmp \
     $SHELL_CMD
-'"
+EOF
+
+# Run with -t for PTY allocation when interactive
+# rlwrap provides local readline (arrow keys, history, Ctrl+R) since
+# run-as UID switch prevents tcsetattr on adb's PTY
+if [ -t 0 ]; then
+    if [ "$USE_RLWRAP" = 1 ]; then
+        rlwrap -a adb shell -t run-as "$PKG" sh "$LAUNCHER"
+    else
+        adb shell -t run-as "$PKG" sh "$LAUNCHER"
+    fi
+else
+    adb shell run-as "$PKG" sh "$LAUNCHER"
+fi

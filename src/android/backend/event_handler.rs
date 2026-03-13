@@ -81,7 +81,7 @@ pub fn dispatch_wayland(backend: &mut WaylandBackend) {
                 })
             });
         if let Some(window_id) = window_id {
-            if let Err(e) = set_soft_keyboard_visible(&backend.android_app, window_id, visible) {
+            if let Err(e) = set_soft_keyboard_visible(window_id, visible) {
                 log::error!("Failed to set soft keyboard visibility: {e}");
             }
         }
@@ -204,6 +204,13 @@ fn process_window_events(backend: &mut WaylandBackend) {
                 meta_state: _,
             } => {
                 handle_activity_key(backend, window_id, key_code, action);
+            }
+            WindowEvent::RightClick {
+                window_id,
+                x,
+                y,
+            } => {
+                handle_activity_right_click(backend, window_id, x, y);
             }
         }
     }
@@ -371,81 +378,75 @@ fn update_status_overlay(backend: &mut WaylandBackend) {
     }
 
     log::debug!("Status: {}", info.trim());
-    if let Err(e) = send_status_jni(&backend.android_app, &info) {
+    if let Err(e) = send_status_jni(&info) {
         log::error!("Status overlay JNI call failed: {e}");
     }
 }
 
-fn send_status_jni(android_app: &android_activity::AndroidApp, text: &str) -> Result<(), jni::errors::Error> {
-    let vm = unsafe { jni::JavaVM::from_raw(android_app.vm_as_ptr() as *mut _) }?;
-    let mut env = vm.attach_current_thread()?;
-    let activity = unsafe { jni::objects::JObject::from_raw(android_app.activity_as_ptr() as *mut _) };
+fn send_status_jni(text: &str) -> Result<(), jni::errors::Error> {
+    crate::android::utils::jni_context::with_jni(|env, activity| {
+        let class_loader = env
+            .call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])?
+            .l()?;
+        let class_name = env.new_string("io.github.phiresky.wayland_android.MainActivity")?;
+        let main_class = env
+            .call_method(
+                &class_loader,
+                "loadClass",
+                "(Ljava/lang/String;)Ljava/lang/Class;",
+                &[jni::objects::JValue::Object(&class_name)],
+            )?
+            .l()?;
 
-    let class_loader = env
-        .call_method(&activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])?
-        .l()?;
-    let class_name = env.new_string("io.github.phiresky.wayland_android.MainActivity")?;
-    let main_class = env
-        .call_method(
-            &class_loader,
-            "loadClass",
-            "(Ljava/lang/String;)Ljava/lang/Class;",
-            &[jni::objects::JValue::Object(&class_name)],
-        )?
-        .l()?;
+        let jtext = env.new_string(text)?;
+        env.call_static_method(
+            unsafe { jni::objects::JClass::from_raw(main_class.as_raw()) },
+            "updateStatus",
+            "(Ljava/lang/String;)V",
+            &[jni::objects::JValue::Object(&jtext)],
+        )?;
 
-    let jtext = env.new_string(text)?;
-    env.call_static_method(
-        unsafe { jni::objects::JClass::from_raw(main_class.as_raw()) },
-        "updateStatus",
-        "(Ljava/lang/String;)V",
-        &[jni::objects::JValue::Object(&jtext)],
-    )?;
-
-    Ok(())
+        Ok(())
+    })
 }
 
 /// Show or hide the Android soft keyboard on a specific WaylandWindowActivity.
 fn set_soft_keyboard_visible(
-    android_app: &android_activity::AndroidApp,
     window_id: u32,
     visible: bool,
 ) -> Result<(), jni::errors::Error> {
-    let vm = unsafe { jni::JavaVM::from_raw(android_app.vm_as_ptr() as *mut _) }?;
-    let mut env = vm.attach_current_thread()?;
-    let activity =
-        unsafe { jni::objects::JObject::from_raw(android_app.activity_as_ptr() as *mut _) };
+    crate::android::utils::jni_context::with_jni(|env, activity| {
+        let class_loader = env
+            .call_method(
+                activity,
+                "getClassLoader",
+                "()Ljava/lang/ClassLoader;",
+                &[],
+            )?
+            .l()?;
+        let class_name =
+            env.new_string("io.github.phiresky.wayland_android.WaylandWindowActivity")?;
+        let window_class = env
+            .call_method(
+                &class_loader,
+                "loadClass",
+                "(Ljava/lang/String;)Ljava/lang/Class;",
+                &[jni::objects::JValue::Object(&class_name)],
+            )?
+            .l()?;
 
-    let class_loader = env
-        .call_method(
-            &activity,
-            "getClassLoader",
-            "()Ljava/lang/ClassLoader;",
-            &[],
-        )?
-        .l()?;
-    let class_name =
-        env.new_string("io.github.phiresky.wayland_android.WaylandWindowActivity")?;
-    let window_class = env
-        .call_method(
-            &class_loader,
-            "loadClass",
-            "(Ljava/lang/String;)Ljava/lang/Class;",
-            &[jni::objects::JValue::Object(&class_name)],
-        )?
-        .l()?;
+        env.call_static_method(
+            unsafe { jni::objects::JClass::from_raw(window_class.as_raw()) },
+            "setSoftKeyboardVisible",
+            "(IZ)V",
+            &[
+                jni::objects::JValue::Int(window_id as i32),
+                jni::objects::JValue::Bool(u8::from(visible)),
+            ],
+        )?;
 
-    env.call_static_method(
-        unsafe { jni::objects::JClass::from_raw(window_class.as_raw()) },
-        "setSoftKeyboardVisible",
-        "(IZ)V",
-        &[
-            jni::objects::JValue::Int(window_id as i32),
-            jni::objects::JValue::Bool(u8::from(visible)),
-        ],
-    )?;
-
-    Ok(())
+        Ok(())
+    })
 }
 
 /// Handle touch events from a WaylandWindowActivity.
@@ -548,6 +549,76 @@ fn handle_activity_touch(
         }
         _ => {}
     }
+}
+
+/// Handle a right-click from the long-press context menu.
+/// Sends pointer motion + BTN_RIGHT press + release to the Wayland client.
+fn handle_activity_right_click(
+    backend: &mut WaylandBackend,
+    window_id: u32,
+    x: f32,
+    y: f32,
+) {
+    let toplevel = {
+        let wm = match backend.window_manager.as_ref() {
+            Some(wm) => wm,
+            None => return,
+        };
+        match wm.windows.get(&window_id) {
+            Some(w) => w.toplevel.clone(),
+            None => return,
+        }
+    };
+
+    let scale = backend.scale_factor;
+    let geo_offset = wl_compositor::with_states(toplevel.wl_surface(), |states| {
+        states.cached_state.get::<SurfaceCachedState>()
+            .current()
+            .geometry
+            .map(|g| g.loc)
+            .unwrap_or_default()
+    });
+    let x = x as f64 / scale + geo_offset.x as f64;
+    let y = y as f64 / scale + geo_offset.y as f64;
+
+    let compositor = &mut backend.compositor;
+    let serial = SERIAL_COUNTER.next_serial();
+    let time = compositor.start_time.elapsed().as_millis() as u32;
+
+    let pointer = compositor.pointer.clone();
+
+    // Move pointer to the right-click position.
+    pointer.motion(
+        &mut compositor.state,
+        Some((toplevel.wl_surface().clone(), (0f64, 0f64).into())),
+        &pointer::MotionEvent {
+            location: (x, y).into(),
+            serial,
+            time,
+        },
+    );
+    // Press BTN_RIGHT.
+    pointer.button(
+        &mut compositor.state,
+        &pointer::ButtonEvent {
+            button: 0x111, // BTN_RIGHT
+            state: ButtonState::Pressed,
+            serial,
+            time,
+        },
+    );
+    // Release BTN_RIGHT.
+    let serial = SERIAL_COUNTER.next_serial();
+    pointer.button(
+        &mut compositor.state,
+        &pointer::ButtonEvent {
+            button: 0x111,
+            state: ButtonState::Released,
+            serial,
+            time,
+        },
+    );
+    pointer.frame(&mut compositor.state);
 }
 
 /// Handle key events from a WaylandWindowActivity.

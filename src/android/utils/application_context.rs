@@ -1,11 +1,9 @@
 use jni::{
     objects::{JObject, JString},
-    JavaVM,
     JNIEnv,
 };
 use std::path::PathBuf;
 use std::sync::RwLock;
-use android_activity::AndroidApp;
 
 #[derive(Debug, Clone)]
 pub struct ApplicationContext {
@@ -15,15 +13,10 @@ pub struct ApplicationContext {
 }
 
 impl ApplicationContext {
-    pub fn build(android_app: &AndroidApp) -> Result<(), Box<dyn std::error::Error>> {
-        let vm = unsafe { JavaVM::from_raw(android_app.vm_as_ptr() as *mut _) }?;
-        let mut env = vm.attach_current_thread()?;
-
-        let activity = unsafe { JObject::from_raw(android_app.activity_as_ptr() as *mut _) };
-
-        let cache_dir = Self::get_path(&mut env, &activity, "getCacheDir")?;
-        let data_dir = Self::get_path(&mut env, &activity, "getFilesDir")?;
-        let native_library_dir = Self::get_native_library_dir(&mut env, &activity)?;
+    pub fn build(env: &mut JNIEnv, activity: &JObject) -> Result<(), Box<dyn std::error::Error>> {
+        let cache_dir = Self::get_path(env, activity, "getCacheDir")?;
+        let data_dir = Self::get_path(env, activity, "getFilesDir")?;
+        let native_library_dir = Self::get_native_library_dir(env, activity)?;
 
         {
             let mut context = APPLICATION_CONTEXT
@@ -86,7 +79,7 @@ pub fn get_application_context() -> ApplicationContext {
     match guard.clone() {
         Some(ctx) => ctx,
         None => {
-            panic!("ApplicationContext is not initialized. Please make sure `ApplicationContext::build(&android_app)` is called in `android_main`.");
+            panic!("ApplicationContext is not initialized. Please make sure `ApplicationContext::build()` is called in `nativeInit`.");
         }
     }
 }

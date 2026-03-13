@@ -1,2 +1,2 @@
 pub mod application_context;
-pub mod ndk;
+pub mod jni_context;

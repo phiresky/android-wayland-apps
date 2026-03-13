@@ -24,15 +24,12 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
-            <meta-data
-                android:name="android.app.lib_name"
-                android:value="android_wayland_launcher" />
         </activity>
 
         <activity
             android:name="io.github.phiresky.wayland_android.WaylandWindowActivity"
             android:exported="false"
-            android:theme="@android:style/Theme.NoTitleBar"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar"
             android:launchMode="standard"
             android:taskAffinity=""
             android:documentLaunchMode="always"

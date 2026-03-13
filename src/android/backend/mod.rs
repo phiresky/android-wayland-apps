@@ -8,7 +8,6 @@ pub use egl::{init_egl_headless, CompositorRenderer};
 use smithay::utils::{Clock, Monotonic};
 use crate::android::compositor::Compositor;
 use crate::android::window_manager::WindowManager;
-use android_activity::AndroidApp;
 
 use std::os::unix::io::RawFd;
 
@@ -16,7 +15,6 @@ pub struct WaylandBackend {
     pub compositor: Compositor,
     pub renderer: Option<CompositorRenderer>,
     pub window_manager: Option<WindowManager>,
-    pub android_app: AndroidApp,
     pub wake_fd: RawFd,
     pub clock: Clock<Monotonic>,
     pub key_counter: u32,

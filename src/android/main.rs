@@ -1,17 +1,45 @@
 use crate::android::{
     app::run_compositor_loop,
     proot::setup,
-    utils::application_context::ApplicationContext,
+    utils::{application_context::ApplicationContext, jni_context},
 };
 use crate::core::config;
-use android_activity::{AndroidApp, MainEvent, PollEvent};
 use jni::objects::{JClass, JObject, JValue};
+use jni::sys::jint;
+use jni::JNIEnv;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
+/// Called by the JNI runtime when `System.loadLibrary` loads this .so.
 #[unsafe(no_mangle)]
-fn android_main(android_app: AndroidApp) {
+extern "system" fn JNI_OnLoad(
+    vm: *mut jni::sys::JavaVM,
+    _reserved: *mut std::ffi::c_void,
+) -> jint {
+    let vm = match unsafe { jni::JavaVM::from_raw(vm) } {
+        Ok(vm) => vm,
+        Err(_) => return -1,
+    };
+    jni_context::set_vm(vm);
+    jni::sys::JNI_VERSION_1_6
+}
+
+/// Guard against double-init (process survives Activity restart via foreground service).
+static INITIALIZED: AtomicBool = AtomicBool::new(false);
+
+/// Called from MainActivity.onCreate() to initialize the compositor.
+/// Returns true if first-run setup is needed (caller should show the setup overlay).
+#[unsafe(no_mangle)]
+extern "system" fn Java_io_github_phiresky_wayland_1android_MainActivity_nativeInit(
+    mut env: JNIEnv,
+    _class: JObject,
+    activity: JObject,
+) -> bool {
+    if INITIALIZED.swap(true, Ordering::SeqCst) {
+        log::info!("nativeInit called again — compositor already running");
+        return false;
+    }
+
     unsafe { std::env::set_var("RUST_BACKTRACE", "full") };
 
     // Initialize Android logger — Info level to avoid flooding logcat buffer.
@@ -19,10 +47,13 @@ fn android_main(android_app: AndroidApp) {
         android_logger::Config::default().with_max_level(log::LevelFilter::Info),
     );
 
+    // Store global JNI context (VM + Activity).
+    jni_context::init(&mut env, &activity);
+
     // Build the application context (resolves data_dir, native_library_dir, etc.)
-    if let Err(e) = ApplicationContext::build(&android_app) {
+    if let Err(e) = ApplicationContext::build(&mut env, &activity) {
         log::error!("Failed to build ApplicationContext: {e}");
-        return;
+        return false;
     }
 
     // Point libxkbcommon at the xkb data inside the Arch rootfs.
@@ -39,61 +70,33 @@ fn android_main(android_app: AndroidApp) {
     // Check if rootfs is present AND dependencies are installed.
     let needs_setup = !setup::is_setup_complete();
 
-    // Run setup in background so the event loop can start immediately
-    // (drawing the first frame dismisses the Android 12+ splash screen).
+    // Run setup in background so the Activity can start immediately.
     let setup_done = Arc::new(AtomicBool::new(!needs_setup));
 
     if needs_setup {
-        let app_clone = android_app.clone();
-        setup::set_ui_logger(move |msg| {
-            let _ = send_setup_log_jni(&app_clone, msg);
+        setup::set_ui_logger(|msg| {
+            let _ = send_setup_log_jni(msg);
         });
 
         let done = setup_done.clone();
-        let app_clone = android_app.clone();
         std::thread::spawn(move || {
             setup::run_setup();
             setup::clear_ui_logger();
-            let _ = hide_setup_overlay(&app_clone);
+            let _ = hide_setup_overlay();
             done.store(true, Ordering::Release);
             log::info!("Background setup complete");
         });
     }
 
-    // Spawn the compositor on a background thread, independent of NativeActivity lifecycle.
-    let compositor_app = android_app.clone();
-    let compositor_done = setup_done.clone();
+    // Spawn the compositor on a background thread, independent of Activity lifecycle.
+    let compositor_done = setup_done;
     let _ = std::thread::Builder::new()
         .name("compositor".into())
         .spawn(move || {
-            run_compositor_loop(compositor_app, compositor_done);
+            run_compositor_loop(compositor_done);
         });
 
-    // Run a minimal event loop to handle NativeActivity lifecycle.
-    // This keeps the native thread alive and processes Android lifecycle events.
-    // The compositor runs independently on its own thread.
-    let mut overlay_shown = false;
-    let mut destroyed = false;
-    while !destroyed {
-        android_app.poll_events(Some(Duration::from_secs(1)), |event| {
-            match event {
-                PollEvent::Main(MainEvent::InitWindow { .. }) => {
-                    if !overlay_shown && !setup_done.load(Ordering::Acquire) {
-                        let _ = show_setup_overlay(&android_app);
-                        overlay_shown = true;
-                    }
-                }
-                PollEvent::Main(MainEvent::Destroy) => {
-                    destroyed = true;
-                }
-                _ => {}
-            }
-        });
-    }
-
-    // Exit the process so Android starts fresh on next launch.
-    // ndk-context panics if ANativeActivity_onCreate runs twice in the same process.
-    std::process::exit(0);
+    needs_setup
 }
 
 // ---- JNI helpers for SetupOverlay ----
@@ -115,59 +118,36 @@ fn get_overlay_class<'a>(
     .l()
 }
 
-pub(crate) fn show_setup_overlay(android_app: &AndroidApp) -> Result<(), jni::errors::Error> {
-    let vm = unsafe { jni::JavaVM::from_raw(android_app.vm_as_ptr() as *mut _) }?;
-    let mut env = vm.attach_current_thread()?;
-    let activity = unsafe { JObject::from_raw(android_app.activity_as_ptr() as *mut _) };
+fn send_setup_log_jni(msg: &str) -> Result<(), jni::errors::Error> {
+    jni_context::with_jni(|env, activity| {
+        let overlay_class = get_overlay_class(env, activity)?;
+        let overlay_jclass: JClass = unsafe { JClass::from_raw(overlay_class.as_raw()) };
 
-    let overlay_class = get_overlay_class(&mut env, &activity)?;
-    let overlay_jclass: JClass = unsafe { JClass::from_raw(overlay_class.as_raw()) };
+        let jmsg = env.new_string(msg)?;
+        env.call_static_method(
+            overlay_jclass,
+            "appendLog",
+            "(Ljava/lang/String;)V",
+            &[JValue::Object(&jmsg)],
+        )?;
 
-    env.call_static_method(
-        overlay_jclass,
-        "show",
-        "(Landroid/app/Activity;)V",
-        &[JValue::Object(&activity)],
-    )?;
-
-    log::info!("Showing setup overlay");
-    Ok(())
+        Ok(())
+    })
 }
 
-fn send_setup_log_jni(android_app: &AndroidApp, msg: &str) -> Result<(), jni::errors::Error> {
-    let vm = unsafe { jni::JavaVM::from_raw(android_app.vm_as_ptr() as *mut _) }?;
-    let mut env = vm.attach_current_thread()?;
-    let activity = unsafe { JObject::from_raw(android_app.activity_as_ptr() as *mut _) };
+fn hide_setup_overlay() -> Result<(), jni::errors::Error> {
+    jni_context::with_jni(|env, activity| {
+        let overlay_class = get_overlay_class(env, activity)?;
+        let overlay_jclass: JClass = unsafe { JClass::from_raw(overlay_class.as_raw()) };
 
-    let overlay_class = get_overlay_class(&mut env, &activity)?;
-    let overlay_jclass: JClass = unsafe { JClass::from_raw(overlay_class.as_raw()) };
+        env.call_static_method(
+            overlay_jclass,
+            "hide",
+            "(Landroid/app/Activity;)V",
+            &[JValue::Object(activity)],
+        )?;
 
-    let jmsg = env.new_string(msg)?;
-    env.call_static_method(
-        overlay_jclass,
-        "appendLog",
-        "(Ljava/lang/String;)V",
-        &[JValue::Object(&jmsg)],
-    )?;
-
-    Ok(())
-}
-
-fn hide_setup_overlay(android_app: &AndroidApp) -> Result<(), jni::errors::Error> {
-    let vm = unsafe { jni::JavaVM::from_raw(android_app.vm_as_ptr() as *mut _) }?;
-    let mut env = vm.attach_current_thread()?;
-    let activity = unsafe { JObject::from_raw(android_app.activity_as_ptr() as *mut _) };
-
-    let overlay_class = get_overlay_class(&mut env, &activity)?;
-    let overlay_jclass: JClass = unsafe { JClass::from_raw(overlay_class.as_raw()) };
-
-    env.call_static_method(
-        overlay_jclass,
-        "hide",
-        "(Landroid/app/Activity;)V",
-        &[JValue::Object(&activity)],
-    )?;
-
-    log::info!("Setup overlay hidden");
-    Ok(())
+        log::info!("Setup overlay hidden");
+        Ok(())
+    })
 }

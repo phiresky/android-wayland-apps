@@ -2,14 +2,19 @@ package io.github.phiresky.wayland_android;
 
 import android.app.Activity;
 import android.os.Bundle;
+import android.view.GestureDetector;
+import android.view.MotionEvent;
 import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
+import android.view.View;
 import android.view.KeyEvent;
 import android.view.inputmethod.BaseInputConnection;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.InputMethodManager;
+import android.widget.FrameLayout;
+import android.widget.PopupMenu;
 import java.lang.ref.WeakReference;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -24,6 +29,8 @@ public class WaylandWindowActivity extends Activity implements SurfaceHolder.Cal
 
     private int windowId = -1;
     private SurfaceView surfaceView;
+    private View menuAnchor;
+    private boolean longPressActive = false;
 
     static {
         System.loadLibrary("android_wayland_launcher");
@@ -59,17 +66,78 @@ public class WaylandWindowActivity extends Activity implements SurfaceHolder.Cal
         };
         surfaceView.setFocusable(true);
         surfaceView.setFocusableInTouchMode(true);
-        setContentView(surfaceView);
+
+        // Wrap in FrameLayout so we can position a tiny anchor view for the popup menu.
+        FrameLayout container = new FrameLayout(this);
+        container.addView(surfaceView);
+        menuAnchor = new View(this);
+        menuAnchor.setLayoutParams(new FrameLayout.LayoutParams(1, 1));
+        container.addView(menuAnchor);
+        setContentView(container);
+
         surfaceView.getHolder().addCallback(this);
 
         sInstances.put(windowId, new WeakReference<>(this));
+
+        // Long-press detector: shows context menu with right-click and keyboard options.
+        final int wid = windowId;
+        GestureDetector gestureDetector = new GestureDetector(this,
+                new GestureDetector.SimpleOnGestureListener() {
+                    @Override
+                    public void onLongPress(MotionEvent e) {
+                        longPressActive = true;
+                        // Release the left button that was sent on ACTION_DOWN.
+                        nativeOnTouchEvent(wid, MotionEvent.ACTION_UP, e.getX(), e.getY());
+                        showLongPressMenu(e.getX(), e.getY());
+                    }
+                });
 
         // Handle touch on the SurfaceView directly so coordinates are relative
         // to the rendering surface, not the Activity window (which includes
         // DeX title bar / window chrome).
         surfaceView.setOnTouchListener((v, event) -> {
+            gestureDetector.onTouchEvent(event);
+
+            if (longPressActive) {
+                // Suppress touch events while the popup menu is showing.
+                // Resume normal forwarding once the finger lifts.
+                int action = event.getActionMasked();
+                if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                    longPressActive = false;
+                }
+                return true;
+            }
+
             return nativeOnTouchEvent(windowId, event.getAction(), event.getX(), event.getY());
         });
+    }
+
+    /** Show a context menu at the long-press position with right-click and keyboard options. */
+    private void showLongPressMenu(float x, float y) {
+        // Position the invisible anchor at the touch point.
+        menuAnchor.setX(x);
+        menuAnchor.setY(y);
+
+        PopupMenu popup = new PopupMenu(this, menuAnchor);
+        popup.getMenu().add(0, 1, 0, "Right click");
+        popup.getMenu().add(0, 2, 0, "Show keyboard");
+        popup.setOnMenuItemClickListener(item -> {
+            switch (item.getItemId()) {
+                case 1:
+                    nativeRightClick(windowId, x, y);
+                    return true;
+                case 2:
+                    InputMethodManager imm =
+                            (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+                    if (imm != null) {
+                        surfaceView.requestFocus();
+                        imm.showSoftInput(surfaceView, InputMethodManager.SHOW_IMPLICIT);
+                    }
+                    return true;
+            }
+            return false;
+        });
+        popup.show();
     }
 
     @Override
@@ -145,4 +213,5 @@ public class WaylandWindowActivity extends Activity implements SurfaceHolder.Cal
     private static native void nativeWindowClosed(int windowId, boolean isFinishing);
     private static native boolean nativeOnTouchEvent(int windowId, int action, float x, float y);
     private static native boolean nativeOnKeyEvent(int windowId, int keyCode, int action, int metaState);
+    private static native void nativeRightClick(int windowId, float x, float y);
 }
