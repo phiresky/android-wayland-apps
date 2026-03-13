@@ -152,7 +152,7 @@ Goal: eliminate CPU copy in the rendering path.
 
 - [ ] SOUND SUPPORT. pipewire.
 
- ## Recent Fixes
+## Recent Fixes
 
 - [x] Automated first-run setup (download rootfs, install weston via pacman)
 - [x] Setup progress overlay (SetupOverlay.java, WindowManager panel)
@@ -162,6 +162,12 @@ Goal: eliminate CPU copy in the rendering path.
 - [x] process::exit(0) after event loop (prevents ndk-context double-init panic)
 - [x] keepDebugSymbols in Gradle (readable stack traces)
 - [x] Status overlay via JNI (client/toplevel info on main activity)
+- [x] MANAGE_EXTERNAL_STORAGE permission: prompt on launch via Settings redirect
+- [x] CAMERA permission: requested on launch (grants /dev/video* access in proot via camera group)
+- [x] Bind /storage/emulated/0 and /sdcard in proot (conditional on permission being granted)
+- [x] setup_storage_mountpoints(): create bind destination dirs in rootfs during setup
+- [x] Launcher icon fixes: SVG support (androidsvg library), search AdwaitaLegacy/legacy subdir
+- [x] proot launch fix: restore probe-based seccomp (PROOT_NO_SECCOMP=1 breaks exec in app context), drop runuser in favour of direct sh (setuid fails without seccomp virtualization)
 
 ## Known Issues
 
