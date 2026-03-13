@@ -149,7 +149,10 @@ Goal: eliminate CPU copy in the rendering path.
 - [ ] Configurable HiDPI scale (default taken from android but changeable)
 - [ ] Main UI shows setup status including whether all necessary permissions are granted.
 - [ ] hideable apps in app launcher are configurable - long press shows menu with hide buton and there's a button to unhide all.
-## Recent Fixes
+
+- [ ] SOUND SUPPORT. pipewire.
+
+ ## Recent Fixes
 
 - [x] Automated first-run setup (download rootfs, install weston via pacman)
 - [x] Setup progress overlay (SetupOverlay.java, WindowManager panel)

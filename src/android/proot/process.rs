@@ -87,9 +87,11 @@ impl ArchProcess {
             )
             .env("PROOT_TMP_DIR", context.data_dir);
 
-        if *USE_NO_SECCOMP.get().unwrap_or(&false) {
-            process.env("PROOT_NO_SECCOMP", "1");
-        }
+        // Always disable proot's seccomp filter so that unrecognized ioctls
+        // (e.g. KGSL GPU ioctls) are passed through to the kernel rather than
+        // returning ENOTTY. With seccomp enabled, proot traps ioctl() for path
+        // translation and returns ENOTTY for anything it doesn't recognise.
+        process.env("PROOT_NO_SECCOMP", "1");
 
         process
             .arg("-r")
@@ -102,7 +104,8 @@ impl ArchProcess {
             .arg("--bind=/dev")
             .arg("--bind=/proc")
             .arg("--bind=/sys")
-            .arg("--bind=/storage")
+            .arg("--bind=/storage/emulated/0:/storage/emulated/0")
+            .arg("--bind=/storage/emulated/0:/sdcard")
             .arg(format!("--bind={}/tmp:/dev/shm", config::ARCH_FS_ROOT));
 
         process
@@ -138,6 +141,7 @@ impl ArchProcess {
         process
             .arg(format!("WAYLAND_DISPLAY={}", config::WAYLAND_SOCKET_NAME))
             .arg("XDG_RUNTIME_DIR=/tmp")
+            .arg("QT_QPA_PLATFORM=wayland")
             .arg("TERM=xterm-256color")
             .arg("SHELL=/bin/bash");
 

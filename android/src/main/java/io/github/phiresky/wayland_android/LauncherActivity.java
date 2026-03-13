@@ -15,6 +15,7 @@ import android.text.TextUtils;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
+import android.view.ViewTreeObserver;
 import android.widget.GridLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -41,6 +42,9 @@ public class LauncherActivity extends Activity {
     private DesktopEntry[] extraApps = {};
     private LinearLayout container;
     private SwipeRefreshLayout swipeRefresh;
+
+    private List<DesktopEntry> cachedApps = new ArrayList<>();
+    private int lastGridWidth = 0;
 
     private static final int[] ICON_COLORS = {
             0xFF4285F4, 0xFFEA4335, 0xFFFBBC05, 0xFF34A853,
@@ -92,14 +96,28 @@ public class LauncherActivity extends Activity {
         swipeRefresh.setOnRefreshListener(this::refreshApps);
         setContentView(swipeRefresh);
 
+        swipeRefresh.addOnLayoutChangeListener((v, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom) -> {
+            int newWidth = right - left;
+            if (newWidth > 0 && newWidth != lastGridWidth && !cachedApps.isEmpty()) {
+                rebuildGrid();
+            }
+        });
+
         refreshApps();
     }
 
     private void refreshApps() {
-        container.removeAllViews();
-        List<DesktopEntry> apps = scanDesktopFiles();
+        cachedApps = scanDesktopFiles();
+        rebuildGrid();
+        if (swipeRefresh.isRefreshing()) {
+            swipeRefresh.setRefreshing(false);
+        }
+    }
 
-        if (apps.isEmpty()) {
+    private void rebuildGrid() {
+        container.removeAllViews();
+
+        if (cachedApps.isEmpty()) {
             TextView empty = new TextView(this);
             empty.setText("No applications found.\nCheck that the Arch rootfs setup completed.");
             empty.setTextColor(0xFF888888);
@@ -107,28 +125,38 @@ public class LauncherActivity extends Activity {
             empty.setPadding(dp(16), dp(48), dp(16), dp(48));
             empty.setGravity(Gravity.CENTER);
             container.addView(empty);
-        } else {
-            int columns = 4;
-            GridLayout grid = new GridLayout(this);
-            grid.setColumnCount(columns);
-
-            for (int i = 0; i < apps.size(); i++) {
-                DesktopEntry app = apps.get(i);
-                View cell = createAppCell(app, i);
-
-                GridLayout.LayoutParams params = new GridLayout.LayoutParams();
-                params.width = 0;
-                params.columnSpec = GridLayout.spec(i % columns, 1, 1f);
-                params.setMargins(dp(2), dp(2), dp(2), dp(2));
-                grid.addView(cell, params);
-            }
-
-            container.addView(grid);
+            return;
         }
 
-        if (swipeRefresh.isRefreshing()) {
-            swipeRefresh.setRefreshing(false);
+        int containerWidth = container.getWidth();
+        if (containerWidth == 0) {
+            container.getViewTreeObserver().addOnGlobalLayoutListener(new ViewTreeObserver.OnGlobalLayoutListener() {
+                @Override
+                public void onGlobalLayout() {
+                    container.getViewTreeObserver().removeOnGlobalLayoutListener(this);
+                    rebuildGrid();
+                }
+            });
+            return;
         }
+
+        int columns = Math.max(2, containerWidth / dp(88));
+        lastGridWidth = containerWidth;
+        GridLayout grid = new GridLayout(this);
+        grid.setColumnCount(columns);
+
+        for (int i = 0; i < cachedApps.size(); i++) {
+            DesktopEntry app = cachedApps.get(i);
+            View cell = createAppCell(app, i);
+
+            GridLayout.LayoutParams params = new GridLayout.LayoutParams();
+            params.width = 0;
+            params.columnSpec = GridLayout.spec(i % columns, 1, 1f);
+            params.setMargins(dp(2), dp(2), dp(2), dp(2));
+            grid.addView(cell, params);
+        }
+
+        container.addView(grid);
     }
 
     private View createAppCell(DesktopEntry app, int index) {
@@ -217,6 +245,8 @@ public class LauncherActivity extends Activity {
 
     private static final String[] ICON_EXTENSIONS = {".png", ".svg", ".xpm"};
     private static final int[] ICON_SIZES = {256, 128, 64, 48, 32, 24, 22};
+    private static final String[] ICON_THEMES = {"hicolor", "AdwaitaLegacy", "Adwaita"};
+    private static final String[] ICON_SUBDIRS = {"apps", "legacy"};
 
     private Drawable loadIcon(String iconName, int targetSize) {
         if (iconName == null || iconName.isEmpty()) return null;
@@ -237,22 +267,27 @@ public class LauncherActivity extends Activity {
             return decodeIcon(new File(rootfs + iconName), targetSize);
         }
 
-        // Search hicolor theme in descending size order
-        String iconsBase = rootfs + "/usr/share/icons/hicolor";
-        for (int size : ICON_SIZES) {
-            String sizeDir = size + "x" + size;
-            for (String ext : ICON_EXTENSIONS) {
-                File f = new File(iconsBase + "/" + sizeDir + "/apps/" + iconName + ext);
-                Drawable d = decodeIcon(f, targetSize);
-                if (d != null) return d;
+        String iconsBase = rootfs + "/usr/share/icons";
+        for (String theme : ICON_THEMES) {
+            // Search sized directories in descending order
+            for (int size : ICON_SIZES) {
+                String sizeDir = size + "x" + size;
+                for (String subdir : ICON_SUBDIRS) {
+                    for (String ext : ICON_EXTENSIONS) {
+                        File f = new File(iconsBase + "/" + theme + "/" + sizeDir + "/" + subdir + "/" + iconName + ext);
+                        Drawable d = decodeIcon(f, targetSize);
+                        if (d != null) return d;
+                    }
+                }
             }
-        }
-
-        // Try scalable
-        for (String ext : ICON_EXTENSIONS) {
-            File f = new File(iconsBase + "/scalable/apps/" + iconName + ext);
-            Drawable d = decodeIcon(f, targetSize);
-            if (d != null) return d;
+            // Try scalable
+            for (String subdir : ICON_SUBDIRS) {
+                for (String ext : ICON_EXTENSIONS) {
+                    File f = new File(iconsBase + "/" + theme + "/scalable/" + subdir + "/" + iconName + ext);
+                    Drawable d = decodeIcon(f, targetSize);
+                    if (d != null) return d;
+                }
+            }
         }
 
         // Try pixmaps
@@ -267,12 +302,29 @@ public class LauncherActivity extends Activity {
 
     private Drawable decodeIcon(File file, int targetSize) {
         if (!file.exists()) return null;
+        if (file.getName().endsWith(".svg")) {
+            return decodeSvgIcon(file, targetSize);
+        }
         try {
             Bitmap bmp = BitmapFactory.decodeFile(file.getAbsolutePath());
             if (bmp == null) return null;
             if (bmp.getWidth() != targetSize || bmp.getHeight() != targetSize) {
                 bmp = Bitmap.createScaledBitmap(bmp, targetSize, targetSize, true);
             }
+            return new BitmapDrawable(getResources(), bmp);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private Drawable decodeSvgIcon(File file, int targetSize) {
+        try (java.io.FileInputStream fis = new java.io.FileInputStream(file)) {
+            com.caverock.androidsvg.SVG svg = com.caverock.androidsvg.SVG.getFromInputStream(fis);
+            Bitmap bmp = Bitmap.createBitmap(targetSize, targetSize, Bitmap.Config.ARGB_8888);
+            Canvas canvas = new Canvas(bmp);
+            svg.setDocumentWidth(targetSize);
+            svg.setDocumentHeight(targetSize);
+            svg.renderToCanvas(canvas);
             return new BitmapDrawable(getResources(), bmp);
         } catch (Exception e) {
             return null;

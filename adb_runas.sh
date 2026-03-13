@@ -2,6 +2,7 @@
 # Run a command inside the app's proot Arch rootfs on the device.
 # Usage: ./adb_runas.sh [user] [command...]
 #        ./adb_runas.sh alarm pacman -S mesa-demos
+#        ./adb_runas.sh alarm sh -c 'cmd1 && cmd2'
 #        ./adb_runas.sh pacman -S mesa-demos   (runs as root)
 #        ./adb_runas.sh                        (interactive root shell)
 #        ./adb_runas.sh alarm                  (interactive alarm shell)
@@ -27,25 +28,33 @@ else
     HOMEDIR="/home/$PROOT_USER"
 fi
 
-# Interactive: run bash login shell directly; command: use sh -c
-# Use --noediting when rlwrap handles readline locally (avoids broken
-# tcsetattr through run-as UID mismatch)
+# Write the actual command to a script file inside the rootfs.
+# This avoids nested sh -c quoting issues — args are encoded with printf %q
+# so special characters survive the heredoc expansion intact.
+CMD_FILE=$ROOTFS/tmp/.proot_cmd.sh
+USE_RLWRAP=0
 if [ $# -eq 0 ]; then
     if [ -t 0 ] && command -v rlwrap &>/dev/null; then
-        SHELL_CMD="bash --noediting -li"
         USE_RLWRAP=1
+        CMD_CONTENT="exec bash --noediting -li"
     else
-        SHELL_CMD="bash -li"
-        USE_RLWRAP=0
+        CMD_CONTENT="exec bash -li"
     fi
 else
-    SHELL_CMD="sh -c \"$*\""
-    USE_RLWRAP=0
+    # printf %q properly quotes each arg; the result is a valid sh command line
+    CMD_CONTENT=$(printf '%q ' "$@")
 fi
 
-# Wrap command with runuser if non-root
-if [ "$PROOT_USER" != "root" ]; then
-    SHELL_CMD="runuser -u $PROOT_USER -- $SHELL_CMD"
+adb shell run-as "$PKG" sh -c "'cat > $CMD_FILE'" << CMDEOF
+#!/bin/sh
+$CMD_CONTENT
+CMDEOF
+
+# Build the shell invocation for the launcher
+if [ "$PROOT_USER" = "root" ]; then
+    SHELL_CMD="sh /tmp/.proot_cmd.sh"
+else
+    SHELL_CMD="runuser -u $PROOT_USER -- sh /tmp/.proot_cmd.sh"
 fi
 
 # Write a launcher script to the device so adb shell gets a simple command
@@ -66,6 +75,9 @@ exec $LIBDIR/libproot.so \
     --bind=/dev \
     --bind=/proc \
     --bind=/sys \
+    --bind=/storage/emulated/0:/storage/emulated/0 \
+    --bind=/storage/emulated/0:/sdcard \
+    --bind=/data/local/tmp \
     --bind=$ROOTFS/tmp:/dev/shm \
     --bind=/dev/urandom:/dev/random \
     --bind=/proc/self/fd:/dev/fd \
