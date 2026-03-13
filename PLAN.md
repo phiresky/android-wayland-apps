@@ -148,7 +148,7 @@ Goal: eliminate CPU copy in the rendering path.
 - [ ] Config UI: username, launch command, check/install commands (currently hardcoded constants in config.rs)
 - [ ] Configurable HiDPI scale (default taken from android but changeable)
 - [ ] Main UI shows setup status including whether all necessary permissions are granted.
-
+- [ ] hideable apps in app launcher are configurable - long press shows menu with hide buton and there's a button to unhide all.
 ## Recent Fixes
 
 - [x] Automated first-run setup (download rootfs, install weston via pacman)

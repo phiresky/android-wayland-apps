@@ -42,6 +42,7 @@ android {
 
 dependencies {
     implementation("androidx.core:core:1.16.0")
+    implementation("androidx.swiperefreshlayout:swiperefreshlayout:1.1.0")
 }
 
 // Copy all native .so files into jniLibs before build

@@ -7,6 +7,7 @@ use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
     delegate_compositor, delegate_data_device, delegate_fractional_scale, delegate_layer_shell,
     delegate_output, delegate_seat, delegate_shm, delegate_xdg_decoration, delegate_xdg_shell,
+    desktop::{PopupKind, PopupManager},
     input::{self, keyboard::KeyboardHandle, touch::TouchHandle, Seat, SeatHandler, SeatState},
     output::Output,
     reexports::{
@@ -90,6 +91,8 @@ pub struct State {
     pub destroyed_toplevels: Vec<ToplevelSurface>,
     /// Layer surfaces destroyed by the client, queued for Activity cleanup.
     pub destroyed_layer_surfaces: Vec<LayerSurface>,
+    /// Tracks popup surfaces for rendering and hit-testing.
+    pub popup_manager: PopupManager,
 }
 
 impl BufferHandler for State {
@@ -112,9 +115,12 @@ impl XdgShellHandler for State {
 
     fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {
         // Send initial configure so the client doesn't block waiting for it.
-        // Popups are rendered as subsurfaces of their parent toplevel.
         if let Err(e) = surface.send_configure() {
             log::warn!("Failed to send popup configure: {:?}", e);
+        }
+        // Register with PopupManager so it's included in rendering and hit-testing.
+        if let Err(e) = self.popup_manager.track_popup(PopupKind::Xdg(surface)) {
+            log::warn!("Failed to track popup: {:?}", e);
         }
     }
 
@@ -188,6 +194,8 @@ impl CompositorHandler for State {
 
     fn commit(&mut self, surface: &WlSurface) {
         on_commit_buffer_handler::<Self>(surface);
+        // Update PopupManager so newly-mapped popups are tracked on their parent.
+        self.popup_manager.commit(surface);
         // Wake the compositor thread to render the new content.
         if let Some(&fd) = self.wake_fd.as_ref() {
             signal_wake(fd);
@@ -334,6 +342,7 @@ impl Compositor {
             soft_keyboard_request: None,
             destroyed_toplevels: Vec::new(),
             destroyed_layer_surfaces: Vec::new(),
+            popup_manager: PopupManager::default(),
         };
 
         Ok(Compositor {

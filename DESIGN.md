@@ -139,6 +139,7 @@ directly.
 - Buffer is presented to the Activity's surface via ASurfaceTransaction
 - Zero CPU copies in the rendering path
 - Requires implementing a custom smithay allocator backed by AHardwareBuffer
+- check also https://github.com/tareksander/hardware-buffer-rs and  https://github.com/Xtr126/wlroots-android-bridge
 
 ## Input Path
 

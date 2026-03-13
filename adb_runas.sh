@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Run a command inside the app's proot Arch rootfs on the device.
-# Usage: ./adb_runas.sh pacman -S mesa-demos
-#        ./adb_runas.sh           (interactive shell)
+# Usage: ./adb_runas.sh [user] [command...]
+#        ./adb_runas.sh alarm pacman -S mesa-demos
+#        ./adb_runas.sh pacman -S mesa-demos   (runs as root)
+#        ./adb_runas.sh                        (interactive root shell)
+#        ./adb_runas.sh alarm                  (interactive alarm shell)
 set -euo pipefail
 
 PKG=io.github.phiresky.wayland_android
@@ -10,6 +13,19 @@ ROOTFS=./files/arch
 # Resolve native lib dir from package path
 APK_DIR=$(adb shell pm path "$PKG" | grep base.apk | head -1 | sed 's|package:||;s|/base.apk||' | tr -d '\r')
 LIBDIR="$APK_DIR/lib/arm64"
+
+# Check if first arg is a known user (alarm) or root
+PROOT_USER=root
+if [ $# -gt 0 ] && [ "$1" = "alarm" ]; then
+    PROOT_USER="$1"
+    shift
+fi
+
+if [ "$PROOT_USER" = "root" ]; then
+    HOMEDIR=/root
+else
+    HOMEDIR="/home/$PROOT_USER"
+fi
 
 # Interactive: run bash login shell directly; command: use sh -c
 # Use --noediting when rlwrap handles readline locally (avoids broken
@@ -27,6 +43,11 @@ else
     USE_RLWRAP=0
 fi
 
+# Wrap command with runuser if non-root
+if [ "$PROOT_USER" != "root" ]; then
+    SHELL_CMD="runuser -u $PROOT_USER -- $SHELL_CMD"
+fi
+
 # Write a launcher script to the device so adb shell gets a simple command
 # (complex quoted commands prevent proper PTY/raw-mode handling)
 LAUNCHER=./files/.proot_launcher.sh
@@ -41,7 +62,7 @@ exec $LIBDIR/libproot.so \
     --sysvipc \
     --kill-on-exit \
     --root-id \
-    -w /root \
+    -w $HOMEDIR \
     --bind=/dev \
     --bind=/proc \
     --bind=/sys \
@@ -57,13 +78,13 @@ exec $LIBDIR/libproot.so \
     --bind=$ROOTFS/proc/.sysctl_inotify_max_user_watches:/proc/sys/fs/inotify/max_user_watches \
     --bind=$ROOTFS/sys/.empty:/sys/fs/selinux \
     /usr/bin/env -i \
-    HOME=/root \
+    HOME=$HOMEDIR \
     LANG=C.UTF-8 \
     TERM=xterm-256color \
     PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     TMPDIR=/tmp \
-    USER=root \
-    LOGNAME=root \
+    USER=$PROOT_USER \
+    LOGNAME=$PROOT_USER \
     XDG_RUNTIME_DIR=/tmp \
     $SHELL_CMD
 EOF

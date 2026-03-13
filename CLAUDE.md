@@ -19,8 +19,7 @@ Rust-based Wayland compositor on Android. Linux apps run in proot+Arch ARM, rend
 ## Device
 
 ```sh
-# Take screenshot (Samsung fold, display ID required):
-adb exec-out screencap -p -d 4630947200649055635 > screenshot.png
+./screenshot.sh                   # take screenshot (saves screenshot.png)
 ```
 
 ## Arch Rootfs Setup (automated)

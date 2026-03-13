@@ -2,6 +2,7 @@ use crate::android::utils::application_context::get_application_context;
 use crate::core::config;
 use std::io::{BufRead, BufReader};
 use std::os::unix::process::ExitStatusExt;
+use std::path::Path;
 use std::process::{Command, ExitStatus, Output, Stdio};
 use std::sync::{Arc, OnceLock};
 
@@ -135,7 +136,15 @@ impl ArchProcess {
         // Wayland environment variables
         process
             .arg(format!("WAYLAND_DISPLAY={}", config::WAYLAND_SOCKET_NAME))
-            .arg("XDG_RUNTIME_DIR=/tmp");
+            .arg("XDG_RUNTIME_DIR=/tmp")
+            .arg("TERM=xterm-256color")
+            .arg("SHELL=/bin/bash");
+
+        // Work around Android SELinux blocking readdir on /dev/pts (see setup.rs fix_ttyname)
+        let fix_ttyname = Path::new(config::ARCH_FS_ROOT).join("usr/lib/fix_ttyname.so");
+        if fix_ttyname.exists() {
+            process.arg("LD_PRELOAD=/usr/lib/fix_ttyname.so");
+        }
 
         // user shell
         if user == "root" {

@@ -9,6 +9,7 @@ use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::utils::draw_render_elements;
 use smithay::backend::renderer::{Color32F, Frame, Renderer};
+use smithay::desktop::{utils::under_from_surface_tree, PopupManager, WindowSurfaceType};
 use smithay::input::keyboard::FilterResult;
 use smithay::input::pointer;
 use smithay::utils::{Rectangle, Transform, SERIAL_COUNTER};
@@ -30,6 +31,11 @@ const BTN_RIGHT: u32 = 0x111;
 const ACTION_DOWN: i32 = 0;
 const ACTION_UP: i32 = 1;
 const ACTION_MOVE: i32 = 2;
+
+/// Height of the Samsung DeX window title bar in physical pixels.
+/// setLaunchBounds specifies outer window bounds (including chrome),
+/// so we add this to the content height to get the correct content area.
+const DEX_TITLE_BAR_HEIGHT: i32 = 70;
 
 /// One iteration of the compositor loop: dispatch protocol, render, update status.
 pub fn compositor_tick(backend: &mut WaylandBackend) {
@@ -54,6 +60,10 @@ pub fn dispatch_wayland(backend: &mut WaylandBackend) {
             }
         }
     }
+
+    // Launch Activities for windows whose clients have committed (geometry available),
+    // or after a timeout for slow clients. Uses setLaunchBounds for correct DeX sizing.
+    launch_pending_activities(backend);
 
     // Process destroyed surfaces (toplevels and layers): finish their Android Activities.
     let destroyed_toplevels: Vec<ToplevelSurface> =
@@ -298,9 +308,9 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                 None => continue,
             };
             let surface = window.surface_kind.wl_surface().clone();
-            // Get the geometry (content area excluding CSD shadows).
+            // Get the geometry origin (content area excluding CSD shadows).
             // Only toplevels have XDG geometry; layer surfaces don't.
-            let geo_loc = match &window.surface_kind {
+            let geo_offset = match &window.surface_kind {
                 SurfaceKind::Toplevel(_) => {
                     wl_compositor::with_states(&surface, |states| {
                         states.cached_state.get::<SurfaceCachedState>()
@@ -312,7 +322,7 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                 }
                 SurfaceKind::Layer(_) => Default::default(),
             };
-            (surface, window.size, geo_loc)
+            (surface, window.size, geo_offset)
         };
 
         let damage = Rectangle::from_size(size);
@@ -342,15 +352,31 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                 ((-geo_offset.x) as f64 * scale).round() as i32,
                 ((-geo_offset.y) as f64 * scale).round() as i32,
             );
-            let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
-                render_elements_from_surface_tree(
+            // Collect popup elements first (rendered on top of the main surface).
+            let mut elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
+            for (popup, popup_offset) in PopupManager::popups_for_surface(&wl_surface) {
+                let offset = popup_offset - popup.geometry().loc + geo_offset;
+                let popup_render_offset = (
+                    ((-geo_offset.x + offset.x) as f64 * scale).round() as i32,
+                    ((-geo_offset.y + offset.y) as f64 * scale).round() as i32,
+                );
+                elements.extend(render_elements_from_surface_tree(
+                    renderer,
+                    popup.wl_surface(),
+                    popup_render_offset,
+                    scale,
+                    1.0,
+                    Kind::Unspecified,
+                ));
+            }
+            elements.extend(render_elements_from_surface_tree(
                     renderer,
                     &wl_surface,
                     render_offset,
                     scale,
                     1.0,
                     Kind::Unspecified,
-                );
+                ));
 
             let Ok(mut frame) = renderer.render(&mut framebuffer, size, Transform::Flipped180)
             else {
@@ -369,6 +395,10 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
             }
 
             send_frames_surface_tree(&wl_surface, time);
+            // Also send frame callbacks for popup surfaces (menus, dropdowns).
+            for (popup, _) in PopupManager::popups_for_surface(&wl_surface) {
+                send_frames_surface_tree(popup.wl_surface(), time);
+            }
         }
         // Borrows released — now swap buffers
         {
@@ -392,6 +422,7 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
         {
             window.frame_count += 1;
         }
+
     }
 }
 
@@ -487,6 +518,53 @@ fn set_soft_keyboard_visible(
     })
 }
 
+/// Launch Activities for windows whose clients have committed geometry,
+/// or after a timeout for slow clients. Uses setLaunchBounds for correct DeX sizing.
+fn launch_pending_activities(backend: &mut WaylandBackend) {
+    let scale = backend.scale_factor;
+    let pending: Vec<(u32, Option<(i32, i32)>)> = backend.window_manager.as_ref()
+        .map(|wm| {
+            wm.windows.iter()
+                .filter(|(_, w)| !w.activity_launched)
+                .filter_map(|(&id, w)| {
+                    // Read the client's committed geometry (if any).
+                    let geo_size = match &w.surface_kind {
+                        SurfaceKind::Toplevel(_) => {
+                            wl_compositor::with_states(w.surface_kind.wl_surface(), |states| {
+                                states.cached_state.get::<SurfaceCachedState>()
+                                    .current()
+                                    .geometry
+                                    .map(|g| g.size)
+                            })
+                        }
+                        SurfaceKind::Layer(_) => None,
+                    };
+                    let bounds = geo_size.map(|s| {
+                        ((s.w as f64 * scale).round() as i32,
+                         (s.h as f64 * scale).round() as i32 + DEX_TITLE_BAR_HEIGHT)
+                    }).filter(|&(w, h)| w > 0 && h > 0);
+
+                    if bounds.is_some() {
+                        // Client has committed with geometry — launch with bounds.
+                        Some((id, bounds))
+                    } else if w.created_time.elapsed() > std::time::Duration::from_millis(500) {
+                        // Timeout — launch without bounds (full-size fallback).
+                        Some((id, None))
+                    } else {
+                        None // Still waiting for client to commit.
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if let Some(wm) = backend.window_manager.as_mut() {
+        for (window_id, bounds) in pending {
+            wm.launch_activity(window_id, bounds);
+        }
+    }
+}
+
 /// Finish the Android Activity for a given window ID via JNI.
 fn finish_activity(window_id: u32) -> Result<(), jni::errors::Error> {
     crate::android::utils::jni_context::with_jni(|env, activity| {
@@ -503,8 +581,9 @@ fn finish_activity(window_id: u32) -> Result<(), jni::errors::Error> {
     })
 }
 
-/// Look up a window's WlSurface and geometry offset, converting physical touch
-/// coordinates to logical Wayland coordinates.
+/// Look up the Wayland surface under a touch point, converting physical Android
+/// coordinates to logical Wayland coordinates. Checks popups first, then the
+/// main surface tree, so menu clicks are routed to the popup surface.
 fn resolve_surface_and_coords(
     backend: &WaylandBackend,
     window_id: u32,
@@ -513,10 +592,10 @@ fn resolve_surface_and_coords(
 ) -> Option<(WlSurface, f64, f64)> {
     let wm = backend.window_manager.as_ref()?;
     let window = wm.windows.get(&window_id)?;
-    let surface = window.surface_kind.wl_surface().clone();
+    let root_surface = window.surface_kind.wl_surface().clone();
     let geo_offset: Point<i32, _> = match &window.surface_kind {
         SurfaceKind::Toplevel(_) => {
-            wl_compositor::with_states(&surface, |states| {
+            wl_compositor::with_states(&root_surface, |states| {
                 states.cached_state.get::<SurfaceCachedState>()
                     .current()
                     .geometry
@@ -527,12 +606,41 @@ fn resolve_surface_and_coords(
         SurfaceKind::Layer(_) => Default::default(),
     };
     // Convert from physical (Android) to logical (Wayland surface) coordinates.
-    // Add geometry offset because we render at -geo_offset to crop CSD shadows,
-    // so touch position 0,0 in the Activity corresponds to geo_offset in the surface.
+    // Touch position 0,0 in the Activity corresponds to geo_offset in the surface.
     let scale = backend.scale_factor;
     let lx = x as f64 / scale + geo_offset.x as f64;
     let ly = y as f64 / scale + geo_offset.y as f64;
-    Some((surface, lx, ly))
+    let point: Point<f64, _> = (lx, ly).into();
+
+    // Check popups first — menus/dropdowns take priority over the main surface.
+    for (popup, popup_offset) in PopupManager::popups_for_surface(&root_surface) {
+        let offset = geo_offset + popup_offset - popup.geometry().loc;
+        if let Some((surface, surface_offset)) = under_from_surface_tree(
+            popup.wl_surface(),
+            point,
+            offset,
+            WindowSurfaceType::ALL,
+        ) {
+            let sx = point.x - surface_offset.x as f64;
+            let sy = point.y - surface_offset.y as f64;
+            return Some((surface, sx, sy));
+        }
+    }
+
+    // Fall back to the main surface tree (toplevel + subsurfaces).
+    if let Some((surface, surface_offset)) = under_from_surface_tree(
+        &root_surface,
+        point,
+        (0, 0),
+        WindowSurfaceType::ALL,
+    ) {
+        let sx = point.x - surface_offset.x as f64;
+        let sy = point.y - surface_offset.y as f64;
+        return Some((surface, sx, sy));
+    }
+
+    // Nothing under the point — fall back to root surface at logical coords.
+    Some((root_surface, lx, ly))
 }
 
 /// Handle touch events from a WaylandWindowActivity.
@@ -702,5 +810,3 @@ fn handle_activity_key(
         );
     }
 }
-
-

@@ -3,6 +3,7 @@ use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::sync::mpsc;
 use std::sync::Mutex;
+use std::time::Instant;
 
 use jni::objects::{JObject, JValue};
 use jni::sys::jobject;
@@ -76,6 +77,12 @@ pub struct WindowState {
     pub needs_redraw: bool,
     /// Frames rendered since last FPS sample.
     pub frame_count: u32,
+    /// Whether the Android Activity has been launched for this window.
+    /// We delay launch until the client commits so we can use setLaunchBounds
+    /// to size the DeX freeform window correctly.
+    pub activity_launched: bool,
+    /// When this window was created. Used for fallback launch timeout.
+    pub created_time: Instant,
 }
 
 /// Manages the mapping between XDG toplevels and Android Activities.
@@ -99,7 +106,8 @@ impl WindowManager {
         }
     }
 
-    /// Allocates a window ID and launches a new Android Activity for the surface.
+    /// Allocates a window ID for the surface. The Activity is NOT launched yet —
+    /// we wait for the client's first commit so we can use setLaunchBounds.
     pub(crate) fn new_window(&mut self, surface_kind: SurfaceKind) -> u32 {
         let window_id = self.next_id;
         self.next_id += 1;
@@ -112,20 +120,25 @@ impl WindowManager {
             size: (0, 0).into(),
             needs_redraw: true,
             frame_count: 0,
+            activity_launched: false,
+            created_time: Instant::now(),
         });
 
-        self.launch_activity(window_id);
         window_id
     }
 
     /// Launch a WaylandWindowActivity via JNI with the given window_id.
-    fn launch_activity(&self, window_id: u32) {
-        if let Err(e) = self.launch_activity_inner(window_id) {
+    /// If bounds are provided (physical pixels), uses setLaunchBounds for DeX freeform sizing.
+    pub fn launch_activity(&mut self, window_id: u32, bounds: Option<(i32, i32)>) {
+        if let Some(window) = self.windows.get_mut(&window_id) {
+            window.activity_launched = true;
+        }
+        if let Err(e) = Self::launch_activity_inner(window_id, bounds) {
             log::error!("Failed to launch Activity for window_id={}: {}", window_id, e);
         }
     }
 
-    fn launch_activity_inner(&self, window_id: u32) -> Result<(), jni::errors::Error> {
+    fn launch_activity_inner(window_id: u32, bounds: Option<(i32, i32)>) -> Result<(), jni::errors::Error> {
         crate::android::utils::jni_context::with_jni(|env, activity| {
             let activity_class = crate::android::utils::jni_context::load_class(
                 env, activity, "io.github.phiresky.wayland_android.WaylandWindowActivity",
@@ -162,15 +175,57 @@ impl WindowManager {
                 &[JValue::Int(flags)],
             )?;
 
-            // Start the activity
-            env.call_method(
-                activity,
-                "startActivity",
-                "(Landroid/content/Intent;)V",
-                &[JValue::Object(&intent)],
-            )?;
+            // Build ActivityOptions with launch bounds if provided.
+            let bundle = if let Some((w, h)) = bounds {
+                let options_class = env.find_class("android/app/ActivityOptions")?;
+                let options = env.call_static_method(
+                    &options_class,
+                    "makeBasic",
+                    "()Landroid/app/ActivityOptions;",
+                    &[],
+                )?.l()?;
+                // Create Rect(0, 0, w, h) for launch bounds
+                let rect_class = env.find_class("android/graphics/Rect")?;
+                let rect = env.new_object(
+                    &rect_class,
+                    "(IIII)V",
+                    &[JValue::Int(0), JValue::Int(0), JValue::Int(w), JValue::Int(h)],
+                )?;
+                env.call_method(
+                    &options,
+                    "setLaunchBounds",
+                    "(Landroid/graphics/Rect;)Landroid/app/ActivityOptions;",
+                    &[JValue::Object(&rect)],
+                )?;
+                let bundle = env.call_method(
+                    &options,
+                    "toBundle",
+                    "()Landroid/os/Bundle;",
+                    &[],
+                )?.l()?;
+                Some(bundle)
+            } else {
+                None
+            };
 
-            log::info!("Launched WaylandWindowActivity for window_id={}", window_id);
+            // Start the activity (with or without bounds)
+            if let Some(bundle) = bundle {
+                env.call_method(
+                    activity,
+                    "startActivity",
+                    "(Landroid/content/Intent;Landroid/os/Bundle;)V",
+                    &[JValue::Object(&intent), JValue::Object(&bundle)],
+                )?;
+                log::info!("Launched WaylandWindowActivity for window_id={} with bounds {:?}", window_id, bounds);
+            } else {
+                env.call_method(
+                    activity,
+                    "startActivity",
+                    "(Landroid/content/Intent;)V",
+                    &[JValue::Object(&intent)],
+                )?;
+                log::info!("Launched WaylandWindowActivity for window_id={} (no bounds)", window_id);
+            }
             Ok(())
         })
     }

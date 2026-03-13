@@ -13,7 +13,7 @@ use xz2::read::XzDecoder;
 
 const MAX_INSTALL_ATTEMPTS: usize = 10;
 
-// Optional UI logger callback — set by main.rs to forward logs to SetupActivity.
+// Optional UI logger callback — set by main.rs to forward logs to SetupOverlay.
 static UI_LOGGER: Mutex<Option<Box<dyn Fn(&str) + Send>>> = Mutex::new(None);
 
 pub fn set_ui_logger(f: impl Fn(&str) + Send + 'static) {
@@ -43,8 +43,14 @@ pub fn is_setup_complete() -> bool {
     if !fs_root.join("usr/bin").exists() {
         return false;
     }
+    if !fs_root.join(format!("etc/sudoers.d/{}", config::USERNAME)).exists() {
+        return false;
+    }
+    if !fs_root.join("usr/local/bin/bsdtar").exists() {
+        return false;
+    }
     ArchProcess {
-        command: config::CHECK_CMD.to_string(),
+        command: config::check_cmd(),
         user: None,
         log: None,
     }
@@ -67,8 +73,11 @@ pub fn run_setup() {
     setup_sysdata();
     setup_dns();
     install_dependencies();
+    setup_user();
     disable_bwrap();
+    fix_bsdtar();
     fix_xkb_symlink();
+    fix_ttyname();
     setup_log("=== Proot setup complete ===");
 }
 
@@ -81,8 +90,8 @@ fn setup_arch_fs() {
     }
 
     let context = get_application_context();
-    let temp_file = context.data_dir.join("archlinux-fs.tar.xz");
-    let extracted_dir = context.data_dir.join("archlinux-aarch64");
+    let temp_file = context.cache_dir.join("archlinux-fs.tar.xz");
+    let extracted_dir = context.cache_dir.join("archlinux-aarch64");
 
     loop {
         // Download if the archive doesn't exist
@@ -176,7 +185,7 @@ fn setup_arch_fs() {
                 for entry in entries {
                     match entry {
                         Ok(mut e) => {
-                            if let Err(err) = e.unpack_in(&context.data_dir) {
+                            if let Err(err) = e.unpack_in(&context.cache_dir) {
                                 setup_log(&format!("[setup] Extraction error: {}", err));
                                 extract_ok = false;
                                 break;
@@ -269,7 +278,7 @@ fn setup_dns() {
 fn install_dependencies() {
     let is_installed = || {
         ArchProcess {
-            command: config::CHECK_CMD.to_string(),
+            command: config::check_cmd(),
             user: None,
             log: None,
         }
@@ -299,7 +308,7 @@ fn install_dependencies() {
 
         // Run install command with output logged to logcat and UI
         ArchProcess {
-            command: config::INSTALL_CMD.to_string(),
+            command: config::install_cmd(),
             user: None,
             log: Some(Arc::new(|line| setup_log(&format!("[pacman] {}", line)))),
         }
@@ -318,6 +327,27 @@ fn install_dependencies() {
             ));
         }
     }
+}
+
+/// Grant the default user passwordless sudo.
+fn setup_user() {
+    let user = config::USERNAME;
+    let fs_root = Path::new(config::ARCH_FS_ROOT);
+    let sudoers_file = fs_root.join(format!("etc/sudoers.d/{}", user));
+
+    if sudoers_file.exists() {
+        return;
+    }
+
+    setup_log(&format!("[setup] Configuring sudo for '{}'...", user));
+
+    let sudoers_dir = fs_root.join("etc/sudoers.d");
+    let _ = fs::create_dir_all(&sudoers_dir);
+    fs::write(
+        &sudoers_file,
+        format!("{} ALL=(ALL) NOPASSWD: ALL\n", user),
+    )
+    .unwrap_or_else(|e| log::error!("[setup] Failed to write sudoers for {}: {}", user, e));
 }
 
 /// Replace bwrap (bubblewrap) with a shim that runs commands unsandboxed.
@@ -374,6 +404,117 @@ done
         use std::os::unix::fs::PermissionsExt;
         let _ = fs::set_permissions(&bwrap, fs::Permissions::from_mode(0o755));
     }
+}
+
+/// Wrap bsdtar so permission errors don't abort makepkg source extraction.
+///
+/// proot fakes root with `--root-id` but the Android filesystem still rejects
+/// `chmod()` on symlink targets that haven't been extracted yet (ENOENT).
+/// pacman tolerates these warnings, but makepkg checks bsdtar's exit code
+/// and aborts on any error. The wrapper runs the real bsdtar and exits 0.
+fn fix_bsdtar() {
+    let fs_root = Path::new(config::ARCH_FS_ROOT);
+    let wrapper = fs_root.join("usr/local/bin/bsdtar");
+    let real = fs_root.join("usr/bin/bsdtar");
+
+    if wrapper.exists() {
+        return;
+    }
+    if !real.exists() {
+        return;
+    }
+
+    setup_log("[setup] Installing bsdtar wrapper (permission errors non-fatal)");
+
+    let _ = fs::create_dir_all(fs_root.join("usr/local/bin"));
+    let shim = "#!/bin/sh\n/usr/bin/bsdtar \"$@\"\nexit 0\n";
+    if let Err(e) = fs::write(&wrapper, shim) {
+        log::error!("[setup] Failed to write bsdtar wrapper: {}", e);
+        return;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755));
+    }
+}
+
+/// Build a ttyname_r shim library for LD_PRELOAD inside proot.
+///
+/// Android's SELinux policy blocks `readdir` on `/dev/pts` for untrusted_app
+/// domains. The libc `ttyname_r()` function scans that directory to resolve PTY
+/// slave names, so it fails with EACCES. Programs like kitty call `ttyname_r`
+/// before spawning child processes and abort on failure.
+///
+/// The shim overrides `ttyname_r` (and `ttyname`) to read `/proc/self/fd/<fd>`
+/// via `readlink` instead, which is not blocked by SELinux.
+fn fix_ttyname() {
+    let fs_root = Path::new(config::ARCH_FS_ROOT);
+    let so_path = fs_root.join("usr/lib/fix_ttyname.so");
+    if so_path.exists() {
+        return;
+    }
+
+    setup_log("[setup] Building ttyname fix for Android SELinux...");
+
+    let c_source = fs_root.join("tmp/fix_ttyname.c");
+    let source_code = r#"#define _GNU_SOURCE
+#include <unistd.h>
+#include <stdio.h>
+#include <string.h>
+#include <errno.h>
+#include <sys/stat.h>
+
+/* Override ttyname_r to use /proc/self/fd instead of scanning /dev/pts/.
+ * On Android, SELinux blocks readdir on /dev/pts for untrusted_app,
+ * causing ttyname_r to fail with EACCES. */
+int ttyname_r(int fd, char *buf, size_t buflen) {
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISCHR(st.st_mode)) {
+        errno = ENOTTY;
+        return ENOTTY;
+    }
+    char proc_path[64];
+    snprintf(proc_path, sizeof(proc_path), "/proc/self/fd/%d", fd);
+    ssize_t len = readlink(proc_path, buf, buflen - 1);
+    if (len == -1) return errno;
+    buf[len] = '\0';
+    return 0;
+}
+
+char *ttyname(int fd) {
+    static char buf[256];
+    if (ttyname_r(fd, buf, sizeof(buf)) != 0) return NULL;
+    return buf;
+}
+"#;
+
+    if let Err(e) = fs::write(&c_source, source_code) {
+        log::error!("[setup] Failed to write fix_ttyname.c: {}", e);
+        return;
+    }
+
+    let output = ArchProcess {
+        command: "gcc -shared -fPIC -o /usr/lib/fix_ttyname.so /tmp/fix_ttyname.c && echo OK"
+            .into(),
+        user: None,
+        log: None,
+    }
+    .run();
+
+    if output.status.success()
+        && String::from_utf8_lossy(&output.stdout).contains("OK")
+    {
+        setup_log("[setup] ttyname fix built successfully");
+    } else {
+        log::error!(
+            "[setup] Failed to build fix_ttyname.so: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let _ = fs::remove_file(&c_source);
 }
 
 /// Fix the xkb symlink if it's absolute (won't resolve outside proot).
