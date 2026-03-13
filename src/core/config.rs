@@ -1,3 +1,5 @@
+// TODO: Make these configurable via the Android UI (Milestone 7).
+
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const ARCH_FS_ROOT: &str = "/data/data/io.github.phiresky.wayland_android/files/arch";
 pub const ARCH_FS_ARCHIVE: &str = "https://github.com/termux/proot-distro/releases/download/v4.34.2/archlinux-aarch64-pd-v4.34.2.tar.xz";

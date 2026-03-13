@@ -145,7 +145,7 @@ Goal: eliminate CPU copy in the rendering path.
 - [ ] Clipboard: bridge Wayland clipboard (wl_data_device) ↔ Android clipboard
 - [ ] Lifecycle: handle Android app suspend/resume gracefully
 - [ ] Error handling: graceful error messages instead of panics
-- [ ] Config part of Main UI to set some settings.
+- [ ] Config UI: username, launch command, check/install commands (currently hardcoded constants in config.rs)
 - [ ] Configurable HiDPI scale (default taken from android but changeable)
 - [ ] Main UI shows setup status including whether all necessary permissions are granted.
 
