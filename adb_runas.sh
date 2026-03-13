@@ -98,6 +98,7 @@ exec $LIBDIR/libproot.so \
     USER=$PROOT_USER \
     LOGNAME=$PROOT_USER \
     XDG_RUNTIME_DIR=/tmp \
+    WAYLAND_DISPLAY=wayland-0 \
     $SHELL_CMD
 EOF
 

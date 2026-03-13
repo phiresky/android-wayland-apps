@@ -78,6 +78,7 @@ pub fn run_setup() {
     fix_bsdtar();
     fix_xkb_symlink();
     fix_ttyname();
+    setup_storage_mountpoints();
     setup_log("=== Proot setup complete ===");
 }
 
@@ -515,6 +516,26 @@ char *ttyname(int fd) {
     }
 
     let _ = fs::remove_file(&c_source);
+}
+
+/// Create bind mount target directories for Android storage inside the rootfs.
+///
+/// /storage/emulated/0 and /sdcard are not present in the Arch tarball.
+/// proot requires the destination directory to exist before binding.
+fn setup_storage_mountpoints() {
+    let fs_root = Path::new(config::ARCH_FS_ROOT);
+    let dirs = [
+        "sdcard",
+        "storage/emulated/0",
+    ];
+    for dir in dirs {
+        let path = fs_root.join(dir);
+        if !path.exists() {
+            if let Err(e) = fs::create_dir_all(&path) {
+                log::error!("[setup] Failed to create /{}: {}", dir, e);
+            }
+        }
+    }
 }
 
 /// Fix the xkb symlink if it's absolute (won't resolve outside proot).

@@ -87,11 +87,9 @@ impl ArchProcess {
             )
             .env("PROOT_TMP_DIR", context.data_dir);
 
-        // Always disable proot's seccomp filter so that unrecognized ioctls
-        // (e.g. KGSL GPU ioctls) are passed through to the kernel rather than
-        // returning ENOTTY. With seccomp enabled, proot traps ioctl() for path
-        // translation and returns ENOTTY for anything it doesn't recognise.
-        process.env("PROOT_NO_SECCOMP", "1");
+        if *USE_NO_SECCOMP.get().unwrap_or(&false) {
+            process.env("PROOT_NO_SECCOMP", "1");
+        }
 
         process
             .arg("-r")
@@ -104,9 +102,15 @@ impl ArchProcess {
             .arg("--bind=/dev")
             .arg("--bind=/proc")
             .arg("--bind=/sys")
-            .arg("--bind=/storage/emulated/0:/storage/emulated/0")
-            .arg("--bind=/storage/emulated/0:/sdcard")
             .arg(format!("--bind={}/tmp:/dev/shm", config::ARCH_FS_ROOT));
+
+        // Only bind external storage if it's accessible (requires MANAGE_EXTERNAL_STORAGE).
+        // If not granted, proot would fail trying to bind an inaccessible FUSE mount.
+        if Path::new("/storage/emulated/0").exists() {
+            process
+                .arg("--bind=/storage/emulated/0:/storage/emulated/0")
+                .arg("--bind=/storage/emulated/0:/sdcard");
+        }
 
         process
             .arg("--bind=/dev/urandom:/dev/random")
@@ -151,19 +155,10 @@ impl ArchProcess {
             process.arg("LD_PRELOAD=/usr/lib/fix_ttyname.so");
         }
 
-        // user shell
-        if user == "root" {
-            process.arg("sh");
-        } else {
-            process
-                .arg("runuser")
-                .arg("-u")
-                .arg(user)
-                .arg("--")
-                .arg("sh");
-        }
-
-        process.arg("-c").arg(&self.command);
+        // Run sh directly — --root-id already virtualizes the UID inside proot,
+        // and USER/HOME are set above. runuser/su would call setuid() which fails
+        // with PROOT_NO_SECCOMP=1 since the kernel rejects it from a non-root process.
+        process.arg("sh").arg("-c").arg(&self.command);
 
         let failed = || Output {
             status: ExitStatus::from_raw(1),
