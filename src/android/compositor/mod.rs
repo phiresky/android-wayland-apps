@@ -1,6 +1,8 @@
 pub mod bind;
+mod text_input;
 
 use bind::bind_socket;
+pub use text_input::TextInputState;
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
     delegate_compositor, delegate_data_device, delegate_fractional_scale, delegate_output,
@@ -73,6 +75,10 @@ pub struct State {
     pub pending_toplevels: Vec<ToplevelSurface>,
     /// Proxy to wake the event loop when clients commit buffers.
     pub event_loop_proxy: Option<EventLoopProxy>,
+    /// Text input state for soft keyboard integration.
+    pub text_input_state: TextInputState,
+    /// Pending soft keyboard show/hide request from text_input_v3.
+    pub soft_keyboard_request: Option<bool>,
 }
 
 impl BufferHandler for State {
@@ -165,7 +171,9 @@ impl SeatHandler for State {
         &mut self.seat_state
     }
 
-    fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&WlSurface>) {}
+    fn focus_changed(&mut self, _seat: &Seat<Self>, focused: Option<&WlSurface>) {
+        self.text_input_state.focus_changed(focused.cloned());
+    }
     fn cursor_image(&mut self, _seat: &Seat<Self>, _image: input::pointer::CursorImageStatus) {}
 }
 
@@ -266,6 +274,8 @@ impl Compositor {
         let touch = seat.add_touch();
         let pointer = seat.add_pointer();
 
+        let _text_input_global = TextInputState::init(&dh);
+
         let state = State {
             compositor_state: CompositorState::new::<State>(&dh),
             xdg_shell_state: XdgShellState::new::<State>(&dh),
@@ -277,6 +287,8 @@ impl Compositor {
             size: (1920, 1080).into(),
             pending_toplevels: Vec::new(),
             event_loop_proxy: None,
+            text_input_state: TextInputState::default(),
+            soft_keyboard_request: None,
         };
 
         Ok(Compositor {

@@ -89,6 +89,8 @@ Goal: each Activity correctly routes input to its Wayland client.
 - [x] Touch → pointer motion/button (ACTION_DOWN/UP/MOVE)
 - [x] Key events → keyboard input (Android keycode → Linux keycode)
 - [x] Keyboard focus set on touch-down per window
+- [x] Soft keyboard: auto show/hide via zwp_text_input_v3 protocol (GTK/Qt apps)
+- [ ] Soft keyboard: manual toggle for apps that don't use text_input (e.g. terminals)
 - [ ] Handle focus: Android focus changes map to Wayland keyboard enter/leave
 - [ ] Multi-touch passthrough (currently single-touch only)
 
@@ -143,8 +145,9 @@ Goal: eliminate CPU copy in the rendering path.
 - [ ] Clipboard: bridge Wayland clipboard (wl_data_device) ↔ Android clipboard
 - [ ] Lifecycle: handle Android app suspend/resume gracefully
 - [ ] Error handling: graceful error messages instead of panics
-- [ ] Config UI to set some settings.
+- [ ] Config part of Main UI to set some settings.
 - [ ] Configurable HiDPI scale (default taken from android but changeable)
+- [ ] Main UI shows setup status including whether all necessary permissions are granted.
 
 ## Recent Fixes
 

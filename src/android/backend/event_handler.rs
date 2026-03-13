@@ -25,6 +25,78 @@ use std::sync::Arc;
 use std::time::Instant;
 use winit::event_loop::ActiveEventLoop;
 
+/// Process Wayland protocol: accept new clients, dispatch messages, flush responses.
+/// Called from both the redraw path and proxy_wake_up so the compositor keeps
+/// working even when the NativeActivity window is destroyed.
+pub fn dispatch_wayland(backend: &mut WaylandBackend) {
+    // Process pending toplevels: create Activity windows.
+    let pending: Vec<ToplevelSurface> =
+        backend.compositor.state.pending_toplevels.drain(..).collect();
+    if !pending.is_empty() {
+        if let Some(wm) = backend.window_manager.as_mut() {
+            for toplevel in pending {
+                wm.new_toplevel(toplevel);
+            }
+        }
+    }
+
+    // Process window events from JNI.
+    process_window_events(backend);
+
+    // Accept Wayland clients, dispatch protocol.
+    match backend.compositor.listener.accept() {
+        Ok(Some(stream)) => {
+            match backend
+                .compositor
+                .display
+                .handle()
+                .insert_client(stream, Arc::new(ClientState::default()))
+            {
+                Ok(client) => backend.compositor.clients.push(client),
+                Err(e) => log::error!("Failed to insert client: {:?}", e),
+            }
+        }
+        Ok(None) => {}
+        Err(e) => log::error!("Failed to accept listener: {:?}", e),
+    }
+
+    if let Err(e) = backend
+        .compositor
+        .display
+        .dispatch_clients(&mut backend.compositor.state)
+    {
+        log::error!("Failed to dispatch clients: {:?}", e);
+    }
+    // Process soft keyboard show/hide from text_input_v3.
+    if let Some(visible) = backend.compositor.state.soft_keyboard_request.take() {
+        let window_id = backend
+            .compositor
+            .keyboard
+            .as_ref()
+            .and_then(|kb| kb.current_focus())
+            .and_then(|focused| {
+                backend.window_manager.as_ref().and_then(|wm| {
+                    wm.windows
+                        .iter()
+                        .find_map(|(id, w)| (w.toplevel.wl_surface() == &focused).then_some(*id))
+                })
+            });
+        if let Some(window_id) = window_id {
+            if let Err(e) = set_soft_keyboard_visible(&backend.android_app, window_id, visible) {
+                log::error!("Failed to set soft keyboard visibility: {e}");
+            }
+        }
+    }
+
+    if let Err(e) = backend
+        .compositor
+        .display
+        .flush_clients()
+    {
+        log::error!("Failed to flush clients: {:?}", e);
+    }
+}
+
 /// Get the first toplevel (fallback for main window / single-window mode).
 fn get_first_surface(state: &State) -> Option<ToplevelSurface> {
     state
@@ -45,52 +117,9 @@ pub fn handle(
             event_loop.exit();
         }
         CentralizedEvent::Redraw => {
-            // --- 1. Process pending toplevels: create Activity windows ---
-            let pending: Vec<ToplevelSurface> =
-                backend.compositor.state.pending_toplevels.drain(..).collect();
-            if !pending.is_empty()
-                && let Some(wm) = backend.window_manager.as_mut() {
-                    for toplevel in pending {
-                        wm.new_toplevel(toplevel);
-                    }
-                }
+            dispatch_wayland(backend);
 
-            // --- 2. Process window events from JNI ---
-            process_window_events(backend);
-
-            // --- 3. Accept Wayland clients, dispatch protocol ---
-            match backend.compositor.listener.accept() {
-                Ok(Some(stream)) => {
-                    match backend
-                        .compositor
-                        .display
-                        .handle()
-                        .insert_client(stream, Arc::new(ClientState::default()))
-                    {
-                        Ok(client) => backend.compositor.clients.push(client),
-                        Err(e) => log::error!("Failed to insert client: {:?}", e),
-                    }
-                }
-                Ok(None) => {}
-                Err(e) => log::error!("Failed to accept listener: {:?}", e),
-            }
-
-            if let Err(e) = backend
-                .compositor
-                .display
-                .dispatch_clients(&mut backend.compositor.state)
-            {
-                log::error!("Failed to dispatch clients: {:?}", e);
-            }
-            if let Err(e) = backend
-                .compositor
-                .display
-                .flush_clients()
-            {
-                log::error!("Failed to flush clients: {:?}", e);
-            }
-
-            // --- 4. Render each Activity window ---
+            // --- Render each Activity window ---
             render_activity_windows(backend);
 
             // --- 5. Update status overlay ---
@@ -423,6 +452,49 @@ fn send_status_jni(android_app: &winit::platform::android::activity::AndroidApp,
         "updateStatus",
         "(Ljava/lang/String;)V",
         &[jni::objects::JValue::Object(&jtext)],
+    )?;
+
+    Ok(())
+}
+
+/// Show or hide the Android soft keyboard on a specific WaylandWindowActivity.
+fn set_soft_keyboard_visible(
+    android_app: &winit::platform::android::activity::AndroidApp,
+    window_id: u32,
+    visible: bool,
+) -> Result<(), jni::errors::Error> {
+    let vm = unsafe { jni::JavaVM::from_raw(android_app.vm_as_ptr() as *mut _) }?;
+    let mut env = vm.attach_current_thread()?;
+    let activity =
+        unsafe { jni::objects::JObject::from_raw(android_app.activity_as_ptr() as *mut _) };
+
+    let class_loader = env
+        .call_method(
+            &activity,
+            "getClassLoader",
+            "()Ljava/lang/ClassLoader;",
+            &[],
+        )?
+        .l()?;
+    let class_name =
+        env.new_string("io.github.phiresky.wayland_android.WaylandWindowActivity")?;
+    let window_class = env
+        .call_method(
+            &class_loader,
+            "loadClass",
+            "(Ljava/lang/String;)Ljava/lang/Class;",
+            &[jni::objects::JValue::Object(&class_name)],
+        )?
+        .l()?;
+
+    env.call_static_method(
+        unsafe { jni::objects::JClass::from_raw(window_class.as_raw()) },
+        "setSoftKeyboardVisible",
+        "(IZ)V",
+        &[
+            jni::objects::JValue::Int(window_id as i32),
+            jni::objects::JValue::Bool(u8::from(visible)),
+        ],
     )?;
 
     Ok(())
