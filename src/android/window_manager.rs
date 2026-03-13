@@ -8,7 +8,9 @@ use jni::objects::{JObject, JValue};
 use jni::sys::jobject;
 use jni::JNIEnv;
 use smithay::backend::egl::EGLSurface;
+use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Physical, Size};
+use smithay::wayland::shell::wlr_layer::LayerSurface;
 use smithay::wayland::shell::xdg::ToplevelSurface;
 use raw_window_handle::AndroidNdkWindowHandle;
 
@@ -42,10 +44,32 @@ static EVENT_SENDER: Mutex<Option<mpsc::Sender<WindowEvent>>> = Mutex::new(None)
 /// Global eventfd for waking the compositor thread from JNI callbacks.
 static WAKE_FD: Mutex<Option<RawFd>> = Mutex::new(None);
 
-/// State for a single window (one per XDG toplevel).
+/// The kind of Wayland shell surface backing a window.
+pub enum SurfaceKind {
+    Toplevel(ToplevelSurface),
+    Layer(LayerSurface),
+}
+
+impl SurfaceKind {
+    pub fn wl_surface(&self) -> &WlSurface {
+        match self {
+            SurfaceKind::Toplevel(t) => t.wl_surface(),
+            SurfaceKind::Layer(l) => l.wl_surface(),
+        }
+    }
+
+    pub fn send_close(&self) {
+        match self {
+            SurfaceKind::Toplevel(t) => t.send_close(),
+            SurfaceKind::Layer(l) => l.send_close(),
+        }
+    }
+}
+
+/// State for a single window (one per XDG toplevel or layer surface).
 pub struct WindowState {
     pub window_id: u32,
-    pub toplevel: ToplevelSurface,
+    pub surface_kind: SurfaceKind,
     pub native_window: Option<*mut c_void>,
     pub egl_surface: Option<EGLSurface>,
     pub size: Size<i32, Physical>,
@@ -78,12 +102,22 @@ impl WindowManager {
     /// Called when smithay creates a new XDG toplevel.
     /// Allocates a window ID and launches a new Android Activity.
     pub fn new_toplevel(&mut self, toplevel: ToplevelSurface) -> u32 {
+        self.new_window(SurfaceKind::Toplevel(toplevel))
+    }
+
+    /// Called when smithay creates a new layer surface.
+    /// Allocates a window ID and launches a new Android Activity.
+    pub fn new_layer_surface(&mut self, surface: LayerSurface) -> u32 {
+        self.new_window(SurfaceKind::Layer(surface))
+    }
+
+    fn new_window(&mut self, surface_kind: SurfaceKind) -> u32 {
         let window_id = self.next_id;
         self.next_id += 1;
 
         self.windows.insert(window_id, WindowState {
             window_id,
-            toplevel,
+            surface_kind,
             native_window: None,
             egl_surface: None,
             size: (0, 0).into(),

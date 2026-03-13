@@ -1,6 +1,6 @@
 use crate::android::backend::WaylandBackend;
 use crate::android::compositor::{send_frames_surface_tree, ClientState};
-use crate::android::window_manager::WindowEvent;
+use crate::android::window_manager::{SurfaceKind, WindowEvent};
 use smithay::backend::input::ButtonState;
 use smithay::backend::renderer::element::surface::{
     render_elements_from_surface_tree, WaylandSurfaceRenderElement,
@@ -13,6 +13,7 @@ use smithay::input::keyboard::FilterResult;
 use smithay::input::pointer;
 use smithay::utils::{Rectangle, Transform, SERIAL_COUNTER};
 use smithay::wayland::compositor as wl_compositor;
+use smithay::wayland::shell::wlr_layer::LayerSurface;
 use smithay::wayland::shell::xdg::{SurfaceCachedState, ToplevelSurface, XdgToplevelSurfaceData};
 use std::sync::Arc;
 use std::time::Instant;
@@ -39,18 +40,50 @@ pub fn dispatch_wayland(backend: &mut WaylandBackend) {
         }
     }
 
+    // Process pending layer surfaces: create Activity windows.
+    let pending_layers: Vec<LayerSurface> =
+        backend.compositor.state.pending_layer_surfaces.drain(..).collect();
+    if !pending_layers.is_empty() {
+        if let Some(wm) = backend.window_manager.as_mut() {
+            for layer in pending_layers {
+                wm.new_layer_surface(layer);
+            }
+        }
+    }
+
     // Process destroyed toplevels: finish their Android Activities.
     let destroyed: Vec<ToplevelSurface> =
         backend.compositor.state.destroyed_toplevels.drain(..).collect();
     if !destroyed.is_empty() {
         if let Some(wm) = backend.window_manager.as_mut() {
             for toplevel in &destroyed {
-                // Find the window_id for this toplevel.
                 let window_id = wm.windows.iter().find_map(|(id, w)| {
-                    (w.toplevel == *toplevel).then_some(*id)
+                    matches!(&w.surface_kind, SurfaceKind::Toplevel(t) if *t == *toplevel)
+                        .then_some(*id)
                 });
                 if let Some(window_id) = window_id {
                     log::info!("Toplevel destroyed, finishing Activity window_id={}", window_id);
+                    if let Err(e) = finish_activity(window_id) {
+                        log::error!("Failed to finish Activity for window_id={}: {e}", window_id);
+                    }
+                    wm.remove_window(window_id);
+                }
+            }
+        }
+    }
+
+    // Process destroyed layer surfaces: finish their Android Activities.
+    let destroyed_layers: Vec<LayerSurface> =
+        backend.compositor.state.destroyed_layer_surfaces.drain(..).collect();
+    if !destroyed_layers.is_empty() {
+        if let Some(wm) = backend.window_manager.as_mut() {
+            for layer in &destroyed_layers {
+                let window_id = wm.windows.iter().find_map(|(id, w)| {
+                    matches!(&w.surface_kind, SurfaceKind::Layer(l) if *l == *layer)
+                        .then_some(*id)
+                });
+                if let Some(window_id) = window_id {
+                    log::info!("Layer surface destroyed, finishing Activity window_id={}", window_id);
                     if let Err(e) = finish_activity(window_id) {
                         log::error!("Failed to finish Activity for window_id={}: {e}", window_id);
                     }
@@ -98,7 +131,7 @@ pub fn dispatch_wayland(backend: &mut WaylandBackend) {
                 backend.window_manager.as_ref().and_then(|wm| {
                     wm.windows
                         .iter()
-                        .find_map(|(id, w)| (w.toplevel.wl_surface() == &focused).then_some(*id))
+                        .find_map(|(id, w)| (w.surface_kind.wl_surface() == &focused).then_some(*id))
                 })
             });
         if let Some(window_id) = window_id {
@@ -169,16 +202,28 @@ fn process_window_events(backend: &mut WaylandBackend) {
                     && let Some(window) = wm.windows.get_mut(&window_id) {
                         window.size = (width, height).into();
                         window.needs_redraw = true;
-                        // Configure toplevel with logical size so apps render
-                        // at the right scale for the display density.
                         let logical_w = (width as f64 / scale).round() as i32;
                         let logical_h = (height as f64 / scale).round() as i32;
-                        window.toplevel.with_pending_state(|state| {
-                            state.size = Some((logical_w, logical_h).into());
-                        });
-                        window.toplevel.send_configure();
-                        // Set preferred fractional scale on the toplevel surface.
-                        wl_compositor::with_states(window.toplevel.wl_surface(), |states| {
+                        match &window.surface_kind {
+                            SurfaceKind::Toplevel(toplevel) => {
+                                // Configure toplevel with logical size so apps render
+                                // at the right scale for the display density.
+                                toplevel.with_pending_state(|state| {
+                                    state.size = Some((logical_w, logical_h).into());
+                                });
+                                toplevel.send_configure();
+                            }
+                            SurfaceKind::Layer(layer) => {
+                                // Configure layer surface with the Activity size so
+                                // anchored surfaces know the available area.
+                                layer.with_pending_state(|state| {
+                                    state.size = Some((logical_w, logical_h).into());
+                                });
+                                layer.send_pending_configure();
+                            }
+                        }
+                        // Set preferred fractional scale on the surface.
+                        wl_compositor::with_states(window.surface_kind.wl_surface(), |states| {
                             smithay::wayland::fractional_scale::with_fractional_scale(
                                 states,
                                 |fs| fs.set_preferred_scale(scale),
@@ -201,7 +246,7 @@ fn process_window_events(backend: &mut WaylandBackend) {
                     // User actually closed the window — tell the Wayland client
                     if let Some(wm) = backend.window_manager.as_ref()
                         && let Some(window) = wm.windows.get(&window_id) {
-                            window.toplevel.send_close();
+                            window.surface_kind.send_close();
                         }
                     if let Some(wm) = backend.window_manager.as_mut() {
                         wm.remove_window(window_id);
@@ -255,8 +300,8 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
     let scale = backend.scale_factor;
 
     for window_id in window_ids {
-        // Get the toplevel and size from window manager
-        let (toplevel, size, geo_offset) = {
+        // Get the wl_surface and size from window manager
+        let (wl_surface, size, geo_offset) = {
             let wm = match backend.window_manager.as_ref() {
                 Some(wm) => wm,
                 None => continue,
@@ -265,15 +310,22 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                 Some(w) => w,
                 None => continue,
             };
+            let surface = window.surface_kind.wl_surface().clone();
             // Get the geometry (content area excluding CSD shadows).
-            let geo_loc = wl_compositor::with_states(window.toplevel.wl_surface(), |states| {
-                states.cached_state.get::<SurfaceCachedState>()
-                    .current()
-                    .geometry
-                    .map(|g| g.loc)
-                    .unwrap_or_default()
-            });
-            (window.toplevel.clone(), window.size, geo_loc)
+            // Only toplevels have XDG geometry; layer surfaces don't.
+            let geo_loc = match &window.surface_kind {
+                SurfaceKind::Toplevel(_) => {
+                    wl_compositor::with_states(&surface, |states| {
+                        states.cached_state.get::<SurfaceCachedState>()
+                            .current()
+                            .geometry
+                            .map(|g| g.loc)
+                            .unwrap_or_default()
+                    })
+                }
+                SurfaceKind::Layer(_) => Default::default(),
+            };
+            (surface, window.size, geo_loc)
         };
 
         let damage = Rectangle::from_size(size);
@@ -306,7 +358,7 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
             let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
                 render_elements_from_surface_tree(
                     renderer,
-                    toplevel.wl_surface(),
+                    &wl_surface,
                     render_offset,
                     scale,
                     1.0,
@@ -323,7 +375,7 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
             let _ = draw_render_elements(&mut frame, scale, &elements, &[damage]);
             let _ = frame.finish();
 
-            send_frames_surface_tree(toplevel.wl_surface(), time);
+            send_frames_surface_tree(&wl_surface, time);
         }
         // Borrows released — now swap buffers
         {
@@ -371,7 +423,7 @@ fn update_status_overlay(backend: &mut WaylandBackend) {
 
     if let Some(wm) = backend.window_manager.as_mut() {
         for (id, window) in &mut wm.windows {
-            let title = wl_compositor::with_states(window.toplevel.wl_surface(), |states| {
+            let title = wl_compositor::with_states(window.surface_kind.wl_surface(), |states| {
                 states
                     .data_map
                     .get::<XdgToplevelSurfaceData>()
@@ -506,28 +558,35 @@ fn handle_activity_touch(
     x: f32,
     y: f32,
 ) {
-    let toplevel = {
+    let (wl_surface, geo_offset) = {
         let wm = match backend.window_manager.as_ref() {
             Some(wm) => wm,
             None => return,
         };
-        match wm.windows.get(&window_id) {
-            Some(w) => w.toplevel.clone(),
+        let window = match wm.windows.get(&window_id) {
+            Some(w) => w,
             None => return,
-        }
+        };
+        let surface = window.surface_kind.wl_surface().clone();
+        let geo = match &window.surface_kind {
+            SurfaceKind::Toplevel(_) => {
+                wl_compositor::with_states(&surface, |states| {
+                    states.cached_state.get::<SurfaceCachedState>()
+                        .current()
+                        .geometry
+                        .map(|g| g.loc)
+                        .unwrap_or_default()
+                })
+            }
+            SurfaceKind::Layer(_) => Default::default(),
+        };
+        (surface, geo)
     };
 
     // Convert from physical (Android) to logical (Wayland surface) coordinates.
     // Add geometry offset because we render at -geo_offset to crop CSD shadows,
     // so touch position 0,0 in the Activity corresponds to geo_offset in the surface.
     let scale = backend.scale_factor;
-    let geo_offset = wl_compositor::with_states(toplevel.wl_surface(), |states| {
-        states.cached_state.get::<SurfaceCachedState>()
-            .current()
-            .geometry
-            .map(|g| g.loc)
-            .unwrap_or_default()
-    });
     let x = x as f64 / scale + geo_offset.x as f64;
     let y = y as f64 / scale + geo_offset.y as f64;
 
@@ -545,14 +604,14 @@ fn handle_activity_touch(
             if let Some(kb) = &compositor.keyboard {
                 kb.set_focus(
                     &mut compositor.state,
-                    Some(toplevel.wl_surface().clone()),
+                    Some(wl_surface.clone()),
                     serial,
                 );
             }
             let pointer = compositor.pointer.clone();
             pointer.motion(
                 &mut compositor.state,
-                Some((toplevel.wl_surface().clone(), (0f64, 0f64).into())),
+                Some((wl_surface.clone(), (0f64, 0f64).into())),
                 &pointer::MotionEvent {
                     location: (x, y).into(),
                     serial,
@@ -587,7 +646,7 @@ fn handle_activity_touch(
             let pointer = compositor.pointer.clone();
             pointer.motion(
                 &mut compositor.state,
-                Some((toplevel.wl_surface().clone(), (0f64, 0f64).into())),
+                Some((wl_surface.clone(), (0f64, 0f64).into())),
                 &pointer::MotionEvent {
                     location: (x, y).into(),
                     serial,
@@ -608,25 +667,32 @@ fn handle_activity_right_click(
     x: f32,
     y: f32,
 ) {
-    let toplevel = {
+    let (wl_surface, geo_offset) = {
         let wm = match backend.window_manager.as_ref() {
             Some(wm) => wm,
             None => return,
         };
-        match wm.windows.get(&window_id) {
-            Some(w) => w.toplevel.clone(),
+        let window = match wm.windows.get(&window_id) {
+            Some(w) => w,
             None => return,
-        }
+        };
+        let surface = window.surface_kind.wl_surface().clone();
+        let geo = match &window.surface_kind {
+            SurfaceKind::Toplevel(_) => {
+                wl_compositor::with_states(&surface, |states| {
+                    states.cached_state.get::<SurfaceCachedState>()
+                        .current()
+                        .geometry
+                        .map(|g| g.loc)
+                        .unwrap_or_default()
+                })
+            }
+            SurfaceKind::Layer(_) => Default::default(),
+        };
+        (surface, geo)
     };
 
     let scale = backend.scale_factor;
-    let geo_offset = wl_compositor::with_states(toplevel.wl_surface(), |states| {
-        states.cached_state.get::<SurfaceCachedState>()
-            .current()
-            .geometry
-            .map(|g| g.loc)
-            .unwrap_or_default()
-    });
     let x = x as f64 / scale + geo_offset.x as f64;
     let y = y as f64 / scale + geo_offset.y as f64;
 
@@ -639,7 +705,7 @@ fn handle_activity_right_click(
     // Move pointer to the right-click position.
     pointer.motion(
         &mut compositor.state,
-        Some((toplevel.wl_surface().clone(), (0f64, 0f64).into())),
+        Some((wl_surface.clone(), (0f64, 0f64).into())),
         &pointer::MotionEvent {
             location: (x, y).into(),
             serial,
@@ -677,13 +743,13 @@ fn handle_activity_key(
     key_code: i32,
     action: i32,
 ) {
-    let toplevel = {
+    let wl_surface = {
         let wm = match backend.window_manager.as_ref() {
             Some(wm) => wm,
             None => return,
         };
         match wm.windows.get(&window_id) {
-            Some(w) => w.toplevel.clone(),
+            Some(w) => w.surface_kind.wl_surface().clone(),
             None => return,
         }
     };
@@ -695,10 +761,9 @@ fn handle_activity_key(
     // Set keyboard focus only if this surface doesn't already have it.
     // Calling set_focus on every key event floods the client with keymap data and causes ANR.
     if let Some(kb) = &compositor.keyboard {
-        let wl_surface = toplevel.wl_surface().clone();
         let needs_focus = kb.current_focus().as_ref() != Some(&wl_surface);
         if needs_focus {
-            kb.set_focus(&mut compositor.state, Some(wl_surface), serial);
+            kb.set_focus(&mut compositor.state, Some(wl_surface.clone()), serial);
         }
     }
 

@@ -25,18 +25,31 @@ public class CompositorService extends Service {
         createNotificationChannel();
     }
 
+    private static final String ACTION_KILL_ALL = "io.github.phiresky.wayland_android.KILL_ALL";
+
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        if (ACTION_KILL_ALL.equals(intent != null ? intent.getAction() : null)) {
+            android.os.Process.killProcess(android.os.Process.myPid());
+            return START_NOT_STICKY;
+        }
+
         Intent tapIntent = new Intent(this, MainActivity.class);
         tapIntent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
         PendingIntent pendingIntent = PendingIntent.getActivity(
                 this, 0, tapIntent, PendingIntent.FLAG_IMMUTABLE);
+
+        Intent killIntent = new Intent(this, CompositorService.class);
+        killIntent.setAction(ACTION_KILL_ALL);
+        PendingIntent killPendingIntent = PendingIntent.getService(
+                this, 1, killIntent, PendingIntent.FLAG_IMMUTABLE);
 
         Notification notification = new NotificationCompat.Builder(this, CHANNEL_ID)
                 .setContentTitle("Wayland Compositor")
                 .setContentText("Running")
                 .setSmallIcon(android.R.drawable.ic_menu_manage)
                 .setContentIntent(pendingIntent)
+                .addAction(android.R.drawable.ic_delete, "Kill All", killPendingIntent)
                 .setOngoing(true)
                 .build();
 

@@ -37,6 +37,12 @@
             android:noHistory="true"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|screenLayout|smallestScreenSize|uiMode|density|navigation" />
 
+        <activity
+            android:name="io.github.phiresky.wayland_android.LauncherActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|screenLayout|smallestScreenSize|uiMode|density|navigation" />
+
         <service
             android:name="io.github.phiresky.wayland_android.CompositorService"
             android:exported="false"

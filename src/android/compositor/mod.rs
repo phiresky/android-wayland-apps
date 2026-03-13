@@ -5,8 +5,8 @@ use bind::bind_socket;
 pub use text_input::TextInputState;
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
-    delegate_compositor, delegate_data_device, delegate_fractional_scale, delegate_output,
-    delegate_seat, delegate_shm, delegate_xdg_decoration, delegate_xdg_shell,
+    delegate_compositor, delegate_data_device, delegate_fractional_scale, delegate_layer_shell,
+    delegate_output, delegate_seat, delegate_shm, delegate_xdg_decoration, delegate_xdg_shell,
     input::{self, keyboard::KeyboardHandle, touch::TouchHandle, Seat, SeatHandler, SeatState},
     output::Output,
     reexports::{
@@ -14,7 +14,7 @@ use smithay::{
             decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as DecorationMode,
             shell::server::xdg_toplevel,
         },
-        wayland_server::{protocol::wl_seat, Display},
+        wayland_server::{protocol::{wl_output::WlOutput, wl_seat}, Display},
     },
     utils::{Logical, Serial, Size},
     wayland::{
@@ -29,6 +29,9 @@ use smithay::{
                 DataDeviceHandler, DataDeviceState, WaylandDndGrabHandler,
             },
             SelectionHandler,
+        },
+        shell::wlr_layer::{
+            Layer, LayerSurface, WlrLayerShellHandler, WlrLayerShellState,
         },
         shell::xdg::{
             decoration::{XdgDecorationHandler, XdgDecorationState},
@@ -67,6 +70,7 @@ pub struct State {
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
     pub xdg_decoration_state: XdgDecorationState,
+    pub layer_shell_state: WlrLayerShellState,
     pub fractional_scale_state: FractionalScaleManagerState,
     pub shm_state: ShmState,
     pub data_device_state: DataDeviceState,
@@ -74,6 +78,8 @@ pub struct State {
     pub size: Size<i32, Logical>,
     /// New toplevels queued by XdgShellHandler, drained by the main loop.
     pub pending_toplevels: Vec<ToplevelSurface>,
+    /// New layer surfaces queued by WlrLayerShellHandler, drained by the main loop.
+    pub pending_layer_surfaces: Vec<LayerSurface>,
     /// Eventfd to wake the compositor thread when clients commit buffers.
     pub wake_fd: Option<RawFd>,
     /// Text input state for soft keyboard integration.
@@ -82,6 +88,8 @@ pub struct State {
     pub soft_keyboard_request: Option<bool>,
     /// Toplevels destroyed by the client, queued for Activity cleanup.
     pub destroyed_toplevels: Vec<ToplevelSurface>,
+    /// Layer surfaces destroyed by the client, queued for Activity cleanup.
+    pub destroyed_layer_surfaces: Vec<LayerSurface>,
 }
 
 impl BufferHandler for State {
@@ -125,6 +133,29 @@ impl XdgShellHandler for State {
         _token: u32,
     ) {
         // Handle popup reposition here
+    }
+}
+
+impl WlrLayerShellHandler for State {
+    fn shell_state(&mut self) -> &mut WlrLayerShellState {
+        &mut self.layer_shell_state
+    }
+
+    fn new_layer_surface(
+        &mut self,
+        surface: LayerSurface,
+        _output: Option<WlOutput>,
+        layer: Layer,
+        namespace: String,
+    ) {
+        log::info!("New layer surface: namespace={namespace}, layer={layer:?}");
+        // Send initial configure with (0,0) — client picks its own size.
+        surface.send_configure();
+        self.pending_layer_surfaces.push(surface);
+    }
+
+    fn layer_destroyed(&mut self, surface: LayerSurface) {
+        self.destroyed_layer_surfaces.push(surface);
     }
 }
 
@@ -258,6 +289,7 @@ impl XdgDecorationHandler for State {
 // Macros used to delegate protocol handling to types in the app state.
 delegate_xdg_shell!(State);
 delegate_xdg_decoration!(State);
+delegate_layer_shell!(State);
 delegate_compositor!(State);
 delegate_shm!(State);
 delegate_seat!(State);
@@ -287,16 +319,19 @@ impl Compositor {
             compositor_state: CompositorState::new::<State>(&dh),
             xdg_shell_state: XdgShellState::new::<State>(&dh),
             xdg_decoration_state: XdgDecorationState::new::<State>(&dh),
+            layer_shell_state: WlrLayerShellState::new::<State>(&dh),
             fractional_scale_state: FractionalScaleManagerState::new::<State>(&dh),
             shm_state: ShmState::new::<State>(&dh, vec![]),
             data_device_state: DataDeviceState::new::<State>(&dh),
             seat_state,
             size: (1920, 1080).into(),
             pending_toplevels: Vec::new(),
+            pending_layer_surfaces: Vec::new(),
             wake_fd: None,
             text_input_state: TextInputState::default(),
             soft_keyboard_request: None,
             destroyed_toplevels: Vec::new(),
+            destroyed_layer_surfaces: Vec::new(),
         };
 
         Ok(Compositor {

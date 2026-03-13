@@ -87,6 +87,42 @@ and would restrict us to specific hardware. Android's stock GLES drivers work
 on all ARM devices. The compositor uses EGL/GLES via Android's libEGL.so
 directly.
 
+## Wayland ↔ Android Feature Mapping
+
+| Wayland Feature | Android Mapping | Why needed | Status |
+|---|---|---|---|
+| **Shell surfaces** | | | |
+| xdg_toplevel | Each toplevel → own Activity, appears as separate task in recents | Core protocol — every app window is a toplevel | Implemented |
+| xdg_popup | Rendered as subsurface of parent toplevel's Activity | Menus, tooltips, dropdowns (e.g. GTK right-click menus) | Implemented |
+| wlr_layer_shell | Each layer surface → own Activity (same as toplevel) | Desktop shell components: panels, app launchers, notification areas (e.g. nwg-panel, waybar). Apps crash without it. | Implemented |
+| **Rendering** | | | |
+| wl_shm buffers | Compositor uploads SHM → GLES texture → Activity EGL surface | Baseline rendering path — all Wayland clients support this | Implemented |
+| dmabuf / AHardwareBuffer | Zero-copy GPU via ASurfaceTransaction | Eliminates CPU copy for GPU-rendered clients (GTK4 GL, games) | Not implemented |
+| wp_fractional_scale | Activity display density (scale factor from DisplayMetrics) | HiDPI: apps render at native resolution instead of being scaled | Implemented |
+| Surface damage | Full-surface redraw each frame | Partial damage tracking would reduce GPU work | Implemented (no partial) |
+| **Input** | | | |
+| wl_pointer | Activity onTouchEvent → pointer motion/button via JNI channel | Primary interaction method; touch emulated as pointer clicks | Implemented |
+| wl_keyboard | Activity onKeyEvent → keycode translation → wl_keyboard | Physical keyboards, DeX mode, Bluetooth keyboards | Implemented |
+| wl_touch | Not exposed; touch events emulated as pointer | Multi-touch gestures (pinch-zoom, two-finger scroll) | Not implemented |
+| zwp_text_input_v3 | Android soft keyboard (IME) show/hide per-Activity | On-screen keyboard for text input in apps like terminals, editors | Implemented |
+| Cursor image | Not rendered (touch-first UI) | Desktop apps set custom cursors; matters for DeX mouse mode | Not implemented |
+| **Window management** | | | |
+| Toplevel configure (resize) | Activity resize → xdg_configure round-trip | Apps must know their size to layout content correctly | Implemented |
+| Toplevel close | Activity finish ↔ xdg_toplevel send_close | Closing window in Android recents should close the Linux app | Implemented |
+| Window title | Could map to Activity label | Shows app name in recents/taskbar instead of generic "Wayland" | Not implemented |
+| Window minimize/maximize | Android handles via Activity lifecycle / DeX | Android WM provides these controls natively | Delegated to Android |
+| Split-screen / freeform | Android WM positions Activities; compositor follows | DeX and tablet split-screen work because each window is an Activity | Works naturally |
+| Alt-tab / recents | Each Activity is a separate task | | Works naturally |
+| **Data** | | | |
+| wl_data_device (clipboard) | Protocol handler exists, no Android ClipboardManager bridge | Copy/paste between Linux apps and Android apps | Partial |
+| Drag and drop | wl_data_device DnD handlers | Drag files/text between windows | Not implemented |
+| **Decorations** | | | |
+| xdg_decoration | Forces server-side; Android provides window chrome in DeX mode | Prevents CSD (client-side decorations) which would conflict with Android's own title bars | Implemented |
+| **Lifecycle** | | | |
+| Compositor process | Foreground service (CompositorService) keeps process alive | Without this, Android kills the compositor when Activities are backgrounded | Implemented |
+| Activity destroy (config change) | Surface destroyed/recreated; toplevel kept alive | Screen rotation, fold/unfold — Android destroys and recreates the Activity | Implemented |
+| Activity finish (user close) | send_close to Wayland client | | Implemented |
+
 ## Rendering Path
 
 ### Phase 1: SHM (CPU copy, initial implementation)
