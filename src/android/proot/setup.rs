@@ -43,11 +43,8 @@ pub fn is_setup_complete() -> bool {
     if !fs_root.join("usr/bin").exists() {
         return false;
     }
-    let check = config::parse_config(format!("{}{}", config::ARCH_FS_ROOT, config::CONFIG_FILE))
-        .command
-        .check;
     ArchProcess {
-        command: check,
+        command: config::CHECK_CMD.to_string(),
         user: None,
         log: None,
     }
@@ -270,15 +267,9 @@ fn setup_dns() {
 
 /// Install dependencies via pacman if the check command fails.
 fn install_dependencies() {
-    let config =
-        config::parse_config(format!("{}{}", config::ARCH_FS_ROOT, config::CONFIG_FILE));
-
-    let check = config.command.check;
-    let install = config.command.install;
-
     let is_installed = || {
         ArchProcess {
-            command: check.clone(),
+            command: config::CHECK_CMD.to_string(),
             user: None,
             log: None,
         }
@@ -308,7 +299,7 @@ fn install_dependencies() {
 
         // Run install command with output logged to logcat and UI
         ArchProcess {
-            command: install.clone(),
+            command: config::INSTALL_CMD.to_string(),
             user: None,
             log: Some(Arc::new(|line| setup_log(&format!("[pacman] {}", line)))),
         }

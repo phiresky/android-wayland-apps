@@ -5,16 +5,11 @@ use std::thread;
 use std::time::Duration;
 
 pub fn launch() {
-    let local_config =
-        config::parse_config(format!("{}{}", config::ARCH_FS_ROOT, config::CONFIG_FILE));
-    let username = local_config.user.username;
-    let command = local_config.command.launch;
-
     thread::spawn(move || {
-        log::info!("Launching: {}", command);
+        log::info!("Launching: {}", config::LAUNCH_CMD);
         let output = ArchProcess {
-            command: command.clone(),
-            user: Some(username),
+            command: config::LAUNCH_CMD.to_string(),
+            user: Some(config::DEFAULT_USERNAME.to_string()),
             log: Some(Arc::new(|it| log::info!("{}", it))),
         }
         .run();
@@ -22,7 +17,7 @@ pub fn launch() {
     });
 
     // Launch demo apps after a short delay to let the terminal connect first.
-    for (delay_ms, cmd) in [(1500, "eglgears_wayland"), (2000, "gedit")] {
+    for (delay_ms, cmd) in [(1500, "weston-simple-egl"), (2000, "gedit")] {
         thread::spawn(move || {
             thread::sleep(Duration::from_millis(delay_ms));
             log::info!("Launching: {}", cmd);

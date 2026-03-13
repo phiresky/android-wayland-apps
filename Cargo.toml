@@ -37,8 +37,6 @@ pathdiff = "0.2"
 
 [dependencies]
 anyhow = "1.0.68"
-serde = { version = "1.0", features = ["derive"] }
-toml = "0.8.12"
 
 [patch.crates-io]
 smithay = { path = "patches/smithay" }
