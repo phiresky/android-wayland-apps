@@ -34,7 +34,8 @@ fi
 # Write the actual command to a script file inside the rootfs.
 # Stdin mode: pipe or heredoc content is used verbatim (no escaping needed).
 # Args mode: args are encoded with printf %q so special chars survive intact.
-CMD_FILE=$ROOTFS/tmp/.proot_cmd.sh
+SUFFIX=$(head -c4 /dev/urandom | xxd -p)
+CMD_FILE=$ROOTFS/tmp/.proot_cmd_$SUFFIX.sh
 USE_RLWRAP=0
 if [ $# -eq 0 ]; then
     if [ -t 0 ]; then
@@ -77,14 +78,14 @@ CMDEOF
 
 # Build the shell invocation for the launcher
 if [ "$PROOT_USER" = "root" ]; then
-    SHELL_CMD="sh /tmp/.proot_cmd.sh"
+    SHELL_CMD="sh /tmp/.proot_cmd_$SUFFIX.sh"
 else
-    SHELL_CMD="runuser -u $PROOT_USER -- sh /tmp/.proot_cmd.sh"
+    SHELL_CMD="runuser -u $PROOT_USER -- sh /tmp/.proot_cmd_$SUFFIX.sh"
 fi
 
 # Write a launcher script to the device so adb shell gets a simple command
 # (complex quoted commands prevent proper PTY/raw-mode handling)
-LAUNCHER=./files/.proot_launcher.sh
+LAUNCHER=./files/.proot_launcher_$SUFFIX.sh
 adb shell run-as "$PKG" sh -c "'cat > $LAUNCHER'" << EOF
 #!/bin/sh
 export PROOT_LOADER=$LIBDIR/libproot_loader.so
@@ -127,14 +128,26 @@ exec $LIBDIR/libproot.so \
     $SHELL_CMD
 EOF
 
+# For interactive use, wrap the launcher with script(1) to allocate a fresh PTY.
+# run-as switches to the app UID, then script (toybox, Android 9+) creates a PTY
+# owned by that UID. Without this, programs like top/htop fail with "failed tty get"
+# because SELinux blocks ioctl on adbd's PTY from the untrusted_app domain.
+PTY_LAUNCHER=./files/.proot_pty_$SUFFIX.sh
+if [ -t 0 ]; then
+    adb shell run-as "$PKG" sh -c "'cat > $PTY_LAUNCHER'" << PTYEOF
+#!/bin/sh
+exec script -qc 'sh $LAUNCHER' /dev/null
+PTYEOF
+fi
+
 # Run with -t for PTY allocation when interactive
 # rlwrap provides local readline (arrow keys, history, Ctrl+R) since
 # run-as UID switch prevents tcsetattr on adb's PTY
 if [ -t 0 ]; then
     if [ "$USE_RLWRAP" = 1 ]; then
-        rlwrap -a adb shell -t run-as "$PKG" sh "$LAUNCHER"
+        rlwrap -a adb shell -t run-as "$PKG" sh "$PTY_LAUNCHER"
     else
-        adb shell -t run-as "$PKG" sh "$LAUNCHER"
+        adb shell -t run-as "$PKG" sh "$PTY_LAUNCHER"
     fi
 else
     adb shell run-as "$PKG" sh "$LAUNCHER"

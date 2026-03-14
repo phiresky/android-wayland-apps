@@ -452,7 +452,11 @@ fn connect_pipewire() {
         match PipeWireCamera::start(&pw_socket, &native_lib_dir, &data_dir) {
             Some(camera) => {
                 log::info!("[camera] PipeWire camera stream connected");
-                let _ = PW_CAMERA.set(Mutex::new(Some(camera)));
+                if let Some(pw) = PW_CAMERA.get() {
+                    if let Ok(mut guard) = pw.lock() {
+                        *guard = Some(camera);
+                    }
+                }
                 return;
             }
             None => {

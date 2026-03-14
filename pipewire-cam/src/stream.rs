@@ -99,6 +99,11 @@ impl PipeWireCamera {
 
     /// Push a new NV12 frame. Called from the camera capture callback.
     pub fn push_frame(&self, nv12_data: &[u8]) {
+        static COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if n % 30 == 0 {
+            log::info!("[pw-cam] push_frame #{n} ({} bytes)", nv12_data.len());
+        }
         if let Ok(mut frame) = self.frame.lock() {
             *frame = Some(nv12_data.to_vec());
         }
@@ -237,7 +242,7 @@ fn run_pipewire_loop(frame: FrameBuffer, _socket: &str) -> Result<(), pw::Error>
     stream.connect(
         spa::utils::Direction::Output,
         None,
-        pw::stream::StreamFlags::MAP_BUFFERS,
+        pw::stream::StreamFlags::MAP_BUFFERS | pw::stream::StreamFlags::DRIVER,
         &mut params,
     )?;
 
