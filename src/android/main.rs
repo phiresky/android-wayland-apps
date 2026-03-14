@@ -93,8 +93,7 @@ extern "system" fn Java_io_github_phiresky_wayland_1android_MainActivity_nativeI
     }
 
     // Start the camera → PipeWire bridge (non-blocking, runs in background threads).
-    // TODO: disabled due to SIGBUS crash in PipeWireCamera::drop (pipewire protocol-native)
-    // crate::android::camera::start();
+    crate::android::camera::start();
 
     // Spawn the compositor on a background thread, independent of Activity lifecycle.
     let compositor_done = setup_done;

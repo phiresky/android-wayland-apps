@@ -450,7 +450,7 @@ fn connect_pipewire() {
         log::info!("[camera] Connecting to PipeWire at {pw_socket}...");
 
         match PipeWireCamera::start(&pw_socket, &native_lib_dir, &data_dir) {
-            Some((camera, _frame_buf)) => {
+            Some(camera) => {
                 log::info!("[camera] PipeWire camera stream connected");
                 let _ = PW_CAMERA.set(Mutex::new(Some(camera)));
                 return;
