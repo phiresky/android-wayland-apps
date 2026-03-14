@@ -225,7 +225,7 @@ impl VulkanRenderer {
             .map_err(|e| format!("vkCreateImageView: {e}"))?;
 
         let stride_pixels = stride / 4; // 4 bytes per pixel for RGBA/BGRA
-        log::info!("[vk-renderer] Imported dmabuf {}x{} stride={} as VkImage+VkBuffer", width, height, stride);
+        log::debug!("[vk-renderer] Imported dmabuf {}x{} stride={}", width, height, stride);
 
         Ok(ImportedDmabuf { image, buffer, memory, view, width, height, stride_pixels })
     }
@@ -279,7 +279,7 @@ impl VulkanRenderer {
             .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST)
             .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
             .pre_transform(vk::SurfaceTransformFlagsKHR::IDENTITY)
-            .composite_alpha(vk::CompositeAlphaFlagsKHR::INHERIT)
+            .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
             .present_mode(vk::PresentModeKHR::FIFO)
             .clipped(true);
 
@@ -551,6 +551,16 @@ impl VulkanRenderer {
             // DRM_FORMAT_ABGR8888 = "AB24"
             0x34324241 => vk::Format::R8G8B8A8_UNORM,
             _ => vk::Format::B8G8R8A8_UNORM, // fallback
+        }
+    }
+
+    /// Destroy an imported dmabuf's Vulkan resources.
+    pub fn destroy_imported(&self, imported: &ImportedDmabuf) {
+        unsafe {
+            self.device.destroy_image_view(imported.view, None);
+            self.device.destroy_image(imported.image, None);
+            self.device.destroy_buffer(imported.buffer, None);
+            self.device.free_memory(imported.memory, None);
         }
     }
 

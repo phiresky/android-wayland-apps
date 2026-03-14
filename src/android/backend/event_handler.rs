@@ -421,7 +421,8 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                                                 }
                                                 Err(e) => log::warn!("Vulkan blit failed: {e}"),
                                             }
-                                            // TODO: cleanup imported image (destroy image, view, free memory)
+                                            // Clean up imported resources to prevent GPU memory leak
+                                            vk.destroy_imported(&imported);
                                         }
                                         Err(e) => log::warn!("Vulkan dmabuf import failed: {e}"),
                                     }
