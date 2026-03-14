@@ -34,8 +34,19 @@ pub fn run_compositor_loop(setup_done: Arc<AtomicBool>) {
         }
     };
 
-    // Build compositor.
-    let mut compositor = match Compositor::build() {
+    // Query supported dmabuf formats from the EGL renderer.
+    // Android EGL lacks EGL_EXT_image_dma_buf_import, but we advertise common formats
+    // anyway so Vulkan clients can create swapchains. Import is handled at render time.
+    use smithay::backend::renderer::ImportDma;
+    use smithay::backend::allocator::format::FormatSet;
+    let mut dmabuf_formats = renderer.renderer.dmabuf_formats();
+    if dmabuf_formats.iter().next().is_none() {
+        log::warn!("EGL has no dmabuf formats — advertising common formats for Vulkan WSI");
+        dmabuf_formats = FormatSet::from_formats_hardcoded();
+    }
+
+    // Build compositor (always advertises dmabuf global for Vulkan client support).
+    let mut compositor = match Compositor::build(dmabuf_formats) {
         Ok(c) => c,
         Err(e) => {
             log::error!("Failed to build compositor: {e}");

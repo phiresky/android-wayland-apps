@@ -4,9 +4,13 @@ mod text_input;
 use bind::bind_socket;
 pub use text_input::TextInputState;
 use smithay::{
-    backend::renderer::utils::on_commit_buffer_handler,
-    delegate_compositor, delegate_data_device, delegate_fractional_scale, delegate_layer_shell,
-    delegate_output, delegate_seat, delegate_shm, delegate_xdg_decoration, delegate_xdg_shell,
+    backend::{
+        allocator::dmabuf::Dmabuf,
+        renderer::utils::on_commit_buffer_handler,
+    },
+    delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_fractional_scale,
+    delegate_layer_shell, delegate_output, delegate_seat, delegate_shm, delegate_xdg_decoration,
+    delegate_xdg_shell,
     desktop::{PopupKind, PopupManager},
     input::{self, keyboard::KeyboardHandle, touch::TouchHandle, Seat, SeatHandler, SeatState},
     output::Output,
@@ -24,6 +28,7 @@ use smithay::{
             with_surface_tree_downward, CompositorClientState, CompositorHandler, CompositorState,
             SurfaceAttributes, TraversalAction,
         },
+        dmabuf::{DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier},
         output::OutputHandler,
         selection::{
             data_device::{
@@ -51,6 +56,7 @@ use smithay::{
         Client, ListeningSocket,
     },
 };
+use smithay::backend::allocator::format::FormatSet;
 use std::{error::Error, time::Instant};
 use std::os::unix::io::RawFd;
 use crate::android::backend::signal_wake;
@@ -76,6 +82,9 @@ pub struct State {
     pub fractional_scale_state: FractionalScaleManagerState,
     pub viewporter_state: ViewporterState,
     pub shm_state: ShmState,
+    pub dmabuf_state: DmabufState,
+    #[allow(dead_code)]
+    pub dmabuf_global: DmabufGlobal,
     pub data_device_state: DataDeviceState,
     pub seat_state: SeatState<Self>,
     pub size: Size<i32, Logical>,
@@ -211,6 +220,17 @@ impl ShmHandler for State {
     }
 }
 
+impl DmabufHandler for State {
+    fn dmabuf_state(&mut self) -> &mut DmabufState {
+        &mut self.dmabuf_state
+    }
+
+    fn dmabuf_imported(&mut self, _global: &DmabufGlobal, _dmabuf: Dmabuf, notifier: ImportNotifier) {
+        // Accept optimistically — actual import happens at render time via GlesRenderer.
+        let _ = notifier.successful::<State>();
+    }
+}
+
 impl SeatHandler for State {
     type KeyboardFocus = WlSurface;
     type PointerFocus = WlSurface;
@@ -304,6 +324,7 @@ delegate_xdg_decoration!(State);
 delegate_layer_shell!(State);
 delegate_compositor!(State);
 delegate_shm!(State);
+delegate_dmabuf!(State);
 delegate_seat!(State);
 delegate_data_device!(State);
 delegate_output!(State);
@@ -311,7 +332,7 @@ delegate_fractional_scale!(State);
 smithay::delegate_viewporter!(State);
 
 impl Compositor {
-    pub fn build() -> Result<Compositor, Box<dyn Error>> {
+    pub fn build(dmabuf_formats: FormatSet) -> Result<Compositor, Box<dyn Error>> {
         let display = Display::new()?;
         let dh = display.handle();
 
@@ -328,6 +349,10 @@ impl Compositor {
 
         let _text_input_global = TextInputState::init(&dh);
 
+        let mut dmabuf_state = DmabufState::new();
+        let dmabuf_global = dmabuf_state.create_global::<State>(&dh, dmabuf_formats);
+        log::info!("Dmabuf global created");
+
         let state = State {
             compositor_state: CompositorState::new::<State>(&dh),
             xdg_shell_state: XdgShellState::new::<State>(&dh),
@@ -336,6 +361,8 @@ impl Compositor {
             fractional_scale_state: FractionalScaleManagerState::new::<State>(&dh),
             viewporter_state: ViewporterState::new::<State>(&dh),
             shm_state: ShmState::new::<State>(&dh, vec![]),
+            dmabuf_state,
+            dmabuf_global,
             data_device_state: DataDeviceState::new::<State>(&dh),
             seat_state,
             size: (1920, 1080).into(),
