@@ -1,0 +1,15 @@
+--- a/src/egl/drivers/dri2/platform_wayland.c
++++ b/src/egl/drivers/dri2/platform_wayland.c
+@@ -3275,7 +3275,11 @@ dri2_initialize_wayland(_EGLDisplay *disp)
+ {
+    if (disp->Options.ForceSoftware)
+       return dri2_initialize_wayland_swrast(disp);
+-   else
+-      return dri2_initialize_wayland_drm(disp);
++   if (dri2_initialize_wayland_drm(disp))
++      return EGL_TRUE;
++   /* DRM/GBM init failed (e.g. KGSL on Android has no DRM render node).
++    * The "swrast" path is misnamed — with Zink+kopper it uses GPU via
++    * Vulkan WSI, just without DRM for buffer management. */
++   return dri2_initialize_wayland_swrast(disp);
+ }
