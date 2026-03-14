@@ -1,4 +1,5 @@
 pub mod egl;
+pub mod vulkan_renderer;
 mod event_handler;
 pub(crate) mod keymap;
 
@@ -13,6 +14,7 @@ use std::os::unix::io::RawFd;
 pub struct WaylandBackend {
     pub compositor: Compositor,
     pub renderer: Option<CompositorRenderer>,
+    pub vk_renderer: Option<vulkan_renderer::VulkanRenderer>,
     pub window_manager: Option<WindowManager>,
     pub wake_fd: RawFd,
     pub scale_factor: f64,

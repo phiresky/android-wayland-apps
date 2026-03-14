@@ -87,9 +87,22 @@ pub fn run_compositor_loop(setup_done: Arc<AtomicBool>) {
     window_manager::set_wake_fd(wake_fd);
     let window_manager = WindowManager::new();
 
+    // Init Vulkan renderer (proprietary Qualcomm driver, for zero-copy dmabuf compositing).
+    let vk_renderer = match crate::android::backend::vulkan_renderer::VulkanRenderer::new() {
+        Ok(vk) => {
+            log::info!("Vulkan renderer initialized");
+            Some(vk)
+        }
+        Err(e) => {
+            log::warn!("Vulkan renderer init failed: {e}");
+            None
+        }
+    };
+
     let mut backend = WaylandBackend {
         compositor,
         renderer: Some(renderer),
+        vk_renderer,
         window_manager: Some(window_manager),
         wake_fd,
         scale_factor,

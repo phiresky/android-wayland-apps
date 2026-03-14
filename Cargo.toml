@@ -28,6 +28,7 @@ smithay = { version = "0.7.0", default-features = false, features = [
     "renderer_glow",
     "wayland_frontend",
 ] }
+ash = { version = "0.38", default-features = false, features = ["std", "loaded"] }
 ureq = "2"
 pipewire-cam = { path = "pipewire-cam" }
 tar = "0.4"

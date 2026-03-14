@@ -173,6 +173,22 @@ fn process_window_events(backend: &mut WaylandBackend) {
                     .and_then(|wm| wm.get_native_handle(window_id));
 
                 if let Some(handle) = handle {
+                    // Test Vulkan presentation (clear to cornflower blue)
+                    if let Some(ref vk) = backend.vk_renderer {
+                        let raw_window = handle.a_native_window.as_ptr();
+                        match vk.create_window_surface(raw_window) {
+                            Ok(vk_surface) => {
+                                log::info!("Vulkan surface created for window_id={}", window_id);
+                                match vk.present_clear_color(&vk_surface, 0.39, 0.58, 0.93) {
+                                    Ok(()) => log::info!("Vulkan clear color presented!"),
+                                    Err(e) => log::error!("Vulkan present failed: {e}"),
+                                }
+                                // TODO: store vk_surface for ongoing rendering
+                            }
+                            Err(e) => log::error!("Vulkan surface creation failed: {e}"),
+                        }
+                    }
+
                     let surface = backend
                         .renderer
                         .as_ref()
