@@ -1,0 +1,50 @@
+ ./adb_runas.sh WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/tmp MESA_LOADER_DRIVER_OVERRIDE=zink GALLIUM_DRIVER=zink glmark2-es2-wayland
+
+=======================================================
+    glmark2 2023.01
+=======================================================
+    OpenGL Information
+    GL_VENDOR:      Mesa
+    GL_RENDERER:    zink Vulkan 1.4(Turnip Adreno (TM) 830 (MESA_TURNIP))
+    GL_VERSION:     OpenGL ES 3.2 Mesa 26.0.1
+    Surface Config: buf=32 r=8 g=8 b=8 a=8 depth=24 stencil=0 samples=0
+    Surface Size:   800x600 windowed
+=======================================================
+[build] use-vbo=false:MESA: error: zink: DEVICE LOST!
+ FPS: 54 FrameTime: 18.605 ms
+[build] use-vbo=true: FPS: 61 FrameTime: 16.643 ms
+[texture] texture-filter=nearest: FPS: 61 FrameTime: 16.619 ms
+[texture] texture-filter=linear: FPS: 61 FrameTime: 16.614 ms
+[texture] texture-filter=mipmap: FPS: 61 FrameTime: 16.610 ms
+[shading] shading=gouraud: FPS: 61 FrameTime: 16.642 ms
+[shading] shading=blinn-phong-inf: FPS: 61 FrameTime: 16.630 ms
+[shading] shading=phong: FPS: 61 FrameTime: 16.652 ms
+[shading] shading=cel: FPS: 61 FrameTime: 16.649 ms
+[bump] bump-render=high-poly: FPS: 61 FrameTime: 16.580 ms
+[bump] bump-render=normals: FPS: 61 FrameTime: 16.653 ms
+[bump] bump-render=height: FPS: 61 FrameTime: 16.619 ms
+[effect2d] kernel=0,1,0;1,-4,1;0,1,0;: FPS: 61 FrameTime: 16.606 ms
+[effect2d] kernel=1,1,1,1,1;1,1,1,1,1;1,1,1,1,1;: FPS: 61 FrameTime: 16.592 ms
+[pulsar] light=false:quads=5:texture=false: FPS: 61 FrameTime: 16.642 ms
+[desktop] blur-radius=5:effect=blur:passes=1:separable=true:windows=4: FPS: 61 FrameTime: 16.618 ms
+[desktop] effect=shadow:windows=4: FPS: 61 FrameTime: 16.562 ms
+[buffer] columns=200:interleave=false:update-dispersion=0.9:update-fraction=0.5:update-method=map: FPS: 59 FrameTime: 16.998 ms
+[buffer] columns=200:interleave=false:update-dispersion=0.9:update-fraction=0.5:update-method=subdata: FPS: 60 FrameTime: 16.844 ms
+[buffer] columns=200:interleave=true:update-dispersion=0.9:update-fraction=0.5:update-method=map: FPS: 54 FrameTime: 18.816 ms
+[ideas] speed=duration: FPS: 60 FrameTime: 16.736 ms
+[jellyfish] <default>: FPS: 61 FrameTime: 16.576 ms
+[terrain] <default>: FPS: 55 FrameTime: 18.482 ms
+[shadow] <default>: FPS: 61 FrameTime: 16.607 ms
+[refract] <default>: FPS: 61 FrameTime: 16.615 ms
+[conditionals] fragment-steps=0:vertex-steps=0: FPS: 61 FrameTime: 16.576 ms
+[conditionals] fragment-steps=5:vertex-steps=0: FPS: 331 FrameTime: 3.021 ms
+[conditionals] fragment-steps=0:vertex-steps=5: FPS: 630 FrameTime: 1.589 ms
+[function] fragment-complexity=low:fragment-steps=5: FPS: 64 FrameTime: 15.854 ms
+[function] fragment-complexity=medium:fragment-steps=5: FPS: 61 FrameTime: 16.653 ms
+[loop] fragment-loop=false:fragment-steps=5:vertex-steps=5: FPS: 61 FrameTime: 16.623 ms
+[loop] fragment-steps=5:fragment-uniform=false:vertex-steps=5: FPS: 61 FrameTime: 16.636 ms
+[loop] fragment-steps=5:fragment-uniform=true:vertex-steps=5: FPS: 70 FrameTime: 14.439 ms
+=======================================================
+                                  glmark2 Score: 85 
+=======================================================
+
