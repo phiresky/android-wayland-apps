@@ -173,20 +173,9 @@ fn process_window_events(backend: &mut WaylandBackend) {
                     .and_then(|wm| wm.get_native_handle(window_id));
 
                 if let Some(handle) = handle {
-                    // Create Vulkan swapchain for zero-copy dmabuf compositing
-                    if let Some(ref vk) = backend.vk_renderer {
-                        let raw_window = handle.a_native_window.as_ptr();
-                        match vk.create_window_surface(raw_window) {
-                            Ok(vk_surface) => {
-                                log::info!("Vulkan surface created for window_id={}", window_id);
-                                if let Some(wm) = backend.window_manager.as_mut()
-                                    && let Some(window) = wm.windows.get_mut(&window_id) {
-                                        window.vk_surface = Some(vk_surface);
-                                    }
-                            }
-                            Err(e) => log::error!("Vulkan surface creation failed: {e}"),
-                        }
-                    }
+                    // Vulkan swapchain is created lazily on first dmabuf commit
+                    // (not here — creating both VK swapchain and EGL surface on the
+                    // same ANativeWindow causes conflicts)
 
                     // Create EGL surface (for wl_shm clients and GLES fallback)
                     let surface = backend
@@ -374,29 +363,48 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
 
             let mut done = false;
             if let Some(ref vk) = backend.vk_renderer {
-                if let Some(ref wm) = backend.window_manager {
-                    if let Some(window) = wm.windows.get(&window_id) {
-                        if let Some(ref vk_surface) = window.vk_surface {
-                            // Get dmabuf from the renderer surface state (buffer is stored there after commit)
-                            let dmabuf = with_states(&wl_surface, |states| {
-                                type RssType = std::sync::Mutex<RendererSurfaceState>;
-                                states.data_map.get::<RssType>()
-                                    .and_then(|rss| {
-                                        let guard = rss.lock().ok()?;
-                                        let buf = guard.buffer()?;
-                                        // buf derefs to WlBuffer
-                                        get_dmabuf(buf).ok().cloned()
-                                    })
-                            });
+                // Check if surface has a dmabuf buffer
+                let dmabuf = with_states(&wl_surface, |states| {
+                    type RssType = std::sync::Mutex<RendererSurfaceState>;
+                    states.data_map.get::<RssType>()
+                        .and_then(|rss| {
+                            let guard = rss.lock().ok()?;
+                            let buf = guard.buffer()?;
+                            get_dmabuf(buf).ok().cloned()
+                        })
+                });
 
-                            if dmabuf.is_none() {
-                                // Only log once per window to avoid spam
-                                static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-                                if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                                    log::info!("Vulkan blit: no dmabuf on surface for window_id={}", window_id);
+                if let Some(dmabuf) = dmabuf {
+                    // Lazy-create Vulkan swapchain on first dmabuf
+                    let needs_vk_surface = backend.window_manager.as_ref()
+                        .and_then(|wm| wm.windows.get(&window_id))
+                        .map(|w| w.vk_surface.is_none() && w.native_window.is_some())
+                        .unwrap_or(false);
+
+                    if needs_vk_surface {
+                        if let Some(wm) = backend.window_manager.as_ref() {
+                            if let Some(window) = wm.windows.get(&window_id) {
+                                if let Some(native_window) = window.native_window {
+                                    match vk.create_window_surface(native_window) {
+                                        Ok(vk_surface) => {
+                                            log::info!("Lazy-created Vulkan surface for window_id={}", window_id);
+                                            if let Some(wm) = backend.window_manager.as_mut() {
+                                                if let Some(window) = wm.windows.get_mut(&window_id) {
+                                                    window.vk_surface = Some(vk_surface);
+                                                }
+                                            }
+                                        }
+                                        Err(e) => log::error!("Vulkan surface creation failed: {e}"),
+                                    }
                                 }
                             }
-                            if let Some(dmabuf) = dmabuf {
+                        }
+                    }
+
+                    // Now try to blit if we have a vk_surface
+                    if let Some(ref wm) = backend.window_manager {
+                        if let Some(window) = wm.windows.get(&window_id) {
+                            if let Some(ref vk_surface) = window.vk_surface {
                                 let fmt = dmabuf.format();
                                 let sz = dmabuf.size();
                                 let vk_fmt = crate::android::backend::vulkan_renderer::VulkanRenderer::fourcc_to_vk_format(fmt.code as u32);
@@ -407,9 +415,7 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                                     match vk.get_or_import_dmabuf(fd.as_raw_fd(), sz.w as u32, sz.h as u32, stride, vk_fmt) {
                                         Ok(imported) => {
                                             match vk.blit_dmabuf_to_swapchain(&imported, vk_surface) {
-                                                Ok(()) => {
-                                                    done = true;
-                                                }
+                                                Ok(()) => { done = true; }
                                                 Err(e) => log::warn!("Vulkan blit failed: {e}"),
                                             }
                                         }
