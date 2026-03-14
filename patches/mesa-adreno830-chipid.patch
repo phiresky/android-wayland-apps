@@ -1,0 +1,8 @@
+--- a/src/freedreno/common/freedreno_devices.py
++++ b/src/freedreno/common/freedreno_devices.py
+@@ -1465,7 +1465,7 @@
+ # Totally fake, just to get cffdump to work:
+ add_gpus([
+-        GPUId(chip_id=0x44050000, name="FD830"),
++        GPUId(chip_id=0x440500ff, name="FD830"),
+     ], A6xxGPUInfo(
