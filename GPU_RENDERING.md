@@ -4,7 +4,8 @@
 
 Linux apps running in proot can use hardware GPU acceleration via **Turnip** (Mesa's open-source Vulkan driver for Adreno GPUs) talking to the **KGSL** kernel driver (`/dev/kgsl-3d0`). The compositor imports rendered frames via `zwp_linux_dmabuf_v1`.
 
-**Current status**: Working with mmap fallback (CPU copy for compositing). GPU does the actual 3D rendering.
+**Current status**: Zero-copy GPU compositing via Vulkan bridge. Both client rendering
+and compositor display use the same KGSL GPU memory — no CPU copies.
 
 ## Device Info
 
@@ -15,21 +16,42 @@ Linux apps running in proot can use hardware GPU acceleration via **Turnip** (Me
 
 ## Architecture
 
+Two rendering paths depending on client buffer type:
+
+### Vulkan clients (zero-copy) — dmabuf path
 ```
 ┌──────────────────────┐    ┌───────────────────────────────┐
 │  Linux App (proot)   │    │  Compositor (Android app)     │
 │                      │    │                               │
-│  Vulkan API          │    │  smithay (Wayland server)     │
-│  ↓                   │    │  ↓                            │
-│  Turnip (Mesa)       │    │  GlesRenderer (Android EGL)   │
-│  ↓                   │    │  ↓                            │
+│  Vulkan API          │    │  VulkanRenderer (ash crate)   │
+│  ↓                   │    │  ↓ import DMA_BUF_BIT_EXT     │
+│  Turnip (Mesa)       │    │  ↓ vkCmdCopyBufferToImage     │
+│  ↓                   │    │  ↓ vkQueuePresent             │
 │  KGSL ioctls         │    │  Android SurfaceView          │
 │  ↓                   │    │                               │
-│  /dev/kgsl-3d0       │    │                               │
+│  /dev/kgsl-3d0  ←────────→  Qualcomm proprietary Vulkan   │
 └──────────┬───────────┘    └───────────────┬───────────────┘
-           │                                │
-           │  zwp_linux_dmabuf_v1           │
-           │  (dmabuf fd over unix socket)  │
+           │  same KGSL GPU memory (zero-copy)              │
+           │  zwp_linux_dmabuf_v1 (fd passing)              │
+           └────────────────────────────────────────────────┘
+```
+
+Key insight: both Turnip (Mesa) and the proprietary Qualcomm Vulkan driver talk to
+the same KGSL kernel driver. The proprietary driver accepts Turnip's dmabufs via
+`VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT` (works even though the extension
+`VK_EXT_external_memory_dma_buf` is not advertised).
+
+### wl_shm clients (CPU) — fallback path
+```
+┌──────────────────────┐    ┌───────────────────────────────┐
+│  Linux App (proot)   │    │  Compositor (Android app)     │
+│                      │    │                               │
+│  Software rendering  │    │  smithay GlesRenderer         │
+│  ↓                   │    │  ↓ (standard wl_shm import)   │
+│  wl_shm buffer       │    │  ↓ glTexSubImage2D            │
+│                      │    │  Android EGL surface          │
+└──────────┬───────────┘    └───────────────┬───────────────┘
+           │  wl_shm (shared memory)        │
            └────────────────────────────────┘
 ```
 
@@ -48,30 +70,45 @@ clang -shared -fPIC -fuse-ld=lld -o /usr/local/lib/kgsl_shim.so kgsl_shim.c -ldl
 
 Use with `LD_PRELOAD=/usr/local/lib/kgsl_shim.so` to log all KGSL ioctls for debugging.
 
-### 2. Dmabuf Support in Compositor
+### 2. Vulkan Renderer (`src/android/backend/vulkan_renderer.rs`)
 
-Android EGL **lacks** `EGL_EXT_image_dma_buf_import` (confirmed in logcat). Changes made:
+The compositor uses the **proprietary Qualcomm Vulkan driver** (NOT Turnip) for
+zero-copy dmabuf compositing. This is separate from smithay's GLES renderer.
 
-- **`src/android/compositor/mod.rs`**: Added `DmabufState`, `DmabufGlobal`, `DmabufHandler`, `delegate_dmabuf!`
-- **`src/android/app.rs`**: Queries renderer for dmabuf formats; falls back to `FormatSet::from_formats_hardcoded()` (ARGB/XRGB/ABGR/XBGR8888 + LINEAR modifier)
-- **Smithay patch** (`patches/smithay/`):
-  - `format.rs`: Added `FormatSet::from_formats_hardcoded()`
-  - `display.rs`: Relaxed EGL extension check — attempts `eglCreateImageKHR(EGL_LINUX_DMA_BUF_EXT)` even without the extension string
-  - `gles/mod.rs`: Added `import_dmabuf_via_mmap()` fallback — when EGLImage creation fails, mmaps the dmabuf fd and uploads pixels via `glTexSubImage2D`
+- Creates a Vulkan instance + device using Android's `libvulkan.so`
+- Extensions: `VK_KHR_swapchain`, `VK_KHR_external_memory_fd`, `VK_KHR_android_surface`
+- Per-window: creates `VkSwapchainKHR` on the Android `ANativeWindow`
+- Per-frame: imports client dmabuf via `DMA_BUF_BIT_EXT`, creates `VkBuffer` with
+  explicit stride, `vkCmdCopyBufferToImage` to swapchain, `vkQueuePresent`
+- Caches imported dmabufs by fd (~3-5 swapchain buffers, reused across frames)
 
-### 3. Rendering Pipeline (current — mmap fallback)
+### 3. Dmabuf Protocol Support
+
+- **`src/android/compositor/mod.rs`**: `DmabufState`, `DmabufGlobal`, `DmabufHandler`
+- Advertises hardcoded formats (ARGB/XRGB/ABGR/XBGR8888 + LINEAR)
+- Accepts all dmabufs optimistically in `dmabuf_imported`
+
+### 4. GLES Fallback (smithay patch)
+
+For wl_shm clients or if Vulkan renderer is unavailable:
+- `import_dmabuf_via_mmap()`: mmaps dmabuf fd, uploads via `glTexSubImage2D`
+- `import_dmabuf_via_ahb()`: AHardwareBuffer path (fails on Samsung gralloc)
+- `import_dmabuf_via_memory_object()`: GL_EXT_memory_object_fd (broken on Qualcomm)
+
+### 5. Rendering Pipeline (zero-copy Vulkan path)
 
 ```
 1. Turnip renders scene on GPU via KGSL
-2. Exports frame as dmabuf fd
-3. Sends to compositor via zwp_linux_dmabuf_v1 Wayland protocol
-4. Compositor receives dmabuf fd
-5. Tries eglCreateImageKHR(EGL_LINUX_DMA_BUF_EXT) → FAILS (no extension)
-6. Fallback: mmap(dmabuf_fd) → glTexSubImage2D → GL texture
-7. Compositor renders texture onto Android EGL surface
+2. Exports frame as dmabuf fd (KGSL GPU memory)
+3. Sends fd to compositor via zwp_linux_dmabuf_v1
+4. Compositor receives fd, looks up in dmabuf cache (by fd)
+5. If not cached: vkAllocateMemory(DMA_BUF import) + vkCreateBuffer
+6. vkCmdCopyBufferToImage from imported buffer to swapchain image
+7. vkQueuePresent to Android SurfaceView
 ```
 
-The 3D rendering (step 1) is GPU-accelerated. The compositing step (6) involves a CPU roundtrip.
+Steps 1-7 are all GPU operations — zero CPU copies. The "copy" in step 6 is a
+GPU-side blit between two KGSL memory regions on the same hardware.
 
 ## How to Reproduce (vkcube test)
 
@@ -105,12 +142,20 @@ and `XDG_RUNTIME_DIR=/tmp`. Turnip's ICD is found via the default Vulkan loader 
 # Expected: "Turnip Adreno (TM) 830", vendorID=0x5143, driverID=DRIVER_ID_MESA_TURNIP
 ```
 
+### Client compatibility
+
+| Client type | Status | Path |
+|-------------|--------|------|
+| Vulkan (vkcube, games) | **Zero-copy** | Turnip → dmabuf → Vulkan import → swapchain |
+| OpenGL (via Zink) | Not yet working | EGL can't init in proot (no DRM node) |
+| wl_shm (software) | **Works** | CPU shared memory → GLES renderer |
+
 ### Common issues
 
 | Issue | Cause | Fix |
 |-------|-------|-----|
 | `Cannot connect to wayland` | Wrong XDG_RUNTIME_DIR | Use `XDG_RUNTIME_DIR=/tmp` (not `/data/local/tmp`) |
-| Black window | No dmabuf support in compositor | Need the dmabuf + mmap fallback patches |
+| `EGLUT: failed to initialize EGL display` | No DRM render node in proot | OpenGL apps need Zink (not yet working) |
 | vkcube hangs after "Selected GPU" | No dmabuf global advertised | Compositor must advertise `zwp_linux_dmabuf_v1` |
 
 ## EGL Extensions Available on Device
@@ -128,42 +173,28 @@ and `XDG_RUNTIME_DIR=/tmp`. Turnip's ICD is found via the default Vulkan loader 
 - `EGL_EXT_image_dma_buf_import_modifiers`
 - `EGL_MESA_image_dma_buf_export`
 
-## Zero-Copy: Vulkan Bridge (PROMISING — in progress)
+## Zero-Copy: Vulkan Compositor (WORKING)
 
-The proprietary Qualcomm Vulkan driver can bridge raw KGSL dmabufs into opaque fds
-that the proprietary GL driver should accept. Confirmed via standalone C test:
+The proprietary Qualcomm Vulkan driver imports Turnip's KGSL dmabufs directly via
+`VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT` — even though the extension
+`VK_EXT_external_memory_dma_buf` is NOT advertised. Both drivers share the same
+KGSL kernel driver, so the GPU memory is never copied.
 
 ```
 dmabuf fd (from KGSL/Turnip)
-  → vkAllocateMemory(VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT)     ✓ works
-  → vkGetMemoryFdKHR(VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT_KHR)   ✓ works, returns valid fd
-  → glImportMemoryFdEXT(GL_HANDLE_TYPE_OPAQUE_FD_EXT)                    ? untested with opaque fd
-  → glTexStorageMem2DEXT                                                  ? untested
-  → GL texture (zero-copy!)
+  → vkAllocateMemory(DMA_BUF_BIT_EXT)           ✓ zero-copy import
+  → vkCreateBuffer (explicit stride)             ✓ raw buffer view
+  → vkCmdCopyBufferToImage (to swapchain)        ✓ GPU-side blit
+  → vkQueuePresent (Android surface)             ✓ displayed
 ```
 
-**Key findings from testing:**
-- Proprietary Qualcomm Vulkan driver (Adreno 830) supports `VK_KHR_external_memory_fd` ✓
-- `VK_EXT_external_memory_dma_buf` is NOT advertised, but `DMA_BUF_BIT_EXT` handle type
-  **works anyway** — `vkGetMemoryFdPropertiesKHR` returns `memoryTypeBits=0x12` ✓
-- DMA_BUF import into VkDeviceMemory → success ✓
-- Export as OPAQUE_FD from imported memory → success (fd returned) ✓
-- Combined alloc (DMA_BUF import + OPAQUE_FD export flags) → success ✓
-- Export as AHardwareBuffer → FAILS (`VK_ERROR_OUT_OF_HOST_MEMORY`) ✗
-  (cross-export between DMA_BUF and AHB handle types not supported)
+**Key discovery:** The GL path (EGL, GL_EXT_memory_object_fd) is completely broken
+on Qualcomm Adreno 830. The working path bypasses GLES entirely — compositor uses
+the proprietary Vulkan driver directly for dmabuf import and swapchain presentation.
 
-**Implementation plan:**
-1. Compositor creates a Vulkan instance + device (proprietary Qualcomm driver) at startup
-2. When a dmabuf arrives from a client, import it via `VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT`
-3. Export as `VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT_KHR` → opaque fd
-4. Import opaque fd into GL via `GL_EXT_memory_object_fd` with `GL_HANDLE_TYPE_OPAQUE_FD_EXT`
-5. `glTexStorageMem2DEXT` → GL texture for compositing
-
-The Vulkan driver acts as a translator between raw KGSL dmabufs and the proprietary
-Qualcomm GL driver's opaque fd format. Both drivers use KGSL under the hood, so the
-actual GPU memory is never copied.
-
-**Test binary:** `vk_import_test2.c` in project root (cross-compile with Android NDK).
+The GLES renderer (smithay GlesRenderer) is still used for wl_shm clients. Both
+renderers coexist: each window has both an EGL surface and a Vulkan swapchain,
+and the compositor picks the right path based on buffer type.
 
 ## Previous Zero-Copy Attempts (all failed on Samsung/Qualcomm)
 

@@ -188,29 +188,20 @@ fn process_window_events(backend: &mut WaylandBackend) {
                         }
                     }
 
-                    // Only create EGL surface if Vulkan didn't claim the window
-                    let has_vk = backend.window_manager.as_ref()
-                        .and_then(|wm| wm.windows.get(&window_id))
-                        .map(|w| w.vk_surface.is_some())
-                        .unwrap_or(false);
+                    // Create EGL surface (for wl_shm clients and GLES fallback)
+                    let surface = backend
+                        .renderer
+                        .as_ref()
+                        .and_then(|r| r.create_surface_for_native_window(handle).ok());
 
-                    if !has_vk {
-                        let surface = backend
-                            .renderer
-                            .as_ref()
-                            .and_then(|r| r.create_surface_for_native_window(handle).ok());
-
-                        if let Some(surface) = surface {
-                            log::info!("Created EGL surface for window_id={}", window_id);
-                            if let Some(wm) = backend.window_manager.as_mut()
-                                && let Some(window) = wm.windows.get_mut(&window_id) {
-                                    window.egl_surface = Some(surface);
-                                }
-                        } else {
-                            log::error!("Failed to create EGL surface for window_id={}", window_id);
-                        }
+                    if let Some(surface) = surface {
+                        log::info!("Created EGL surface for window_id={}", window_id);
+                        if let Some(wm) = backend.window_manager.as_mut()
+                            && let Some(window) = wm.windows.get_mut(&window_id) {
+                                window.egl_surface = Some(surface);
+                            }
                     } else {
-                        log::info!("Skipping EGL surface for window_id={} (Vulkan active)", window_id);
+                        log::error!("Failed to create EGL surface for window_id={}", window_id);
                     }
                 }
             }

@@ -97,11 +97,24 @@ fn run_pipewire_loop(frame: FrameBuffer, _socket: &str) -> Result<(), pw::Error>
     pw::init();
 
     log::info!("[pw-cam] Creating PipeWire main loop...");
-    let mainloop = pw::main_loop::MainLoopRc::new(None)?;
-    let context = pw::context::ContextRc::new(&mainloop, None)?;
+    let mainloop = pw::main_loop::MainLoopRc::new(None)
+        .map_err(|e| { log::error!("[pw-cam] MainLoop::new failed: {e}"); e })?;
+    log::info!("[pw-cam] MainLoop created");
+    let context = pw::context::ContextRc::new(&mainloop, None)
+        .map_err(|e| { log::error!("[pw-cam] Context::new failed: {e}"); e })?;
+    log::info!("[pw-cam] Context created");
 
     // remote.name is read from PIPEWIRE_REMOTE env var
-    let core = context.connect_rc(None)?;
+    // Retry connection — PipeWire daemon may not be ready yet
+    let core = loop {
+        match context.connect_rc(None) {
+            Ok(core) => break core,
+            Err(_) => {
+                log::info!("[pw-cam] Waiting for PipeWire daemon...");
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }
+        }
+    };
     log::info!("[pw-cam] Connected to PipeWire daemon");
 
     let stream = pw::stream::StreamBox::new(
@@ -200,6 +213,7 @@ fn run_pipewire_loop(frame: FrameBuffer, _socket: &str) -> Result<(), pw::Error>
 
     let mut params = [Pod::from_bytes(&values).ok_or(pw::Error::CreationFailed)?];
 
+    log::info!("[pw-cam] Connecting stream (format pod {} bytes)...", values.len());
     stream.connect(
         spa::utils::Direction::Output,
         None,
