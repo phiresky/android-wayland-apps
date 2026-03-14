@@ -41,6 +41,14 @@ impl PipeWireCamera {
         let _ = std::fs::remove_file(&spa_link);
         let _ = std::os::unix::fs::symlink(&spa_lib, &spa_link);
 
+        // videoconvert SPA plugin (needed by adapter module for video streams)
+        let vc_dir = format!("{}/videoconvert", spa_dir);
+        let _ = std::fs::create_dir_all(&vc_dir);
+        let vc_lib = format!("{}/libspa-videoconvert.so", module_dir);
+        let vc_link = format!("{}/libspa-videoconvert.so", vc_dir);
+        let _ = std::fs::remove_file(&vc_link);
+        let _ = std::os::unix::fs::symlink(&vc_lib, &vc_link);
+
         // Minimal PipeWire client config
         let config_dir = format!("{}/pw-config", data_dir);
         let _ = std::fs::create_dir_all(&config_dir);
@@ -50,10 +58,13 @@ impl PipeWireCamera {
             "context.properties = {}\n\
              context.spa-libs = {\n\
                  support.* = support/libspa-support\n\
+                 videoconvert = videoconvert/libspa-videoconvert\n\
              }\n\
              context.modules = [\n\
                  { name = libpipewire-module-protocol-native }\n\
                  { name = libpipewire-module-client-node }\n\
+                 { name = libpipewire-module-adapter }\n\
+                 { name = libpipewire-module-metadata }\n\
              ]\n",
         );
 
@@ -64,6 +75,7 @@ impl PipeWireCamera {
             std::env::set_var("PIPEWIRE_REMOTE", socket_path);
             std::env::set_var("PIPEWIRE_CONFIG_DIR", &config_dir);
             std::env::set_var("PIPEWIRE_CONFIG_NAME", "client.conf");
+            std::env::set_var("PIPEWIRE_DEBUG", "4");
         }
 
         let frame: FrameBuffer = Arc::new(Mutex::new(None));
@@ -186,21 +198,29 @@ fn run_pipewire_loop(frame: FrameBuffer, _socket: &str) -> Result<(), pw::Error>
         ),
         spa::pod::property!(
             spa::param::format::FormatProperties::VideoFormat,
+            Choice,
+            Enum,
             Id,
+            spa::param::video::VideoFormat::NV12,
             spa::param::video::VideoFormat::NV12
         ),
         spa::pod::property!(
             spa::param::format::FormatProperties::VideoSize,
+            Choice,
+            Range,
             Rectangle,
-            spa::utils::Rectangle {
-                width: CAM_WIDTH,
-                height: CAM_HEIGHT,
-            }
+            spa::utils::Rectangle { width: CAM_WIDTH, height: CAM_HEIGHT },
+            spa::utils::Rectangle { width: 1, height: 1 },
+            spa::utils::Rectangle { width: 4096, height: 4096 }
         ),
         spa::pod::property!(
             spa::param::format::FormatProperties::VideoFramerate,
+            Choice,
+            Range,
             Fraction,
-            spa::utils::Fraction { num: 30, denom: 1 }
+            spa::utils::Fraction { num: 30, denom: 1 },
+            spa::utils::Fraction { num: 0, denom: 1 },
+            spa::utils::Fraction { num: 1000, denom: 1 }
         ),
     );
     let values: Vec<u8> = spa::pod::serialize::PodSerializer::serialize(
@@ -217,7 +237,7 @@ fn run_pipewire_loop(frame: FrameBuffer, _socket: &str) -> Result<(), pw::Error>
     stream.connect(
         spa::utils::Direction::Output,
         None,
-        pw::stream::StreamFlags::MAP_BUFFERS | pw::stream::StreamFlags::DRIVER,
+        pw::stream::StreamFlags::MAP_BUFFERS,
         &mut params,
     )?;
 
