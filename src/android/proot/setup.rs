@@ -53,6 +53,7 @@ pub fn is_setup_complete() -> bool {
         command: config::check_cmd(),
         user: None,
         log: None,
+        kill_on_exit: true,
     }
     .run()
     .status
@@ -81,7 +82,7 @@ pub fn run_setup() {
     fix_xkb_symlink();
     fix_ttyname();
     setup_storage_mountpoints();
-    compile_v4l2_shim();
+    setup_pipewire_config();
     setup_log("=== Proot setup complete ===");
 }
 
@@ -292,14 +293,11 @@ fn setup_machine_id() {
 /// Firefox's content process sandbox uses Linux namespaces and seccomp-bpf,
 /// which don't work inside proot. Without this config, every tab crashes.
 /// Uses Firefox's autoconfig mechanism (same approach as localdesktop).
-fn setup_firefox_config() {
+pub fn setup_firefox_config() {
     let fs_root = Path::new(config::ARCH_FS_ROOT);
     let firefox_root = fs_root.join("usr/lib/firefox");
     let cfg_file = firefox_root.join("wayland_android.cfg");
 
-    if cfg_file.exists() {
-        return;
-    }
     if !firefox_root.exists() {
         // Firefox not installed yet, skip
         return;
@@ -319,7 +317,8 @@ fn setup_firefox_config() {
     // The .cfg file must start with a comment line (Firefox requirement)
     let cfg = "// Auto-configured by wayland_android for proot compatibility\n\
                defaultPref(\"security.sandbox.content.level\", 0);\n\
-               defaultPref(\"media.cubeb.sandbox\", false);\n";
+               defaultPref(\"media.cubeb.sandbox\", false);\n\
+               defaultPref(\"security.sandbox.warn_unprivileged_namespaces\", false);\n";
     fs::write(&cfg_file, cfg)
         .unwrap_or_else(|e| log::error!("[setup] Failed to write Firefox config: {}", e));
 }
@@ -346,6 +345,7 @@ fn install_dependencies() {
             command: config::check_cmd(),
             user: None,
             log: None,
+            kill_on_exit: true,
         }
         .run()
         .status
@@ -368,6 +368,7 @@ fn install_dependencies() {
             command: "rm -f /var/lib/pacman/db.lck".into(),
             user: None,
             log: None,
+            kill_on_exit: true,
         }
         .run();
 
@@ -376,6 +377,7 @@ fn install_dependencies() {
             command: config::install_cmd(),
             user: None,
             log: Some(Arc::new(|line| setup_log(&format!("[pacman] {}", line)))),
+            kill_on_exit: true,
         }
         .run();
 
@@ -565,6 +567,7 @@ char *ttyname(int fd) {
             .into(),
         user: None,
         log: None,
+        kill_on_exit: true,
     }
     .run();
 
@@ -602,46 +605,27 @@ fn setup_storage_mountpoints() {
     }
 }
 
-/// Build the V4L2 camera shim library for LD_PRELOAD inside proot.
-///
-/// The shim intercepts open/ioctl/mmap/fstat/close to present the Android
-/// camera (streamed via a Unix socket from the Rust camera server) as
-/// `/dev/video0` to Linux applications like Firefox.
-fn compile_v4l2_shim() {
-    let fs_root = Path::new(config::ARCH_FS_ROOT);
-    let so_path = fs_root.join("usr/lib/libandroid_cam.so");
-    if so_path.exists() {
+
+/// Configure PipeWire for unrestricted access inside proot.
+/// The default access module tries flatpak/portal checks which fail in proot,
+/// causing clients (pw-cli, apps) to hang. Uncomment and set socket-based
+/// access to "unrestricted" in the main config.
+fn setup_pipewire_config() {
+    let conf_path = Path::new(config::ARCH_FS_ROOT)
+        .join("usr/share/pipewire/pipewire.conf");
+    if !conf_path.exists() {
         return;
     }
-
-    setup_log("[setup] Building V4L2 camera shim...");
-
-    let c_source = fs_root.join("tmp/v4l2_shim.c");
-    let source_code = include_str!("../../linux/v4l2_shim.c");
-
-    if let Err(e) = fs::write(&c_source, source_code) {
-        log::error!("[setup] Failed to write v4l2_shim.c: {}", e);
-        return;
+    let Ok(conf) = fs::read_to_string(&conf_path) else { return };
+    let patched = conf.replace(
+        "#access.socket = { pipewire-0 = \"default\", pipewire-0-manager = \"unrestricted\" }",
+        "access.socket = { pipewire-0 = \"unrestricted\", pipewire-0-manager = \"unrestricted\" }",
+    );
+    if patched != conf {
+        if let Err(e) = fs::write(&conf_path, &patched) {
+            log::error!("[setup] Failed to patch pipewire.conf: {e}");
+        }
     }
-
-    let output = ArchProcess {
-        command: "gcc -shared -fPIC -O2 -o /usr/lib/libandroid_cam.so /tmp/v4l2_shim.c -lpthread -ldl && echo OK"
-            .into(),
-        user: None,
-        log: None,
-    }
-    .run();
-
-    if output.status.success() && String::from_utf8_lossy(&output.stdout).contains("OK") {
-        setup_log("[setup] V4L2 camera shim built successfully");
-    } else {
-        log::error!(
-            "[setup] Failed to build libandroid_cam.so: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    let _ = fs::remove_file(&c_source);
 }
 
 /// Fix the xkb symlink if it's absolute (won't resolve outside proot).

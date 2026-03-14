@@ -1,17 +1,13 @@
-//! Android Camera2 NDK → Unix socket bridge.
+//! Android Camera2 NDK → PipeWire Video/Source bridge.
 //!
 //! Opens the back-facing camera via the NDK Camera2 C API and streams NV12
-//! frames to clients connected to `{ARCH_FS_ROOT}/tmp/android_cam.sock`
-//! (= `/tmp/android_cam.sock` inside proot).
-//!
-//! The V4L2 LD_PRELOAD shim compiled during setup connects to this socket and
-//! presents the stream as `/dev/video0` to Linux applications.
+//! frames directly to a PipeWire Video/Source node, making the camera visible
+//! to Linux apps (Firefox, Snapshot, etc.) running inside proot.
 
+use crate::android::utils::application_context::get_application_context;
 use crate::core::config;
-use std::io::Write;
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::sync::mpsc::SyncSender;
-use std::sync::{Mutex, OnceLock};
+use pipewire_cam::PipeWireCamera;
+use std::sync::{Arc, Mutex, OnceLock};
 
 // ---- Constants ----
 
@@ -20,7 +16,7 @@ const CAM_HEIGHT: i32 = 480;
 const MAX_IMAGES: i32 = 2;
 
 const AIMAGE_FORMAT_YUV_420_888: i32 = 0x23;
-const ACAMERA_LENS_FACING: u32 = 0x00080005; // NdkCameraMetadataTags section 8, offset 5
+const ACAMERA_LENS_FACING: u32 = 0x00080005;
 const ACAMERA_LENS_FACING_BACK: u8 = 1;
 const TEMPLATE_PREVIEW: i32 = 1;
 
@@ -60,7 +56,7 @@ struct ACameraMetadata_const_entry {
     tag: u32,
     type_: u8,
     count: u32,
-    data: *const u8, // union; we only need the u8 pointer for LENS_FACING
+    data: *const u8,
 }
 
 #[repr(C)]
@@ -155,7 +151,7 @@ unsafe extern "C" {
 
     fn ACameraCaptureSession_setRepeatingRequest(
         session: *mut ACameraCaptureSession,
-        cbs: *mut libc::c_void, // ACameraCaptureSession_captureCallbacks*, nullable
+        cbs: *mut libc::c_void,
         n: i32,
         requests: *mut *mut ACaptureRequest,
         seq: *mut i32,
@@ -163,10 +159,7 @@ unsafe extern "C" {
     fn ACameraCaptureSession_close(session: *mut ACameraCaptureSession);
 
     fn AImageReader_new(
-        w: i32,
-        h: i32,
-        fmt: i32,
-        max: i32,
+        w: i32, h: i32, fmt: i32, max: i32,
         out: *mut *mut AImageReader,
     ) -> i32;
     fn AImageReader_delete(reader: *mut AImageReader);
@@ -181,10 +174,8 @@ unsafe extern "C" {
     fn AImage_getWidth(image: *const AImage, w: *mut i32) -> i32;
     fn AImage_getHeight(image: *const AImage, h: *mut i32) -> i32;
     fn AImage_getPlaneData(
-        image: *const AImage,
-        plane: i32,
-        data: *mut *mut u8,
-        len: *mut i32,
+        image: *const AImage, plane: i32,
+        data: *mut *mut u8, len: *mut i32,
     ) -> i32;
     fn AImage_getPlanePixelStride(image: *const AImage, plane: i32, stride: *mut i32) -> i32;
     fn AImage_getPlaneRowStride(image: *const AImage, plane: i32, stride: *mut i32) -> i32;
@@ -192,8 +183,10 @@ unsafe extern "C" {
 
 // ---- Global state ----
 
-static FRAME_TX: OnceLock<SyncSender<Vec<u8>>> = OnceLock::new();
-static CLIENTS: OnceLock<Mutex<Vec<UnixStream>>> = OnceLock::new();
+/// Shared frame buffer: camera callback writes, PipeWire process callback reads.
+static PW_FRAME: OnceLock<Arc<Mutex<Option<Vec<u8>>>>> = OnceLock::new();
+/// PipeWire camera handle (kept alive for the process lifetime).
+static PW_CAMERA: OnceLock<Mutex<Option<PipeWireCamera>>> = OnceLock::new();
 
 // ---- NDK callbacks ----
 
@@ -211,8 +204,13 @@ unsafe extern "C" fn on_image_available(_ctx: *mut libc::c_void, reader: *mut AI
         return;
     }
     if let Some(frame) = extract_nv12(image) {
-        if let Some(tx) = FRAME_TX.get() {
-            let _ = tx.try_send(frame); // drop frame if channel full — backpressure
+        // Push frame to PipeWire
+        if let Some(pw_cam) = PW_CAMERA.get() {
+            if let Ok(guard) = pw_cam.lock() {
+                if let Some(ref cam) = *guard {
+                    cam.push_frame(&frame);
+                }
+            }
         }
     }
     unsafe { AImage_delete(image) };
@@ -274,7 +272,7 @@ fn yuv420_to_nv12(
         let base = row * y_rs;
         let end = (base + w).min(y.len());
         out.extend_from_slice(&y[base..end]);
-        out.resize(out.len() + w - (end - base), 16u8); // pad if short row
+        out.resize(out.len() + w - (end - base), 16u8);
     }
     for row in 0..h / 2 {
         for col in 0..w / 2 {
@@ -285,52 +283,6 @@ fn yuv420_to_nv12(
         }
     }
     out
-}
-
-// ---- Socket server ----
-
-fn socket_server() {
-    let sock_path = format!("{}/tmp/android_cam.sock", config::ARCH_FS_ROOT);
-    let _ = std::fs::remove_file(&sock_path);
-    let listener = match UnixListener::bind(&sock_path) {
-        Ok(l) => l,
-        Err(e) => {
-            log::error!("[camera] Failed to bind {sock_path}: {e}");
-            return;
-        }
-    };
-    log::info!("[camera] Socket server at {sock_path}");
-    for stream in listener.incoming() {
-        match stream {
-            Ok(s) => {
-                log::info!("[camera] Client connected");
-                if let Some(clients) = CLIENTS.get() {
-                    if let Ok(mut list) = clients.lock() {
-                        list.push(s);
-                    }
-                }
-            }
-            Err(e) => log::error!("[camera] Accept error: {e}"),
-        }
-    }
-}
-
-// ---- Frame broadcaster ----
-
-fn broadcast_frames(rx: std::sync::mpsc::Receiver<Vec<u8>>) {
-    for frame in rx {
-        let Some(clients) = CLIENTS.get() else { continue };
-        let Ok(mut guard) = clients.lock() else { continue };
-        let w = (CAM_WIDTH as u32).to_le_bytes();
-        let h = (CAM_HEIGHT as u32).to_le_bytes();
-        let len = (frame.len() as u32).to_le_bytes();
-        guard.retain_mut(|c| {
-            c.write_all(&w).is_ok()
-                && c.write_all(&h).is_ok()
-                && c.write_all(&len).is_ok()
-                && c.write_all(&frame).is_ok()
-        });
-    }
 }
 
 // ---- Camera startup ----
@@ -365,7 +317,7 @@ fn find_back_camera(mgr: *mut ACameraManager) -> Option<std::ffi::CString> {
                 break;
             }
             if result.is_none() {
-                result = Some(id_cstr); // keep first as fallback
+                result = Some(id_cstr);
             }
         }
         ACameraManager_deleteCameraIdList(id_list);
@@ -400,7 +352,6 @@ fn start_camera() -> Result<(), String> {
             return Err("ACameraManager_openCamera failed".into());
         }
 
-        // ImageReader
         let mut reader: *mut AImageReader = std::ptr::null_mut();
         if AImageReader_new(CAM_WIDTH, CAM_HEIGHT, AIMAGE_FORMAT_YUV_420_888, MAX_IMAGES, &mut reader) != 0 {
             ACameraDevice_close(device);
@@ -421,7 +372,6 @@ fn start_camera() -> Result<(), String> {
             return Err("AImageReader_getWindow failed".into());
         }
 
-        // Session outputs
         let mut container: *mut ACaptureSessionOutputContainer = std::ptr::null_mut();
         ACaptureSessionOutputContainer_create(&mut container);
         let mut sess_out: *mut ACaptureSessionOutput = std::ptr::null_mut();
@@ -444,7 +394,6 @@ fn start_camera() -> Result<(), String> {
             return Err("createCaptureSession failed".into());
         }
 
-        // Capture request
         let mut request: *mut ACaptureRequest = std::ptr::null_mut();
         ACameraDevice_createCaptureRequest(device, TEMPLATE_PREVIEW, &mut request);
         let mut target: *mut ACameraOutputTarget = std::ptr::null_mut();
@@ -471,13 +420,12 @@ fn start_camera() -> Result<(), String> {
             return Err("setRepeatingRequest failed".into());
         }
 
-        // Fix borrow — suppress unused warning on sess_cbs
         let _ = &sess_cbs;
 
         log::info!("[camera] Streaming {}×{} NV12", CAM_WIDTH, CAM_HEIGHT);
-        std::thread::park(); // keep objects alive; park forever
+        std::thread::park(); // keep objects alive
 
-        // Unreachable cleanup (prevents compiler from dropping too early)
+        // Unreachable cleanup
         ACaptureRequest_free(request);
         ACameraOutputTarget_free(target);
         ACameraCaptureSession_close(session);
@@ -490,24 +438,47 @@ fn start_camera() -> Result<(), String> {
     }
 }
 
+// ---- PipeWire connection (with retry) ----
+
+fn connect_pipewire() {
+    let ctx = get_application_context();
+    let native_lib_dir = ctx.native_library_dir.to_string_lossy().to_string();
+    let data_dir = ctx.data_dir.to_string_lossy().to_string();
+    let pw_socket = format!("{}/tmp/pipewire-0", config::ARCH_FS_ROOT);
+
+    loop {
+        log::info!("[camera] Connecting to PipeWire at {pw_socket}...");
+
+        match PipeWireCamera::start(&pw_socket, &native_lib_dir, &data_dir) {
+            Some((camera, _frame_buf)) => {
+                log::info!("[camera] PipeWire camera stream connected");
+                let _ = PW_CAMERA.set(Mutex::new(Some(camera)));
+                return;
+            }
+            None => {
+                log::warn!("[camera] PipeWire not ready, retrying in 2s...");
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }
+        }
+    }
+}
+
 // ---- Public entry point ----
 
 pub fn start() {
-    let (tx, rx) = std::sync::mpsc::sync_channel(2);
-    if FRAME_TX.set(tx).is_err() {
+    if PW_FRAME.set(Arc::new(Mutex::new(None))).is_err() {
         log::warn!("[camera] Already started");
         return;
     }
-    let _ = CLIENTS.set(Mutex::new(Vec::new()));
+    let _ = PW_CAMERA.set(Mutex::new(None));
 
+    // Thread 1: Connect to PipeWire (retries until daemon is ready)
     std::thread::Builder::new()
-        .name("cam-socket".into())
-        .spawn(socket_server)
+        .name("cam-pipewire".into())
+        .spawn(connect_pipewire)
         .ok();
-    std::thread::Builder::new()
-        .name("cam-broadcast".into())
-        .spawn(move || broadcast_frames(rx))
-        .ok();
+
+    // Thread 2: Start camera capture
     std::thread::Builder::new()
         .name("cam-capture".into())
         .spawn(|| {

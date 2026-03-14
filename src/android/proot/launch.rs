@@ -9,9 +9,47 @@ use std::thread;
 /// Open the native Android launcher Activity.
 /// Called once after setup completes and the compositor is ready.
 pub fn launch() {
+    start_pipewire();
     if let Err(e) = open_launcher_activity() {
         log::error!("Failed to open launcher activity: {e}");
     }
+}
+
+/// Start PipeWire and WirePlumber daemons inside proot.
+/// Each runs as a foreground process in its own long-lived proot instance.
+/// The /tmp/pipewire-0 socket is created by PipeWire for clients to connect.
+fn start_pipewire() {
+    // Clean stale PipeWire sockets from previous runs
+    let pw_socket = format!("{}/tmp/pipewire-0", config::ARCH_FS_ROOT);
+    let _ = std::fs::remove_file(&pw_socket);
+    let _ = std::fs::remove_file(format!("{}-manager", pw_socket));
+
+    // PipeWire daemon — runs as foreground (blocks the thread)
+    thread::spawn(|| {
+        log::info!("Starting PipeWire daemon in proot...");
+        let output = ArchProcess {
+            command: "PIPEWIRE_DEBUG=4 pipewire & sleep infinity".into(),
+            user: Some(config::USERNAME.to_string()),
+            log: Some(Arc::new(|line| log::info!("[pipewire] {}", line))),
+            kill_on_exit: false, // PipeWire daemonizes (forks); don't kill the child
+        }
+        .run();
+        log::warn!("PipeWire exited: {:?}", output.status);
+    });
+
+    // WirePlumber session manager — start after a short delay
+    thread::spawn(|| {
+        thread::sleep(std::time::Duration::from_secs(2));
+        log::info!("Starting WirePlumber in proot...");
+        let output = ArchProcess {
+            command: "wireplumber".into(),
+            user: Some(config::USERNAME.to_string()),
+            log: Some(Arc::new(|line| log::info!("[wireplumber] {}", line))),
+            kill_on_exit: false,
+        }
+        .run();
+        log::warn!("WirePlumber exited: {:?}", output.status);
+    });
 }
 
 fn open_launcher_activity() -> Result<(), jni::errors::Error> {
@@ -100,6 +138,7 @@ extern "system" fn Java_io_github_phiresky_wayland_1android_LauncherActivity_nat
             command,
             user: Some(config::USERNAME.to_string()),
             log: Some(Arc::new(|it| log::info!("{}", it))),
+            kill_on_exit: true,
         }
         .run();
         log::info!("App exited: {:?}", output.status);

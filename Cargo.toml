@@ -29,6 +29,7 @@ smithay = { version = "0.7.0", default-features = false, features = [
     "wayland_frontend",
 ] }
 ureq = "2"
+pipewire-cam = { path = "pipewire-cam" }
 tar = "0.4"
 xz2 = "0.1"
 pathdiff = "0.2"

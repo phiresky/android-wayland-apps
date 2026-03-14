@@ -12,6 +12,8 @@ pub const PACKAGES: &[&str] = &[
     "ca-certificates",
     "gedit",
     "mesa-utils",
+    "pipewire",
+    "wireplumber",
     "qt6-wayland",
     "shared-mime-info",
     "gdk-pixbuf2",

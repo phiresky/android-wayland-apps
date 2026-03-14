@@ -64,6 +64,10 @@ extern "system" fn Java_io_github_phiresky_wayland_1android_MainActivity_nativeI
     // Always fix the xkb symlink (it may be absolute from the rootfs tarball).
     setup::fix_xkb_symlink();
 
+    // Configure Firefox for proot (sandbox disable). Runs every startup because
+    // Firefox may be installed after initial setup.
+    setup::setup_firefox_config();
+
     // Disable bwrap (bubblewrap) — it can't work inside proot.
     setup::disable_bwrap();
 
@@ -88,7 +92,7 @@ extern "system" fn Java_io_github_phiresky_wayland_1android_MainActivity_nativeI
         });
     }
 
-    // Start the camera → Unix socket bridge (non-blocking, runs in background threads).
+    // Start the camera → PipeWire bridge (non-blocking, runs in background threads).
     crate::android::camera::start();
 
     // Spawn the compositor on a background thread, independent of Activity lifecycle.

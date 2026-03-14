@@ -20,6 +20,8 @@ pub struct ArchProcess {
     pub command: String,
     pub user: Option<String>,
     pub log: Option<Log>,
+    /// When false, omit --kill-on-exit so forked daemons survive.
+    pub kill_on_exit: bool,
 }
 
 impl ArchProcess {
@@ -96,9 +98,11 @@ impl ArchProcess {
             .arg(config::ARCH_FS_ROOT)
             .arg("-L")
             .arg("--link2symlink")
-            .arg("--sysvipc")
-            .arg("--kill-on-exit")
-            .arg("--root-id")
+            .arg("--sysvipc");
+        if self.kill_on_exit {
+            process.arg("--kill-on-exit");
+        }
+        process.arg("--root-id")
             .arg("--bind=/dev")
             .arg("--bind=/proc")
             .arg("--bind=/sys")
@@ -150,18 +154,10 @@ impl ArchProcess {
             .arg("TERM=xterm-256color")
             .arg("SHELL=/bin/bash");
 
-        // LD_PRELOAD: combine all shim libraries that exist
-        let mut preloads = Vec::new();
+        // LD_PRELOAD: fix_ttyname shim if present
         let fix_ttyname = Path::new(config::ARCH_FS_ROOT).join("usr/lib/fix_ttyname.so");
         if fix_ttyname.exists() {
-            preloads.push("/usr/lib/fix_ttyname.so");
-        }
-        let v4l2_shim = Path::new(config::ARCH_FS_ROOT).join("usr/lib/libandroid_cam.so");
-        if v4l2_shim.exists() {
-            preloads.push("/usr/lib/libandroid_cam.so");
-        }
-        if !preloads.is_empty() {
-            process.arg(format!("LD_PRELOAD={}", preloads.join(":")));
+            process.arg("LD_PRELOAD=/usr/lib/fix_ttyname.so");
         }
 
         // Run sh directly — --root-id already virtualizes the UID inside proot,
