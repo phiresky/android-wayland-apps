@@ -87,6 +87,8 @@ pub struct WindowState {
     /// DeX enforces a minimum window height larger than small dialogs need,
     /// so we cap the Wayland configure to this size and center the content.
     pub preferred_size: Option<Size<i32, Logical>>,
+    /// Vulkan swapchain for zero-copy dmabuf compositing (bypasses GLES).
+    pub vk_surface: Option<crate::android::backend::vulkan_renderer::VulkanWindowSurface>,
 }
 
 /// Manages the mapping between XDG toplevels and Android Activities.
@@ -127,6 +129,7 @@ impl WindowManager {
             activity_launched: false,
             created_time: Instant::now(),
             preferred_size: None,
+            vk_surface: None,
         });
 
         window_id

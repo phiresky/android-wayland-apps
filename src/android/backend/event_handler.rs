@@ -173,35 +173,44 @@ fn process_window_events(backend: &mut WaylandBackend) {
                     .and_then(|wm| wm.get_native_handle(window_id));
 
                 if let Some(handle) = handle {
-                    // Test Vulkan presentation (clear to cornflower blue)
+                    // Create Vulkan swapchain for zero-copy dmabuf compositing
                     if let Some(ref vk) = backend.vk_renderer {
                         let raw_window = handle.a_native_window.as_ptr();
                         match vk.create_window_surface(raw_window) {
                             Ok(vk_surface) => {
                                 log::info!("Vulkan surface created for window_id={}", window_id);
-                                match vk.present_clear_color(&vk_surface, 0.39, 0.58, 0.93) {
-                                    Ok(()) => log::info!("Vulkan clear color presented!"),
-                                    Err(e) => log::error!("Vulkan present failed: {e}"),
-                                }
-                                // TODO: store vk_surface for ongoing rendering
+                                if let Some(wm) = backend.window_manager.as_mut()
+                                    && let Some(window) = wm.windows.get_mut(&window_id) {
+                                        window.vk_surface = Some(vk_surface);
+                                    }
                             }
                             Err(e) => log::error!("Vulkan surface creation failed: {e}"),
                         }
                     }
 
-                    let surface = backend
-                        .renderer
-                        .as_ref()
-                        .and_then(|r| r.create_surface_for_native_window(handle).ok());
+                    // Only create EGL surface if Vulkan didn't claim the window
+                    let has_vk = backend.window_manager.as_ref()
+                        .and_then(|wm| wm.windows.get(&window_id))
+                        .map(|w| w.vk_surface.is_some())
+                        .unwrap_or(false);
 
-                    if let Some(surface) = surface {
-                        log::info!("Created EGL surface for window_id={}", window_id);
-                        if let Some(wm) = backend.window_manager.as_mut()
-                            && let Some(window) = wm.windows.get_mut(&window_id) {
-                                window.egl_surface = Some(surface);
-                            }
+                    if !has_vk {
+                        let surface = backend
+                            .renderer
+                            .as_ref()
+                            .and_then(|r| r.create_surface_for_native_window(handle).ok());
+
+                        if let Some(surface) = surface {
+                            log::info!("Created EGL surface for window_id={}", window_id);
+                            if let Some(wm) = backend.window_manager.as_mut()
+                                && let Some(window) = wm.windows.get_mut(&window_id) {
+                                    window.egl_surface = Some(surface);
+                                }
+                        } else {
+                            log::error!("Failed to create EGL surface for window_id={}", window_id);
+                        }
                     } else {
-                        log::error!("Failed to create EGL surface for window_id={}", window_id);
+                        log::info!("Skipping EGL surface for window_id={} (Vulkan active)", window_id);
                     }
                 }
             }
@@ -319,7 +328,7 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
         .map(|wm| {
             wm.windows
                 .iter()
-                .filter(|(_, w)| w.egl_surface.is_some() && w.size.w > 0 && w.size.h > 0)
+                .filter(|(_, w)| (w.egl_surface.is_some() || w.vk_surface.is_some()) && w.size.w > 0 && w.size.h > 0)
                 .map(|(id, _)| *id)
                 .collect()
         })
@@ -364,6 +373,72 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
             let preferred_h = (p.h as f64 * scale).round() as i32;
             ((size.h - preferred_h) / 2).max(0)
         }).unwrap_or(0);
+
+        // Try Vulkan zero-copy blit for dmabuf surfaces
+        let vk_rendered = {
+            use smithay::wayland::compositor::with_states;
+            use smithay::wayland::dmabuf::get_dmabuf;
+            use smithay::backend::allocator::Buffer;
+            use smithay::backend::renderer::utils::RendererSurfaceState;
+
+            let mut done = false;
+            if let Some(ref vk) = backend.vk_renderer {
+                if let Some(ref wm) = backend.window_manager {
+                    if let Some(window) = wm.windows.get(&window_id) {
+                        if let Some(ref vk_surface) = window.vk_surface {
+                            // Get dmabuf from the renderer surface state (buffer is stored there after commit)
+                            let dmabuf = with_states(&wl_surface, |states| {
+                                type RssType = std::sync::Mutex<RendererSurfaceState>;
+                                states.data_map.get::<RssType>()
+                                    .and_then(|rss| {
+                                        let guard = rss.lock().ok()?;
+                                        let buf = guard.buffer()?;
+                                        // buf derefs to WlBuffer
+                                        get_dmabuf(buf).ok().cloned()
+                                    })
+                            });
+
+                            if dmabuf.is_none() {
+                                // Only log once per window to avoid spam
+                                static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                                if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                                    log::info!("Vulkan blit: no dmabuf on surface for window_id={}", window_id);
+                                }
+                            }
+                            if let Some(dmabuf) = dmabuf {
+                                let fmt = dmabuf.format();
+                                let sz = dmabuf.size();
+                                let vk_fmt = crate::android::backend::vulkan_renderer::VulkanRenderer::fourcc_to_vk_format(fmt.code as u32);
+                                let fd = dmabuf.handles().next();
+                                let stride = dmabuf.strides().next().unwrap_or(sz.w as u32 * 4);
+                                if let Some(fd) = fd {
+                                    use std::os::unix::io::AsRawFd;
+                                    match vk.import_dmabuf(fd.as_raw_fd(), sz.w as u32, sz.h as u32, stride, vk_fmt) {
+                                        Ok(imported) => {
+                                            match vk.blit_dmabuf_to_swapchain(&imported, vk_surface) {
+                                                Ok(()) => {
+                                                    done = true;
+                                                }
+                                                Err(e) => log::warn!("Vulkan blit failed: {e}"),
+                                            }
+                                            // TODO: cleanup imported image (destroy image, view, free memory)
+                                        }
+                                        Err(e) => log::warn!("Vulkan dmabuf import failed: {e}"),
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            done
+        };
+
+        if vk_rendered {
+            // Vulkan handled this window — send frame callbacks and skip GLES
+            send_frames_surface_tree(&wl_surface, time);
+            continue;
+        }
 
         // Render in a scoped block so borrows are released before submit
         {

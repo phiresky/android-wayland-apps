@@ -31,13 +31,15 @@ pub struct VulkanWindowSurface {
     pub extent: vk::Extent2D,
 }
 
-/// An imported dmabuf as a Vulkan image.
+/// An imported dmabuf as Vulkan resources.
 pub struct ImportedDmabuf {
     pub image: vk::Image,
+    pub buffer: vk::Buffer,
     pub memory: vk::DeviceMemory,
     pub view: vk::ImageView,
     pub width: u32,
     pub height: u32,
+    pub stride_pixels: u32,
 }
 
 fn cstr(s: &str) -> CString {
@@ -127,12 +129,13 @@ impl VulkanRenderer {
         })
     }
 
-    /// Import a dmabuf fd as a VkImage (zero-copy via KGSL).
+    /// Import a dmabuf fd as a VkImage + VkBuffer (zero-copy via KGSL).
     pub fn import_dmabuf(
         &self,
         fd: RawFd,
         width: u32,
         height: u32,
+        stride: u32,
         format: vk::Format,
     ) -> Result<ImportedDmabuf, String> {
         let fd_dup = unsafe { libc::dup(fd) };
@@ -166,7 +169,7 @@ impl VulkanRenderer {
             .mip_levels(1)
             .array_layers(1)
             .samples(vk::SampleCountFlags::TYPE_1)
-            .tiling(vk::ImageTiling::LINEAR)
+            .tiling(vk::ImageTiling::OPTIMAL)
             .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_SRC)
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
@@ -192,6 +195,19 @@ impl VulkanRenderer {
         unsafe { self.device.bind_image_memory(image, memory, 0) }
             .map_err(|e| format!("vkBindImageMemory: {e}"))?;
 
+        // Also create a VkBuffer bound to the same memory for stride-aware copies
+        let buf_size = (stride as u64) * (height as u64);
+        let buffer_info = vk::BufferCreateInfo::default()
+            .size(buf_size)
+            .usage(vk::BufferUsageFlags::TRANSFER_SRC)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+
+        let buffer = unsafe { self.device.create_buffer(&buffer_info, None) }
+            .map_err(|e| format!("vkCreateBuffer: {e}"))?;
+
+        unsafe { self.device.bind_buffer_memory(buffer, memory, 0) }
+            .map_err(|e| format!("vkBindBufferMemory: {e}"))?;
+
         // Create image view for sampling
         let view_info = vk::ImageViewCreateInfo::default()
             .image(image)
@@ -208,9 +224,10 @@ impl VulkanRenderer {
         let view = unsafe { self.device.create_image_view(&view_info, None) }
             .map_err(|e| format!("vkCreateImageView: {e}"))?;
 
-        log::info!("[vk-renderer] Imported dmabuf {}x{} as VkImage", width, height);
+        let stride_pixels = stride / 4; // 4 bytes per pixel for RGBA/BGRA
+        log::info!("[vk-renderer] Imported dmabuf {}x{} stride={} as VkImage+VkBuffer", width, height, stride);
 
-        Ok(ImportedDmabuf { image, memory, view, width, height })
+        Ok(ImportedDmabuf { image, buffer, memory, view, width, height, stride_pixels })
     }
 
     /// Create a swapchain for an Android native window.
@@ -393,6 +410,140 @@ impl VulkanRenderer {
         }
 
         Ok(())
+    }
+
+    /// Copy an imported dmabuf onto a swapchain image and present.
+    /// Uses VkBuffer + vkCmdCopyBufferToImage for explicit stride control.
+    pub fn blit_dmabuf_to_swapchain(
+        &self,
+        dmabuf: &ImportedDmabuf,
+        window: &VulkanWindowSurface,
+    ) -> Result<(), String> {
+        let (image_index, _) = unsafe {
+            self.swapchain_fn.acquire_next_image(
+                window.swapchain, u64::MAX,
+                vk::Semaphore::null(), vk::Fence::null(),
+            )
+        }.map_err(|e| format!("acquire_next_image: {e}"))?;
+
+        // Command pool + buffer (TODO: cache)
+        let pool_info = vk::CommandPoolCreateInfo::default()
+            .queue_family_index(self.queue_family_index)
+            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
+        let pool = unsafe { self.device.create_command_pool(&pool_info, None) }
+            .map_err(|e| format!("create_cmd_pool: {e}"))?;
+
+        let alloc_info = vk::CommandBufferAllocateInfo::default()
+            .command_pool(pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(1);
+        let cmd = unsafe { self.device.allocate_command_buffers(&alloc_info) }
+            .map_err(|e| format!("alloc_cmd_buf: {e}"))?[0];
+
+        let begin_info = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        unsafe { self.device.begin_command_buffer(cmd, &begin_info) }
+            .map_err(|e| format!("begin_cmd_buf: {e}"))?;
+
+        let color_range = vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            base_mip_level: 0, level_count: 1,
+            base_array_layer: 0, layer_count: 1,
+        };
+        let color_layers = vk::ImageSubresourceLayers {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            mip_level: 0, base_array_layer: 0, layer_count: 1,
+        };
+
+        // Transition destination (swapchain image) to TRANSFER_DST
+        let dst_barrier = vk::ImageMemoryBarrier::default()
+            .image(window.images[image_index as usize])
+            .old_layout(vk::ImageLayout::UNDEFINED)
+            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .subresource_range(color_range);
+
+        unsafe {
+            self.device.cmd_pipeline_barrier(cmd,
+                vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(), &[], &[], &[dst_barrier]);
+        }
+
+        // Copy from dmabuf (as VkBuffer) to swapchain image with explicit stride.
+        // Using the VkBuffer view of the imported memory avoids tiling interpretation.
+        let copy_region = vk::BufferImageCopy {
+            buffer_offset: 0,
+            buffer_row_length: dmabuf.stride_pixels,   // explicit row pitch in pixels
+            buffer_image_height: dmabuf.height,
+            image_subresource: color_layers,
+            image_offset: vk::Offset3D { x: 0, y: 0, z: 0 },
+            image_extent: vk::Extent3D {
+                width: dmabuf.width.min(window.extent.width),
+                height: dmabuf.height.min(window.extent.height),
+                depth: 1,
+            },
+        };
+        unsafe {
+            self.device.cmd_copy_buffer_to_image(cmd,
+                dmabuf.buffer,
+                window.images[image_index as usize],
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &[copy_region]);
+        }
+
+        // Transition swapchain image to PRESENT
+        let present_barrier = vk::ImageMemoryBarrier::default()
+            .image(window.images[image_index as usize])
+            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .subresource_range(color_range);
+        unsafe {
+            self.device.cmd_pipeline_barrier(cmd,
+                vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                vk::DependencyFlags::empty(), &[], &[], &[present_barrier]);
+        }
+
+        unsafe { self.device.end_command_buffer(cmd) }
+            .map_err(|e| format!("end_cmd_buf: {e}"))?;
+
+        // Submit + wait + present
+        let submit_info = vk::SubmitInfo::default()
+            .command_buffers(std::slice::from_ref(&cmd));
+        unsafe {
+            self.device.queue_submit(self.queue, &[submit_info], vk::Fence::null())
+                .map_err(|e| format!("queue_submit: {e}"))?;
+            self.device.queue_wait_idle(self.queue)
+                .map_err(|e| format!("queue_wait_idle: {e}"))?;
+        }
+
+        let present_info = vk::PresentInfoKHR::default()
+            .swapchains(std::slice::from_ref(&window.swapchain))
+            .image_indices(std::slice::from_ref(&image_index));
+        unsafe { self.swapchain_fn.queue_present(self.queue, &present_info) }
+            .map_err(|e| format!("queue_present: {e}"))?;
+
+        unsafe {
+            self.device.free_command_buffers(pool, &[cmd]);
+            self.device.destroy_command_pool(pool, None);
+        }
+
+        Ok(())
+    }
+
+    /// Map DRM fourcc to VkFormat.
+    pub fn fourcc_to_vk_format(fourcc: u32) -> vk::Format {
+        match fourcc {
+            // DRM_FORMAT_XRGB8888 = "XR24"
+            0x34325258 => vk::Format::B8G8R8A8_UNORM,
+            // DRM_FORMAT_ARGB8888 = "AR24"
+            0x34325241 => vk::Format::B8G8R8A8_UNORM,
+            // DRM_FORMAT_XBGR8888 = "XB24"
+            0x34324258 => vk::Format::R8G8B8A8_UNORM,
+            // DRM_FORMAT_ABGR8888 = "AB24"
+            0x34324241 => vk::Format::R8G8B8A8_UNORM,
+            _ => vk::Format::B8G8R8A8_UNORM, // fallback
+        }
     }
 
     pub fn device(&self) -> &ash::Device { &self.device }
