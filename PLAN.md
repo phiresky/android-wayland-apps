@@ -151,6 +151,13 @@ Goal: eliminate CPU copy in the rendering path.
 - [ ] hideable apps in app launcher are configurable - long press shows menu with hide buton and there's a button to unhide all.
 
 - [ ] SOUND SUPPORT. pipewire.
+- [ ] eliminate all C use because C is dirty
+
+## Milestone 8: NixOS
+
+As an alternative to Arch in proot, we want to also allow NixOS WITHOUT proot. NixOS will just run with a different prefix than `/nix` - since it already has patches to allow running in an isolated environment (all files in other dirs than a program expects) for every single package it should give us lots of things for free.
+
+We do not really care about the purity aspects of NixOS though, so we should do the setup in a way where comfort is more important than beauty. (e.g. no immutable home dir)
 
 ## Recent Fixes
 
