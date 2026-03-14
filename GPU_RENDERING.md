@@ -128,10 +128,47 @@ and `XDG_RUNTIME_DIR=/tmp`. Turnip's ICD is found via the default Vulkan loader 
 - `EGL_EXT_image_dma_buf_import_modifiers`
 - `EGL_MESA_image_dma_buf_export`
 
-## Zero-Copy Attempts (all failed on Samsung/Qualcomm)
+## Zero-Copy: Vulkan Bridge (PROMISING — in progress)
+
+The proprietary Qualcomm Vulkan driver can bridge raw KGSL dmabufs into opaque fds
+that the proprietary GL driver should accept. Confirmed via standalone C test:
+
+```
+dmabuf fd (from KGSL/Turnip)
+  → vkAllocateMemory(VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT)     ✓ works
+  → vkGetMemoryFdKHR(VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT_KHR)   ✓ works, returns valid fd
+  → glImportMemoryFdEXT(GL_HANDLE_TYPE_OPAQUE_FD_EXT)                    ? untested with opaque fd
+  → glTexStorageMem2DEXT                                                  ? untested
+  → GL texture (zero-copy!)
+```
+
+**Key findings from testing:**
+- Proprietary Qualcomm Vulkan driver (Adreno 830) supports `VK_KHR_external_memory_fd` ✓
+- `VK_EXT_external_memory_dma_buf` is NOT advertised, but `DMA_BUF_BIT_EXT` handle type
+  **works anyway** — `vkGetMemoryFdPropertiesKHR` returns `memoryTypeBits=0x12` ✓
+- DMA_BUF import into VkDeviceMemory → success ✓
+- Export as OPAQUE_FD from imported memory → success (fd returned) ✓
+- Combined alloc (DMA_BUF import + OPAQUE_FD export flags) → success ✓
+- Export as AHardwareBuffer → FAILS (`VK_ERROR_OUT_OF_HOST_MEMORY`) ✗
+  (cross-export between DMA_BUF and AHB handle types not supported)
+
+**Implementation plan:**
+1. Compositor creates a Vulkan instance + device (proprietary Qualcomm driver) at startup
+2. When a dmabuf arrives from a client, import it via `VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT`
+3. Export as `VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT_KHR` → opaque fd
+4. Import opaque fd into GL via `GL_EXT_memory_object_fd` with `GL_HANDLE_TYPE_OPAQUE_FD_EXT`
+5. `glTexStorageMem2DEXT` → GL texture for compositing
+
+The Vulkan driver acts as a translator between raw KGSL dmabufs and the proprietary
+Qualcomm GL driver's opaque fd format. Both drivers use KGSL under the hood, so the
+actual GPU memory is never copied.
+
+**Test binary:** `vk_import_test2.c` in project root (cross-compile with Android NDK).
+
+## Previous Zero-Copy Attempts (all failed on Samsung/Qualcomm)
 
 The current mmap fallback involves a CPU copy per frame. We tried every available
-zero-copy path on the Samsung SM8750 (Snapdragon 8 Elite). All failed.
+direct zero-copy path on the Samsung SM8750 (Snapdragon 8 Elite). All failed.
 
 ### Results summary
 
