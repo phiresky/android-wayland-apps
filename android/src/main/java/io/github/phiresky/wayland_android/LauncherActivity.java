@@ -199,9 +199,26 @@ public class LauncherActivity extends Activity {
         getTheme().resolveAttribute(android.R.attr.selectableItemBackground, outValue, true);
         cell.setForeground(getDrawable(outValue.resourceId));
 
-        cell.setOnClickListener(v -> nativeLaunchApp(app.exec));
+        cell.setOnClickListener(v -> {
+            if (app.exec.startsWith("__builtin:")) {
+                handleBuiltinAction(app.exec);
+            } else {
+                nativeLaunchApp(app.exec);
+            }
+        });
 
         return cell;
+    }
+
+    private void handleBuiltinAction(String action) {
+        if ("__builtin:debug".equals(action)) {
+            startActivity(new android.content.Intent(this, DebugActivity.class));
+        }
+    }
+
+    @Override
+    public void finish() {
+        moveTaskToBack(true);
     }
 
     private int dp(int value) {
@@ -240,6 +257,8 @@ public class LauncherActivity extends Activity {
         Collections.addAll(apps, extraApps);
 
         Collections.sort(apps, (a, b) -> a.name.compareToIgnoreCase(b.name));
+        // Built-in debug info entry (at end of list)
+        apps.add(new DesktopEntry("Debug Info", "__builtin:debug", null));
         return apps;
     }
 

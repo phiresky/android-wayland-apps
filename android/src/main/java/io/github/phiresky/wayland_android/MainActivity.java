@@ -24,6 +24,8 @@ import android.widget.TextView;
  */
 public class MainActivity extends Activity {
     private static volatile TextView sStatusView;
+    private static volatile String sLastStatus = "";
+    private static boolean sCompositorStarted = false;
     private boolean needsSetup = false;
     private boolean overlayShown = false;
 
@@ -46,7 +48,14 @@ public class MainActivity extends Activity {
 
         // Initialize native compositor (only on first create, not config changes).
         if (savedInstanceState == null) {
-            needsSetup = nativeInit(this);
+            if (sCompositorStarted) {
+                // Compositor already running — show the launcher directly.
+                startActivity(new Intent(this, LauncherActivity.class)
+                        .addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT));
+            } else {
+                needsSetup = nativeInit(this);
+                sCompositorStarted = true;
+            }
         }
 
         // Request full external storage access (Android 11+). Required so Linux apps
@@ -145,9 +154,15 @@ public class MainActivity extends Activity {
 
     /** Called from native code via JNI to update the status text. */
     public static void updateStatus(String text) {
+        sLastStatus = text;
         TextView view = sStatusView;
         if (view != null) {
             view.post(() -> view.setText(text));
         }
+    }
+
+    /** Returns the last status text received from the compositor. */
+    public static String getLastStatus() {
+        return sLastStatus;
     }
 }

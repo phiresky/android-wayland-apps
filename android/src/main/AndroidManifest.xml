@@ -43,6 +43,13 @@
         <activity
             android:name="io.github.phiresky.wayland_android.LauncherActivity"
             android:exported="false"
+            android:launchMode="singleTop"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|screenLayout|smallestScreenSize|uiMode|density|navigation" />
+
+        <activity
+            android:name="io.github.phiresky.wayland_android.DebugActivity"
+            android:exported="false"
             android:theme="@android:style/Theme.DeviceDefault.NoActionBar"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|screenLayout|smallestScreenSize|uiMode|density|navigation" />
 
