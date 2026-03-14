@@ -40,6 +40,7 @@ use smithay::{
         },
         shm::{ShmHandler, ShmState},
         fractional_scale::{FractionalScaleHandler, FractionalScaleManagerState},
+        viewporter::ViewporterState,
     },
 };
 use smithay::{
@@ -73,6 +74,7 @@ pub struct State {
     pub xdg_decoration_state: XdgDecorationState,
     pub layer_shell_state: WlrLayerShellState,
     pub fractional_scale_state: FractionalScaleManagerState,
+    pub viewporter_state: ViewporterState,
     pub shm_state: ShmState,
     pub data_device_state: DataDeviceState,
     pub seat_state: SeatState<Self>,
@@ -306,6 +308,7 @@ delegate_seat!(State);
 delegate_data_device!(State);
 delegate_output!(State);
 delegate_fractional_scale!(State);
+smithay::delegate_viewporter!(State);
 
 impl Compositor {
     pub fn build() -> Result<Compositor, Box<dyn Error>> {
@@ -331,6 +334,7 @@ impl Compositor {
             xdg_decoration_state: XdgDecorationState::new::<State>(&dh),
             layer_shell_state: WlrLayerShellState::new::<State>(&dh),
             fractional_scale_state: FractionalScaleManagerState::new::<State>(&dh),
+            viewporter_state: ViewporterState::new::<State>(&dh),
             shm_state: ShmState::new::<State>(&dh, vec![]),
             data_device_state: DataDeviceState::new::<State>(&dh),
             seat_state,

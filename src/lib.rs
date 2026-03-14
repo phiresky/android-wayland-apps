@@ -10,6 +10,7 @@ pub mod android {
     pub mod app;
     pub mod compositor;
     pub mod backend;
+    pub mod camera;
     pub mod proot;
     pub mod utils;
     pub mod window_manager;

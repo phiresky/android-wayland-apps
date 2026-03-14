@@ -10,5 +10,7 @@ fn main() {
             _ => panic!("Unsupported Android arch: {}", target_arch),
         };
         println!("cargo:rustc-link-search=native={}/libs/{}", manifest_dir, abi);
+        println!("cargo:rustc-link-lib=camera2ndk");
+        println!("cargo:rustc-link-lib=mediandk");
     }
 }

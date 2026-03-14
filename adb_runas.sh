@@ -2,17 +2,20 @@
 # Run a command inside the app's proot Arch rootfs on the device.
 # Usage: ./adb_runas.sh [user] [command...]
 #        ./adb_runas.sh alarm pacman -S mesa-demos
-#        ./adb_runas.sh alarm sh -c 'cmd1 && cmd2'
 #        ./adb_runas.sh pacman -S mesa-demos   (runs as root)
 #        ./adb_runas.sh                        (interactive root shell)
 #        ./adb_runas.sh alarm                  (interactive alarm shell)
+#        echo 'complex | cmd' | ./adb_runas.sh (stdin script, no escaping needed)
+#        ./adb_runas.sh <<'EOF'                (heredoc script)
+#        MOZ_ENABLE_WAYLAND=1 firefox 2>&1
+#        EOF
 set -euo pipefail
 
 PKG=io.github.phiresky.wayland_android
 ROOTFS=./files/arch
 
 # Resolve native lib dir from package path
-APK_DIR=$(adb shell pm path "$PKG" | grep base.apk | head -1 | sed 's|package:||;s|/base.apk||' | tr -d '\r')
+APK_DIR=$(adb shell pm path "$PKG" </dev/null | grep base.apk | head -1 | sed 's|package:||;s|/base.apk||' | tr -d '\r')
 LIBDIR="$APK_DIR/lib/arm64"
 
 # Check if first arg is a known user (alarm) or root
@@ -29,18 +32,37 @@ else
 fi
 
 # Write the actual command to a script file inside the rootfs.
-# This avoids nested sh -c quoting issues — args are encoded with printf %q
-# so special characters survive the heredoc expansion intact.
+# Stdin mode: pipe or heredoc content is used verbatim (no escaping needed).
+# Args mode: args are encoded with printf %q so special chars survive intact.
 CMD_FILE=$ROOTFS/tmp/.proot_cmd.sh
 USE_RLWRAP=0
 if [ $# -eq 0 ]; then
-    if [ -t 0 ] && command -v rlwrap &>/dev/null; then
-        USE_RLWRAP=1
-        CMD_CONTENT="exec bash --noediting -li"
+    if [ -t 0 ]; then
+        # Interactive: launch a shell
+        if command -v rlwrap &>/dev/null; then
+            USE_RLWRAP=1
+            CMD_CONTENT="exec bash --noediting -li"
+        else
+            CMD_CONTENT="exec bash -li"
+        fi
     else
-        CMD_CONTENT="exec bash -li"
+        # Stdin is piped/heredoc: read verbatim as the script
+        CMD_CONTENT=$(cat)
     fi
 else
+    # Reject shell metacharacters in args mode — use stdin/heredoc for complex commands
+    for arg in "$@"; do
+        case "$arg" in
+            *\&\&*|*\|\|*|*\;*|*\>*|*\<*|*\|*|*\`*|*\$\(*)
+                echo "Error: shell metacharacters in arguments are not supported." >&2
+                echo "Use stdin or heredoc mode instead:" >&2
+                echo "  ./adb_runas.sh <<'EOF'" >&2
+                echo "  $*" >&2
+                echo "  EOF" >&2
+                exit 1
+                ;;
+        esac
+    done
     # printf %q properly quotes each arg; the result is a valid sh command line
     CMD_CONTENT=$(printf '%q ' "$@")
 fi
@@ -49,6 +71,9 @@ adb shell run-as "$PKG" sh -c "'cat > $CMD_FILE'" << CMDEOF
 #!/bin/sh
 $CMD_CONTENT
 CMDEOF
+
+# adb shell run-as "$PKG" cat $CMD_FILE
+
 
 # Build the shell invocation for the launcher
 if [ "$PROOT_USER" = "root" ]; then

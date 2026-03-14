@@ -88,6 +88,9 @@ extern "system" fn Java_io_github_phiresky_wayland_1android_MainActivity_nativeI
         });
     }
 
+    // Start the camera → Unix socket bridge (non-blocking, runs in background threads).
+    crate::android::camera::start();
+
     // Spawn the compositor on a background thread, independent of Activity lifecycle.
     let compositor_done = setup_done;
     let _ = std::thread::Builder::new()

@@ -146,13 +146,22 @@ impl ArchProcess {
             .arg(format!("WAYLAND_DISPLAY={}", config::WAYLAND_SOCKET_NAME))
             .arg("XDG_RUNTIME_DIR=/tmp")
             .arg("QT_QPA_PLATFORM=wayland")
+            .arg("GTK_OVERLAY_SCROLLING=0")
             .arg("TERM=xterm-256color")
             .arg("SHELL=/bin/bash");
 
-        // Work around Android SELinux blocking readdir on /dev/pts (see setup.rs fix_ttyname)
+        // LD_PRELOAD: combine all shim libraries that exist
+        let mut preloads = Vec::new();
         let fix_ttyname = Path::new(config::ARCH_FS_ROOT).join("usr/lib/fix_ttyname.so");
         if fix_ttyname.exists() {
-            process.arg("LD_PRELOAD=/usr/lib/fix_ttyname.so");
+            preloads.push("/usr/lib/fix_ttyname.so");
+        }
+        let v4l2_shim = Path::new(config::ARCH_FS_ROOT).join("usr/lib/libandroid_cam.so");
+        if v4l2_shim.exists() {
+            preloads.push("/usr/lib/libandroid_cam.so");
+        }
+        if !preloads.is_empty() {
+            process.arg(format!("LD_PRELOAD={}", preloads.join(":")));
         }
 
         // Run sh directly — --root-id already virtualizes the UID inside proot,

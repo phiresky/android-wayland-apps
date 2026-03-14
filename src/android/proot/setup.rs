@@ -71,14 +71,17 @@ pub fn run_setup() {
     setup_log("=== Proot setup starting ===");
     setup_arch_fs();
     setup_sysdata();
+    setup_machine_id();
     setup_dns();
     install_dependencies();
     setup_user();
     disable_bwrap();
     fix_bsdtar();
+    setup_firefox_config();
     fix_xkb_symlink();
     fix_ttyname();
     setup_storage_mountpoints();
+    compile_v4l2_shim();
     setup_log("=== Proot setup complete ===");
 }
 
@@ -258,6 +261,67 @@ fn setup_sysdata() {
         fs::write(fs_root.join(path), content)
             .unwrap_or_else(|e| log::error!("[setup] Failed to write {}: {}", path, e));
     }
+}
+
+/// Generate /etc/machine-id if missing.
+///
+/// Normally created by systemd on first boot, but proot never runs an init system.
+/// Required by dbus (Firefox, GTK apps) — without it they log warnings or fail.
+fn setup_machine_id() {
+    let machine_id = Path::new(config::ARCH_FS_ROOT).join("etc/machine-id");
+    if machine_id.exists() {
+        return;
+    }
+
+    setup_log("[setup] Generating /etc/machine-id...");
+
+    // Read 16 random bytes and hex-encode to a 32-char ID (systemd format)
+    let mut buf = [0u8; 16];
+    if let Ok(mut f) = File::open("/dev/urandom") {
+        if Read::read_exact(&mut f, &mut buf).is_err() {
+            // fallback: leave zeros, still valid hex
+        }
+    }
+    let hex: String = buf.iter().map(|b| format!("{:02x}", b)).collect();
+    fs::write(&machine_id, format!("{}\n", hex))
+        .unwrap_or_else(|e| log::error!("[setup] Failed to write machine-id: {}", e));
+}
+
+/// Configure Firefox to work inside proot.
+///
+/// Firefox's content process sandbox uses Linux namespaces and seccomp-bpf,
+/// which don't work inside proot. Without this config, every tab crashes.
+/// Uses Firefox's autoconfig mechanism (same approach as localdesktop).
+fn setup_firefox_config() {
+    let fs_root = Path::new(config::ARCH_FS_ROOT);
+    let firefox_root = fs_root.join("usr/lib/firefox");
+    let cfg_file = firefox_root.join("wayland_android.cfg");
+
+    if cfg_file.exists() {
+        return;
+    }
+    if !firefox_root.exists() {
+        // Firefox not installed yet, skip
+        return;
+    }
+
+    setup_log("[setup] Configuring Firefox for proot compatibility...");
+
+    let pref_dir = firefox_root.join("defaults/pref");
+    let _ = fs::create_dir_all(&pref_dir);
+
+    // autoconfig.js tells Firefox to load our .cfg file
+    let autoconfig_js = "pref(\"general.config.filename\", \"wayland_android.cfg\");\n\
+                         pref(\"general.config.obscure_value\", 0);\n";
+    fs::write(pref_dir.join("autoconfig.js"), autoconfig_js)
+        .unwrap_or_else(|e| log::error!("[setup] Failed to write autoconfig.js: {}", e));
+
+    // The .cfg file must start with a comment line (Firefox requirement)
+    let cfg = "// Auto-configured by wayland_android for proot compatibility\n\
+               defaultPref(\"security.sandbox.content.level\", 0);\n\
+               defaultPref(\"media.cubeb.sandbox\", false);\n";
+    fs::write(&cfg_file, cfg)
+        .unwrap_or_else(|e| log::error!("[setup] Failed to write Firefox config: {}", e));
 }
 
 /// Ensure resolv.conf exists with a working nameserver.
@@ -536,6 +600,48 @@ fn setup_storage_mountpoints() {
             }
         }
     }
+}
+
+/// Build the V4L2 camera shim library for LD_PRELOAD inside proot.
+///
+/// The shim intercepts open/ioctl/mmap/fstat/close to present the Android
+/// camera (streamed via a Unix socket from the Rust camera server) as
+/// `/dev/video0` to Linux applications like Firefox.
+fn compile_v4l2_shim() {
+    let fs_root = Path::new(config::ARCH_FS_ROOT);
+    let so_path = fs_root.join("usr/lib/libandroid_cam.so");
+    if so_path.exists() {
+        return;
+    }
+
+    setup_log("[setup] Building V4L2 camera shim...");
+
+    let c_source = fs_root.join("tmp/v4l2_shim.c");
+    let source_code = include_str!("../../linux/v4l2_shim.c");
+
+    if let Err(e) = fs::write(&c_source, source_code) {
+        log::error!("[setup] Failed to write v4l2_shim.c: {}", e);
+        return;
+    }
+
+    let output = ArchProcess {
+        command: "gcc -shared -fPIC -O2 -o /usr/lib/libandroid_cam.so /tmp/v4l2_shim.c -lpthread -ldl && echo OK"
+            .into(),
+        user: None,
+        log: None,
+    }
+    .run();
+
+    if output.status.success() && String::from_utf8_lossy(&output.stdout).contains("OK") {
+        setup_log("[setup] V4L2 camera shim built successfully");
+    } else {
+        log::error!(
+            "[setup] Failed to build libandroid_cam.so: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let _ = fs::remove_file(&c_source);
 }
 
 /// Fix the xkb symlink if it's absolute (won't resolve outside proot).
