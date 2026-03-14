@@ -413,7 +413,7 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                                 let stride = dmabuf.strides().next().unwrap_or(sz.w as u32 * 4);
                                 if let Some(fd) = fd {
                                     use std::os::unix::io::AsRawFd;
-                                    match vk.import_dmabuf(fd.as_raw_fd(), sz.w as u32, sz.h as u32, stride, vk_fmt) {
+                                    match vk.get_or_import_dmabuf(fd.as_raw_fd(), sz.w as u32, sz.h as u32, stride, vk_fmt) {
                                         Ok(imported) => {
                                             match vk.blit_dmabuf_to_swapchain(&imported, vk_surface) {
                                                 Ok(()) => {
@@ -421,8 +421,6 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                                                 }
                                                 Err(e) => log::warn!("Vulkan blit failed: {e}"),
                                             }
-                                            // Clean up imported resources to prevent GPU memory leak
-                                            vk.destroy_imported(&imported);
                                         }
                                         Err(e) => log::warn!("Vulkan dmabuf import failed: {e}"),
                                     }

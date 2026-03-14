@@ -6,6 +6,7 @@
 
 use ash::vk;
 use ash::khr;
+use std::collections::HashMap;
 use std::ffi::{c_char, c_void, CString};
 use std::os::unix::io::RawFd;
 
@@ -19,6 +20,9 @@ pub struct VulkanRenderer {
     queue_family_index: u32,
     swapchain_fn: khr::swapchain::Device,
     external_memory_fd_fn: khr::external_memory_fd::Device,
+    /// Cache imported dmabufs by fd to avoid re-importing every frame.
+    /// Clients reuse a small pool of ~3 swapchain buffers.
+    dmabuf_cache: std::cell::RefCell<HashMap<RawFd, ImportedDmabuf>>,
 }
 
 /// Per-window swapchain state.
@@ -126,7 +130,36 @@ impl VulkanRenderer {
             queue_family_index,
             swapchain_fn,
             external_memory_fd_fn,
+            dmabuf_cache: std::cell::RefCell::new(HashMap::new()),
         })
+    }
+
+    /// Get or import a dmabuf. Caches by fd for reuse across frames.
+    pub fn get_or_import_dmabuf(
+        &self,
+        fd: RawFd,
+        width: u32,
+        height: u32,
+        stride: u32,
+        format: vk::Format,
+    ) -> Result<std::cell::Ref<'_, ImportedDmabuf>, String> {
+        {
+            let cache = self.dmabuf_cache.borrow();
+            if cache.contains_key(&fd) {
+                drop(cache);
+                return Ok(std::cell::Ref::map(self.dmabuf_cache.borrow(), |c| {
+                    c.get(&fd).unwrap_or_else(|| unreachable!())
+                }));
+            }
+        }
+        // Not cached — import and store
+        let imported = self.import_dmabuf(fd, width, height, stride, format)?;
+        log::info!("[vk-renderer] Cached dmabuf fd={} ({}x{}, cache size={})",
+            fd, width, height, self.dmabuf_cache.borrow().len() + 1);
+        self.dmabuf_cache.borrow_mut().insert(fd, imported);
+        Ok(std::cell::Ref::map(self.dmabuf_cache.borrow(), |c| {
+            c.get(&fd).unwrap_or_else(|| unreachable!())
+        }))
     }
 
     /// Import a dmabuf fd as a VkImage + VkBuffer (zero-copy via KGSL).
