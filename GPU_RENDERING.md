@@ -128,48 +128,63 @@ and `XDG_RUNTIME_DIR=/tmp`. Turnip's ICD is found via the default Vulkan loader 
 - `EGL_EXT_image_dma_buf_import_modifiers`
 - `EGL_MESA_image_dma_buf_export`
 
-## Zero-Copy Path: AHardwareBuffer (TODO)
+## Zero-Copy Attempts (all failed on Samsung/Qualcomm)
 
-The current mmap fallback involves a CPU copy. For zero-copy, we need:
+The current mmap fallback involves a CPU copy per frame. We tried every available
+zero-copy path on the Samsung SM8750 (Snapdragon 8 Elite). All failed.
 
-```
-dmabuf fd → AHardwareBuffer → eglGetNativeClientBufferANDROID → eglCreateImageKHR → GL texture
-```
+### Results summary
 
-### Approach A: dlsym `AHardwareBuffer_createFromHandle` (private API)
+| Approach | Result | Details |
+|----------|--------|---------|
+| EGL dmabuf import | **No extension** | Android EGL lacks `EGL_EXT_image_dma_buf_import` entirely |
+| Relax EGL check | **EGL_NO_IMAGE_KHR** | `eglCreateImageKHR(EGL_LINUX_DMA_BUF_EXT)` returns null even without the extension check |
+| AHardwareBuffer from dmabuf fd | **EINVAL (-22)** | Samsung gralloc rejects bare KGSL native_handle — needs vendor-specific metadata ints |
+| GL_EXT_memory_object_fd (DMA_BUF) | **GL_INVALID_VALUE** | `glImportMemoryFdEXT` succeeds but `glTexStorageMem2DEXT` fails — driver only supports Vulkan opaque fd interop |
+| GL_EXT_memory_object_fd (OPAQUE) | **GL_INVALID_VALUE** | Same — opaque fd import appears to succeed but texture binding fails |
+| TEXTURE_TILING_EXT hint | **SIGSEGV** | `glTexParameteri(TEXTURE_TILING_EXT)` crashes Qualcomm driver — not a valid pname |
+| Vulkan layer approach | **Not feasible** | `VK_ANDROID_external_memory_android_hardware_buffer` is compiled out in Turnip's Linux build (proot) |
 
-```c
-// Private VNDK function in libnativewindow.so
-int AHardwareBuffer_createFromHandle(
-    const AHardwareBuffer_Desc* desc,
-    const native_handle_t* handle,
-    int32_t method,  // 0=REGISTER, 1=CLONE
-    AHardwareBuffer** outBuffer
-);
-```
+### Approach A: AHardwareBuffer_createFromHandle — FAILED (EINVAL)
 
-- `dlopen("libnativewindow.so")` + `dlsym("AHardwareBuffer_createFromHandle")`
-- Construct `native_handle_t` with dmabuf fd, fill `AHardwareBuffer_Desc` with width/height/format/stride
-- Risk: private API, may break across Android versions, Samsung gralloc may need extra metadata
+**Implemented in:** `patches/smithay/src/backend/renderer/gles/mod.rs` (`import_dmabuf_via_ahb`)
 
-### Approach B: Compositor-allocated AHardwareBuffers (wlroots-android-bridge approach)
+- Private VNDK function in `libnativewindow.so` — symbols load fine via dlsym
+- Constructs `native_handle_t` with dmabuf fd + `AHardwareBuffer_Desc` with width/height/format/stride
+- Samsung gralloc rejects with EINVAL because the `native_handle_t` lacks vendor-specific metadata fields (Samsung gralloc handles contain ~20 extra ints for tile mode, internal format, buffer ID, etc.)
+- **Would work on AOSP/Pixel** devices with a more permissive gralloc
 
-- Compositor allocates AHardwareBuffers via `AHardwareBuffer_allocate()` (public NDK API)
-- Extracts dmabuf fd from AHB (via socketpair trick or gralloc handle)
-- Shares these buffers with clients via `zwp_linux_dmabuf_v1`
-- Client renders into compositor-provided buffers
-- See `refs/wlroots-android-bridge/` — they use `cros_gralloc_handle.h` to extract buffer attributes
+### Approach B: GL_EXT_memory_object_fd — FAILED (GL_INVALID_VALUE)
 
-**Key difference from our approach**: wlroots-android-bridge also uses `ASurfaceTransaction_setBuffer` to present directly to SurfaceFlinger, bypassing EGL compositing entirely. This is the most efficient path but requires significant architecture changes.
+**Implemented in:** `patches/smithay/src/backend/renderer/gles/mod.rs` (`import_dmabuf_via_memory_object`, disabled)
 
-### Approach C: Vulkan interop
+- Device has `GL_EXT_memory_object` + `GL_EXT_memory_object_fd` extensions
+- `glImportMemoryFdEXT(mem, size, GL_HANDLE_TYPE_DMA_BUF_FD_EXT, fd)` succeeds (no GL error)
+- `glTexStorageMem2DEXT(GL_TEXTURE_2D, 1, GL_RGBA8, w, h, mem, 0)` always returns `GL_INVALID_VALUE`
+- Tried: actual width, stride-based width, page-aligned size, LINEAR tiling hint
+- Conclusion: Qualcomm's GL_EXT_memory_object_fd only supports Vulkan-exported opaque fds, not dmabuf fds
 
-- Import dmabuf fd into Vulkan via `VkImportMemoryFdInfoKHR`
-- Export as AHardwareBuffer via `vkGetMemoryAndroidHardwareBufferANDROID`
-- Use AHardwareBuffer with EGL
-- Most complex, requires Vulkan instance in compositor
+### Approach C: Vulkan layer intercepting swapchain — NOT FEASIBLE
 
-### EGL import once you have AHardwareBuffer
+- Would require intercepting `vkCreateSwapchainKHR` and replacing buffer allocation
+- `VK_ANDROID_external_memory_android_hardware_buffer` is gated behind `#if DETECT_OS_ANDROID` in Turnip source
+- Mesa inside proot is a Linux build → extension is compiled out
+- Essentially requires reimplementing the entire Vulkan WSI — too complex
+
+### Approach D: wlroots-android-bridge style (minigbm/gralloc allocator)
+
+**Not attempted — would require:**
+- Building minigbm (Google's GBM implementation) for ARM64
+- Configuring Mesa to use GBM with gralloc backend instead of raw KGSL
+- Both client and server allocations become AHB-backed
+- This is the only proven path to zero-copy on Android (used by wlroots-android-bridge)
+- See `refs/wlroots-android-bridge/` — they use `cros_gralloc_handle.h` from minigbm
+
+**Key insight from wlroots-android-bridge**: they don't try to import bare dmabufs. They
+make the ENTIRE allocation stack use AHBs from the start (client GBM → gralloc → AHB).
+The compositor then presents via `ASurfaceTransaction_setBuffer` directly to SurfaceFlinger.
+
+### EGL import path (works once you have a valid AHardwareBuffer)
 
 ```c
 // Step 1: AHB → EGLClientBuffer
@@ -186,6 +201,9 @@ EGLImageKHR image = eglCreateImageKHR(
 glBindTexture(GL_TEXTURE_2D, tex);
 glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, image);
 ```
+
+This path is confirmed to work (EGL bindings loaded, functions resolved). The
+bottleneck is always step 0: getting a valid AHardwareBuffer from a KGSL dmabuf fd.
 
 ## References
 
