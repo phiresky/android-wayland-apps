@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <!-- Cube front face -->
+    <path
+        android:fillColor="#B71C1C"
+        android:pathData="M12,16 L24,10 L36,16 L36,32 L24,38 L12,32 Z" />
+    <!-- Cube top face -->
+    <path
+        android:fillColor="#F44336"
+        android:pathData="M12,16 L24,10 L36,16 L24,22 Z" />
+    <!-- Cube right face -->
+    <path
+        android:fillColor="#D32F2F"
+        android:pathData="M24,22 L36,16 L36,32 L24,38 Z" />
+    <!-- Cube left face -->
+    <path
+        android:fillColor="#B71C1C"
+        android:pathData="M12,16 L24,22 L24,38 L12,32 Z" />
+</vector>

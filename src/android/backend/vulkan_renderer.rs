@@ -278,7 +278,7 @@ impl VulkanRenderer {
             .image_array_layers(1)
             .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST)
             .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
-            .pre_transform(caps.current_transform)
+            .pre_transform(vk::SurfaceTransformFlagsKHR::IDENTITY)
             .composite_alpha(vk::CompositeAlphaFlagsKHR::INHERIT)
             .present_mode(vk::PresentModeKHR::FIFO)
             .clipped(true);
@@ -467,6 +467,14 @@ impl VulkanRenderer {
             self.device.cmd_pipeline_barrier(cmd,
                 vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::TRANSFER,
                 vk::DependencyFlags::empty(), &[], &[], &[dst_barrier]);
+        }
+
+        // Clear swapchain image to black first (client may be smaller than swapchain)
+        let clear_color = vk::ClearColorValue { float32: [0.0, 0.0, 0.0, 1.0] };
+        unsafe {
+            self.device.cmd_clear_color_image(cmd,
+                window.images[image_index as usize],
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL, &clear_color, &[color_range]);
         }
 
         // Copy from dmabuf (as VkBuffer) to swapchain image with explicit stride.

@@ -18,6 +18,7 @@ pub const PACKAGES: &[&str] = &[
     "shared-mime-info",
     "gdk-pixbuf2",
     "noto-fonts",
+    "vulkan-tools",
 ];
 
 pub fn check_cmd() -> String {
@@ -39,4 +40,7 @@ pub const LAUNCHER_IGNORE: &[&str] = &["avahi-discover", "bssh", "bvnc"];
 
 /// Extra launcher entries as (name, exec, icon) triples (apps without .desktop files).
 /// Icon is the hicolor theme name (looked up in rootfs), or empty string for none.
-pub const LAUNCHER_EXTRA: &[(&str, &str, &str)] = &[("EGL Gears", "eglgears_wayland", "@drawable/ic_eglgears")];
+pub const LAUNCHER_EXTRA: &[(&str, &str, &str)] = &[
+    ("EGL Gears", "eglgears_wayland", "@drawable/ic_eglgears"),
+    ("Vulkan Cube", "vkcube-wayland", "@drawable/ic_vkcube"),
+];
