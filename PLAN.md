@@ -105,38 +105,44 @@ Goal: Activity resize triggers proper Wayland configure round-trip.
 - [x] Works in DeX freeform window mode
 - [ ] Handle split-screen transitions gracefully
 
-## Milestone 5: Drop winit from main Activity
+## Milestone 5: Drop winit from main Activity [MOSTLY DONE]
 
 Goal: the main Activity no longer needs NativeActivity or winit.
 
-Currently the main NativeActivity hosts the winit event loop which:
-1. Drives the compositor (accept clients, dispatch protocol, render)
-2. Creates the EGL context (shared by all window surfaces)
-3. Renders a useless dark background every frame (busy loop at 60fps)
-
-Each WaylandWindowActivity already has its own EGL surface. The shared EGL context
-can be created headless (PBuffer surface) without needing a window.
-
-- [ ] Create headless EGL context (PBuffer) instead of window-backed
-- [ ] Replace winit event loop with a simple loop on a background thread
-- [ ] Convert MainActivity from NativeActivity to plain Activity
+- [x] Create headless EGL context (no window surface needed)
+- [x] Replace winit event loop with background thread + libc::poll()
+- [x] Drive rendering from damage (Wayland commits, window events) not vsync
 - [x] Remove render_main_window() (eliminates busy-loop GPU waste)
-- [x] Drive rendering from damage (Wayland commits, window events) not vsync polling
-  - ControlFlow::Wait instead of Poll
-  - EventLoopProxy::wake_up() from JNI callbacks, Wayland commits, and socket watcher
-  - Background thread polls listener + display fds with libc::poll()
+- [ ] Convert MainActivity from NativeActivity to plain Activity
 - [ ] Status overlay shows directly in Activity layout (no EGL surface to fight)
 
-## Milestone 6: Zero-copy GPU rendering
+## Milestone 6: Zero-copy GPU rendering [MOSTLY DONE]
 
 Goal: eliminate CPU copy in the rendering path.
 
-- [ ] Create AHardwareBuffer-backed allocator for smithay
-- [ ] Share AHardwareBuffers with clients as dmabuf file descriptors
-- [ ] Client renders directly into GPU buffer (for clients that support linux-dmabuf)
-- [ ] Present buffer via ASurfaceTransaction (or EGLImage)
-- [ ] Fallback to SHM path for clients that don't support dmabuf
-- [ ] Benchmark: measure latency and throughput improvement
+### Vulkan clients (DONE — zero-copy)
+- [x] Vulkan renderer (`src/android/backend/vulkan_renderer.rs`) using `ash` crate
+- [x] Import client dmabufs via proprietary Qualcomm Vulkan (`DMA_BUF_BIT_EXT`)
+- [x] `vkCmdCopyBufferToImage` with explicit stride to swapchain
+- [x] `vkQueuePresent` to Android SurfaceView
+- [x] Cache imported dmabufs by fd (zero per-frame allocations)
+- [x] Lazy Vulkan swapchain creation (only on first dmabuf commit)
+- [x] Fallback to GLES/mmap for wl_shm clients (gedit, GTK apps)
+
+### OpenGL clients via Zink (IN PROGRESS)
+- [x] Mesa patch: EGL Wayland fallback to kopper when GBM unavailable
+- [x] Mesa patch: Adreno 830 chip_id wildcard (`0x440500ff`)
+- [x] GPU rendering confirmed: glmark2 score 85, 60fps vsync-locked
+- [ ] Fix display: Vulkan WSI uses wl_shm instead of dmabuf (window is black)
+- [ ] Investigate why WSI doesn't create `zwp_linux_buffer_params` despite
+      `wsi_device->sw = false` and dmabuf formats advertised
+
+### Failed approaches (documented in GPU_RENDERING.md)
+- [x] EGL dmabuf import — extension not available on Android
+- [x] AHardwareBuffer from dmabuf fd — Samsung gralloc rejects
+- [x] GL_EXT_memory_object_fd — `glTexStorageMem2DEXT` broken on Qualcomm
+- [x] Vulkan bridge (dmabuf→opaque fd→GL) — GL still rejects
+- [x] Vulkan layer — `VK_ANDROID_external_memory_android_hardware_buffer` compiled out
 
 ## Milestone 7: Polish
 
@@ -182,3 +188,7 @@ We do not really care about the purity aspects of NixOS though, so we should do 
 - libxkbcommon.so has hardcoded path from localdesktop; overridden via XKB_CONFIG_ROOT
 - Single-touch only (no multi-touch passthrough yet)
 - No Wayland keyboard enter/leave on Activity focus changes
+- PipeWire camera crashes (SIGBUS in protocol-native module) — disabled for now
+- OpenGL apps via Zink render on GPU but display black (wl_shm readback broken)
+- Mesa must be built with gcc, not clang (clang produces Turnip that doesn't recognize Adreno 830)
+- Mesa build in proot has intermittent `posix_spawn` failures with `-j4`

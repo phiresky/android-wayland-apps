@@ -146,9 +146,38 @@ and `XDG_RUNTIME_DIR=/tmp`. Turnip's ICD is found via the default Vulkan loader 
 
 | Client type | Status | Path |
 |-------------|--------|------|
-| Vulkan (vkcube, games) | **Zero-copy** | Turnip → dmabuf → Vulkan import → swapchain |
-| OpenGL (via Zink) | Not yet working | EGL can't init in proot (no DRM node) |
+| Vulkan (vkcube, games) | **Zero-copy, working** | Turnip → dmabuf → Vulkan import → swapchain |
+| OpenGL (via Zink) | **GPU renders, display black** | Zink→Turnip GPU at 60fps, but wl_shm readback broken |
 | wl_shm (software) | **Works** | CPU shared memory → GLES renderer |
+
+### OpenGL via Zink status
+
+**GPU rendering confirmed:** glmark2-es2-wayland scores 85 (60fps vsync-locked) via
+`MESA_LOADER_DRIVER_OVERRIDE=zink GALLIUM_DRIVER=zink`.
+
+**Display is black:** Mesa's Vulkan WSI uses `wl_shm` instead of `zwp_linux_dmabuf_v1`
+on the swrast Wayland path. GPU content isn't copied back to the shm buffer.
+The GPU does real work (measured FPS) but the compositor sees empty/black buffers.
+
+**Root cause:** The Vulkan WSI should use dmabuf (`WSI_IMAGE_TYPE_DRM`) since
+`wsi_device->sw = false` (Turnip is `INTEGRATED_GPU`, not CPU). But zero
+`zwp_linux_buffer_params` appear in Wayland protocol traces — the dmabuf path
+is not being taken for unknown reasons. Investigation ongoing.
+
+### Mesa patches required
+
+Two patches in `patches/` for Mesa 26.0.1:
+
+1. **`mesa-zink-wayland-fallback.patch`**: Fall back to kopper/swrast path when
+   DRM/GBM unavailable. Without this, `eglInitialize` fails on Wayland
+   (Mesa assumes Wayland = DRM always available).
+
+2. **`mesa-adreno830-chipid.patch`**: Wildcard Adreno 830 chip revision
+   (`0x44050000` → `0x440500ff`). Samsung's chip reports `0x44050001` but
+   Mesa 26.0.1 only matches exact `0x44050000`.
+
+**Build:** Must use gcc (not clang — clang produces Turnip that doesn't recognize
+the GPU). Build in proot with `ninja -j4`.
 
 ### Common issues
 
