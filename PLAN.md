@@ -137,8 +137,12 @@ Goal: eliminate CPU copy in the rendering path.
 - [x] EGL Wayland init now works with Zink/Kopper on KGSL
 - [x] Vulkan WSI creates dmabuf buffers via `zwp_linux_buffer_params`
 - [x] Compositor destroys EGL surface before Vulkan swapchain takeover
-- [ ] Fix on-screen rendering: Zink DEVICE LOST corrupts WSI display
-      (off-screen rendering works perfectly; bug is in Zink/Turnip, not compositor)
+- [ ] Fix GPU fault: Zink causes KGSL GUILTY context reset on first render
+      Root cause: `vkQueueSubmit` → KGSL ioctl → GPU fault → EDEADLK.
+      Happens with ALL GL ops but NOT with direct Vulkan (vkcube works).
+      Off-screen: GPU recovers (800-1400fps). On-screen: KGSL context killed.
+      Likely Zink generates an unsupported command for Adreno 830.
+      Need: upstream Mesa investigation or newer Mesa version.
 
 ### Failed approaches (documented in GPU_RENDERING.md)
 - [x] EGL dmabuf import — extension not available on Android
@@ -192,6 +196,10 @@ We do not really care about the purity aspects of NixOS though, so we should do 
 - Single-touch only (no multi-touch passthrough yet)
 - No Wayland keyboard enter/leave on Activity focus changes
 - PipeWire camera crashes (SIGBUS in protocol-native module) — disabled for now
-- OpenGL apps via Zink: DEVICE LOST during rendering corrupts on-screen display (off-screen works at 1416fps)
+- OpenGL apps via Zink: GPU fault (KGSL GUILTY reset) on first Zink render kills KGSL context
+  - `vkQueueSubmit` fails with EDEADLK after GPU reset — not recoverable on-screen
+  - Off-screen: GPU recovers, runs at 800-1400fps; on-screen: KGSL context permanently dead
+  - Direct Vulkan (vkcube) unaffected — issue is Zink-specific command generation
+  - Needs upstream Mesa fix or newer Mesa version with Adreno 830 Zink fixes
 - Mesa must be built with gcc, not clang (clang produces Turnip that doesn't recognize Adreno 830)
 - Mesa build in proot has intermittent `posix_spawn` failures with `-j4`
