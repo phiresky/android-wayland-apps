@@ -129,20 +129,17 @@ Goal: eliminate CPU copy in the rendering path.
 - [x] Lazy Vulkan swapchain creation (only on first dmabuf commit)
 - [x] Fallback to GLES/mmap for wl_shm clients (gedit, GTK apps)
 
-### OpenGL clients via Zink (IN PROGRESS)
+### OpenGL clients via Zink (DONE)
 - [x] Mesa patch: EGL Wayland fallback to kopper when GBM unavailable
-- [x] Mesa patch: Adreno 830 chip_id wildcard (`0x440500ff`)
+- [x] Mesa patch: Adreno 830 real GPU config (backported from Mesa main)
 - [x] Mesa patch: `dri2_setup_device` software EGLDevice when no DRM fd
-- [x] GPU rendering confirmed: glmark2 score 1415 off-screen (1416fps)
-- [x] EGL Wayland init now works with Zink/Kopper on KGSL
+- [x] EGL Wayland init works with Zink/Kopper on KGSL
 - [x] Vulkan WSI creates dmabuf buffers via `zwp_linux_buffer_params`
 - [x] Compositor destroys EGL surface before Vulkan swapchain takeover
-- [ ] Fix GPU fault: Zink causes KGSL GUILTY context reset on first render
-      Root cause: `vkQueueSubmit` → KGSL ioctl → GPU fault → EDEADLK.
-      Happens with ALL GL ops but NOT with direct Vulkan (vkcube works).
-      Off-screen: GPU recovers (800-1400fps). On-screen: KGSL context killed.
-      Likely Zink generates an unsupported command for Adreno 830.
-      Need: upstream Mesa investigation or newer Mesa version.
+- [x] Fix GPU fault: backported real A830 device config from Mesa main
+      Root cause was "Totally fake" GPU config in Mesa 26.0.1 — wrong
+      reg_size_vec4 (96→128), missing magic registers, wrong tile_align_w
+- [x] glmark2 renders correctly on screen via Zink+Kopper+dmabuf
 
 ### Failed approaches (documented in GPU_RENDERING.md)
 - [x] EGL dmabuf import — extension not available on Android
@@ -196,10 +193,7 @@ We do not really care about the purity aspects of NixOS though, so we should do 
 - Single-touch only (no multi-touch passthrough yet)
 - No Wayland keyboard enter/leave on Activity focus changes
 - PipeWire camera crashes (SIGBUS in protocol-native module) — disabled for now
-- OpenGL apps via Zink: GPU fault (KGSL GUILTY reset) on first Zink render kills KGSL context
-  - `vkQueueSubmit` fails with EDEADLK after GPU reset — not recoverable on-screen
-  - Off-screen: GPU recovers, runs at 800-1400fps; on-screen: KGSL context permanently dead
-  - Direct Vulkan (vkcube) unaffected — issue is Zink-specific command generation
-  - Needs upstream Mesa fix or newer Mesa version with Adreno 830 Zink fixes
+- Mesa must be built with gcc, not clang (clang produces Turnip that doesn't recognize Adreno 830)
+- Mesa build in proot has intermittent `posix_spawn` failures with `-j4`
 - Mesa must be built with gcc, not clang (clang produces Turnip that doesn't recognize Adreno 830)
 - Mesa build in proot has intermittent `posix_spawn` failures with `-j4`
