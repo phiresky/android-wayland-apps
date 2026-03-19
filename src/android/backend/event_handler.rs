@@ -382,6 +382,16 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                         .unwrap_or(false);
 
                     if needs_vk_surface {
+                        // Destroy EGL surface first — Android won't allow both
+                        // EGL and Vulkan surfaces on the same ANativeWindow
+                        if let Some(wm) = backend.window_manager.as_mut() {
+                            if let Some(window) = wm.windows.get_mut(&window_id) {
+                                if window.egl_surface.is_some() {
+                                    log::info!("Destroying EGL surface for Vulkan takeover on window_id={}", window_id);
+                                    window.egl_surface = None;
+                                }
+                            }
+                        }
                         if let Some(wm) = backend.window_manager.as_ref() {
                             if let Some(window) = wm.windows.get(&window_id) {
                                 if let Some(native_window) = window.native_window {

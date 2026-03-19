@@ -113,8 +113,8 @@ Goal: the main Activity no longer needs NativeActivity or winit.
 - [x] Replace winit event loop with background thread + libc::poll()
 - [x] Drive rendering from damage (Wayland commits, window events) not vsync
 - [x] Remove render_main_window() (eliminates busy-loop GPU waste)
-- [ ] Convert MainActivity from NativeActivity to plain Activity
-- [ ] Status overlay shows directly in Activity layout (no EGL surface to fight)
+- [x] Convert MainActivity from NativeActivity to plain Activity
+- [x] Status overlay shows directly in Activity layout (no EGL surface to fight)
 
 ## Milestone 6: Zero-copy GPU rendering [MOSTLY DONE]
 
@@ -132,10 +132,13 @@ Goal: eliminate CPU copy in the rendering path.
 ### OpenGL clients via Zink (IN PROGRESS)
 - [x] Mesa patch: EGL Wayland fallback to kopper when GBM unavailable
 - [x] Mesa patch: Adreno 830 chip_id wildcard (`0x440500ff`)
-- [x] GPU rendering confirmed: glmark2 score 85, 60fps vsync-locked
-- [ ] Fix display: Vulkan WSI uses wl_shm instead of dmabuf (window is black)
-- [ ] Investigate why WSI doesn't create `zwp_linux_buffer_params` despite
-      `wsi_device->sw = false` and dmabuf formats advertised
+- [x] Mesa patch: `dri2_setup_device` software EGLDevice when no DRM fd
+- [x] GPU rendering confirmed: glmark2 score 1415 off-screen (1416fps)
+- [x] EGL Wayland init now works with Zink/Kopper on KGSL
+- [x] Vulkan WSI creates dmabuf buffers via `zwp_linux_buffer_params`
+- [x] Compositor destroys EGL surface before Vulkan swapchain takeover
+- [ ] Fix on-screen rendering: Zink DEVICE LOST corrupts WSI display
+      (off-screen rendering works perfectly; bug is in Zink/Turnip, not compositor)
 
 ### Failed approaches (documented in GPU_RENDERING.md)
 - [x] EGL dmabuf import — extension not available on Android
@@ -189,6 +192,6 @@ We do not really care about the purity aspects of NixOS though, so we should do 
 - Single-touch only (no multi-touch passthrough yet)
 - No Wayland keyboard enter/leave on Activity focus changes
 - PipeWire camera crashes (SIGBUS in protocol-native module) — disabled for now
-- OpenGL apps via Zink render on GPU but display black (wl_shm readback broken)
+- OpenGL apps via Zink: DEVICE LOST during rendering corrupts on-screen display (off-screen works at 1416fps)
 - Mesa must be built with gcc, not clang (clang produces Turnip that doesn't recognize Adreno 830)
 - Mesa build in proot has intermittent `posix_spawn` failures with `-j4`

@@ -1,6 +1,18 @@
 --- a/src/egl/drivers/dri2/platform_wayland.c
 +++ b/src/egl/drivers/dri2/platform_wayland.c
-@@ -3275,7 +3275,11 @@ dri2_initialize_wayland(_EGLDisplay *disp)
+@@ -3239,7 +3239,10 @@ dri2_initialize_wayland_swrast(_EGLDisplay *disp)
+    if (!dri2_create_screen(disp))
+       goto cleanup;
+
+-   if (!dri2_setup_device(disp, disp->Options.ForceSoftware)) {
++   /* When falling back from the DRM path (e.g. KGSL on Android has no DRM
++    * render node), fd_render_gpu is -1.  Use a software EGLDevice for
++    * bookkeeping — Kopper still renders on GPU via Vulkan WSI. */
++   if (!dri2_setup_device(disp, disp->Options.ForceSoftware || dri2_dpy->fd_render_gpu < 0)) {
+       _eglError(EGL_NOT_INITIALIZED, "DRI2: failed to setup EGLDevice");
+       goto cleanup;
+    }
+@@ -3275,7 +3278,11 @@ dri2_initialize_wayland(_EGLDisplay *disp)
  {
     if (disp->Options.ForceSoftware)
        return dri2_initialize_wayland_swrast(disp);

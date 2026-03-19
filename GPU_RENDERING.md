@@ -147,19 +147,29 @@ and `XDG_RUNTIME_DIR=/tmp`. Turnip's ICD is found via the default Vulkan loader 
 | Client type | Status | Path |
 |-------------|--------|------|
 | Vulkan (vkcube, games) | **Zero-copy, working** | Turnip → dmabuf → Vulkan import → swapchain |
-| OpenGL (via Zink) | **GPU renders, display black** | Zink→Turnip GPU at 60fps, but wl_shm readback broken |
+| OpenGL (via Zink) | **GPU renders, on-screen corrupted** | Zink→Turnip→Kopper→dmabuf; DEVICE LOST breaks WSI display |
 | wl_shm (software) | **Works** | CPU shared memory → GLES renderer |
 
 ### OpenGL via Zink status
 
-**GPU rendering confirmed:** glmark2-es2-wayland scores 85 (60fps vsync-locked) via
+**GPU rendering confirmed:** glmark2 scores 1415 off-screen (1416fps) via
 `MESA_LOADER_DRIVER_OVERRIDE=zink GALLIUM_DRIVER=zink`.
 
-**Display is black:** Mesa's Vulkan WSI uses `wl_shm` instead of `zwp_linux_dmabuf_v1`
-on the swrast Wayland path. GPU content isn't copied back to the shm buffer.
-The GPU does real work (measured FPS) but the compositor sees empty/black buffers.
+**Pipeline now works:** Three Mesa patches fix the EGL→Kopper→Vulkan WSI→dmabuf path:
+1. Fallback from DRM to swrast when GBM unavailable (existing patch)
+2. `dri2_setup_device` uses software EGLDevice when `fd_render_gpu < 0` (new)
+3. Adreno 830 chip_id wildcard (existing patch)
 
-**Root cause:** The Vulkan WSI should use dmabuf (`WSI_IMAGE_TYPE_DRM`) since
+The Vulkan WSI now creates `zwp_linux_buffer_params` with dmabuf fds (LINEAR modifier).
+The compositor destroys the EGL surface before creating the Vulkan swapchain on the
+same ANativeWindow (Android doesn't allow both).
+
+**On-screen rendering corrupted:** Zink hits a non-fatal `DEVICE LOST` error during
+rendering (happens even off-screen). Off-screen, Zink recovers and runs at 1416fps.
+On-screen, the DEVICE LOST disrupts the Vulkan WSI swapchain, causing corrupted/black
+display. This is a Zink/Turnip rendering bug on Adreno 830, not a compositor issue.
+
+**Previous root cause (FIXED):** The Vulkan WSI used `wl_shm` instead of dmabuf because
 `wsi_device->sw = false` (Turnip is `INTEGRATED_GPU`, not CPU). But zero
 `zwp_linux_buffer_params` appear in Wayland protocol traces — the dmabuf path
 is not being taken for unknown reasons. Investigation ongoing.
@@ -168,9 +178,11 @@ is not being taken for unknown reasons. Investigation ongoing.
 
 Two patches in `patches/` for Mesa 26.0.1:
 
-1. **`mesa-zink-wayland-fallback.patch`**: Fall back to kopper/swrast path when
-   DRM/GBM unavailable. Without this, `eglInitialize` fails on Wayland
-   (Mesa assumes Wayland = DRM always available).
+1. **`mesa-zink-wayland-fallback.patch`**: Two changes to `platform_wayland.c`:
+   - Fall back to kopper/swrast path when DRM/GBM unavailable
+   - `dri2_setup_device` passes `software=true` when `fd_render_gpu < 0`
+   Without these, `eglInitialize` fails on Wayland (Mesa assumes DRM always available,
+   and `dri2_setup_device` asserts on missing render node fd).
 
 2. **`mesa-adreno830-chipid.patch`**: Wildcard Adreno 830 chip revision
    (`0x44050000` → `0x440500ff`). Samsung's chip reports `0x44050001` but
@@ -184,7 +196,7 @@ the GPU). Build in proot with `ninja -j4`.
 | Issue | Cause | Fix |
 |-------|-------|-----|
 | `Cannot connect to wayland` | Wrong XDG_RUNTIME_DIR | Use `XDG_RUNTIME_DIR=/tmp` (not `/data/local/tmp`) |
-| `EGLUT: failed to initialize EGL display` | No DRM render node in proot | OpenGL apps need Zink (not yet working) |
+| `EGLUT: failed to initialize EGL display` | No DRM render node in proot | Use `MESA_LOADER_DRIVER_OVERRIDE=zink GALLIUM_DRIVER=zink` with patched Mesa |
 | vkcube hangs after "Selected GPU" | No dmabuf global advertised | Compositor must advertise `zwp_linux_dmabuf_v1` |
 
 ## EGL Extensions Available on Device

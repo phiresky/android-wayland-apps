@@ -6,3 +6,6 @@
 	path = patches/smithay
 	url = https://github.com/phiresky/smithay.git
 	branch = android-patches-rebased
+[submodule "deps/proot"]
+	path = patches/proot
+	url = https://github.com/termux/proot.git
