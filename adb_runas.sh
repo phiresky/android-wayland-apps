@@ -70,6 +70,7 @@ fi
 
 adb shell run-as "$PKG" sh -c "'cat > $CMD_FILE'" << CMDEOF
 #!/bin/sh
+[ -f /usr/local/bin/start-dbus ] && . /usr/local/bin/start-dbus 2>/dev/null || true
 $CMD_CONTENT
 CMDEOF
 
@@ -78,24 +79,9 @@ CMDEOF
 
 # Build the shell invocation for the launcher
 if [ "$PROOT_USER" = "root" ]; then
-    INNER_CMD="sh /tmp/.proot_cmd_$SUFFIX.sh"
+    SHELL_CMD="sh /tmp/.proot_cmd_$SUFFIX.sh"
 else
-    INNER_CMD="runuser -u $PROOT_USER -- sh /tmp/.proot_cmd_$SUFFIX.sh"
-fi
-
-# For interactive use, wrap with script(1) inside proot to allocate a fresh PTY.
-# The app UID can't ioctl on adbd's PTY (SELinux), but script creates one we own.
-# This MUST be in a script file — single quotes in $SHELL_CMD variable expansion
-# don't act as shell quotes, so script -qc '...' breaks when embedded in a variable.
-if [ -t 0 ]; then
-    PTY_FILE=$ROOTFS/tmp/.proot_pty_$SUFFIX.sh
-    adb shell run-as "$PKG" sh -c "'cat > $PTY_FILE'" << PTYEOF
-#!/bin/sh
-exec script -qc '$INNER_CMD' /dev/null
-PTYEOF
-    SHELL_CMD="sh /tmp/.proot_pty_$SUFFIX.sh"
-else
-    SHELL_CMD="$INNER_CMD"
+    SHELL_CMD="runuser -u $PROOT_USER -- sh /tmp/.proot_cmd_$SUFFIX.sh"
 fi
 
 # Write a launcher script to the device so adb shell gets a simple command
@@ -130,6 +116,9 @@ exec $LIBDIR/libproot.so \
     --bind=$ROOTFS/proc/.sysctl_entry_cap_last_cap:/proc/sys/kernel/cap_last_cap \
     --bind=$ROOTFS/proc/.sysctl_inotify_max_user_watches:/proc/sys/fs/inotify/max_user_watches \
     --bind=$ROOTFS/sys/.empty:/sys/fs/selinux \
+    --bind=$LIBDIR:$LIBDIR \
+    --bind=/system:/system \
+    --bind=/apex:/apex \
     /usr/bin/env -i \
     HOME=$HOMEDIR \
     LANG=C.UTF-8 \
@@ -140,6 +129,9 @@ exec $LIBDIR/libproot.so \
     LOGNAME=$PROOT_USER \
     XDG_RUNTIME_DIR=/tmp \
     WAYLAND_DISPLAY=wayland-0 \
+    _PROOT_BIN=$LIBDIR/libproot.so \
+    _PROOT_LOADER=$LIBDIR/libproot_loader.so \
+    _PROOT_TMP_DIR=./files \
     $SHELL_CMD
 EOF
 

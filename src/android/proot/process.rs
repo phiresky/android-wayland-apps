@@ -129,7 +129,12 @@ impl ArchProcess {
             .arg(format!("--bind={}/proc/.vmstat:/proc/vmstat", config::ARCH_FS_ROOT))
             .arg(format!("--bind={}/proc/.sysctl_entry_cap_last_cap:/proc/sys/kernel/cap_last_cap", config::ARCH_FS_ROOT))
             .arg(format!("--bind={}/proc/.sysctl_inotify_max_user_watches:/proc/sys/fs/inotify/max_user_watches", config::ARCH_FS_ROOT))
-            .arg(format!("--bind={}/sys/.empty:/sys/fs/selinux", config::ARCH_FS_ROOT));
+            .arg(format!("--bind={}/sys/.empty:/sys/fs/selinux", config::ARCH_FS_ROOT))
+            // Expose the native lib dir and Android system libs inside proot so
+            // nested proot can be invoked (used by the bwrap shim for flatpak)
+            .arg(format!("--bind={}:{}", context.native_library_dir.display(), context.native_library_dir.display()))
+            .arg("--bind=/system:/system")
+            .arg("--bind=/apex:/apex");
 
         // env vars
         process.arg("/usr/bin/env").arg("-i");
@@ -144,6 +149,12 @@ impl ArchProcess {
             .arg("TMPDIR=/tmp")
             .arg(format!("USER={}", user))
             .arg(format!("LOGNAME={}", user));
+
+        // Proot paths for nested proot (bwrap shim uses these for flatpak)
+        process
+            .arg(format!("_PROOT_BIN={}", context.native_library_dir.join("libproot.so").display()))
+            .arg(format!("_PROOT_LOADER={}", context.native_library_dir.join("libproot_loader.so").display()))
+            .arg(format!("_PROOT_TMP_DIR={}", context.data_dir.display()));
 
         // Wayland environment variables
         process
