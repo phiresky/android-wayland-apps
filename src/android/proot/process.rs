@@ -32,7 +32,7 @@ impl ArchProcess {
         let mut process = Command::new(context.native_library_dir.join("libproot.so"));
         process
             .env("PROOT_LOADER", &proot_loader)
-            .env("PROOT_TMP_DIR", &context.data_dir);
+            .env("PROOT_TMP_DIR", context.cache_dir.join("proot"));
 
         if no_seccomp {
             process.env("PROOT_NO_SECCOMP", "1");
@@ -81,13 +81,16 @@ impl ArchProcess {
         let context = get_application_context();
         let user = self.user.as_deref().unwrap_or("root");
 
+        let proot_tmp = context.cache_dir.join("proot");
+        let _ = std::fs::create_dir_all(&proot_tmp);
+
         let mut process = Command::new(context.native_library_dir.join("libproot.so"));
         process
             .env(
                 "PROOT_LOADER",
                 context.native_library_dir.join("libproot_loader.so"),
             )
-            .env("PROOT_TMP_DIR", &context.data_dir);
+            .env("PROOT_TMP_DIR", &proot_tmp);
 
         if *USE_NO_SECCOMP.get().unwrap_or(&false) {
             process.env("PROOT_NO_SECCOMP", "1");
@@ -154,7 +157,7 @@ impl ArchProcess {
         process
             .arg(format!("_PROOT_BIN={}", context.native_library_dir.join("libproot.so").display()))
             .arg(format!("_PROOT_LOADER={}", context.native_library_dir.join("libproot_loader.so").display()))
-            .arg(format!("_PROOT_TMP_DIR={}", context.data_dir.display()));
+            .arg(format!("_PROOT_TMP_DIR={}", context.cache_dir.join("proot").display()));
 
         // Wayland environment variables
         process

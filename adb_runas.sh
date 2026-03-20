@@ -87,7 +87,7 @@ LAUNCHER=./files/.proot_launcher_$SUFFIX.sh
 adb shell run-as "$PKG" sh -c "'cat > $LAUNCHER'" << EOF
 #!/bin/sh
 export PROOT_LOADER=$LIBDIR/libproot_loader.so
-export PROOT_TMP_DIR=./files
+export PROOT_TMP_DIR=./cache/proot
 exec $LIBDIR/libproot.so \
     -r $ROOTFS \
     -L \
@@ -128,7 +128,7 @@ exec $LIBDIR/libproot.so \
     WAYLAND_DISPLAY=wayland-0 \
     _PROOT_BIN=$LIBDIR/libproot.so \
     _PROOT_LOADER=$LIBDIR/libproot_loader.so \
-    _PROOT_TMP_DIR=./files \
+    _PROOT_TMP_DIR=./cache/proot \
     $SHELL_CMD
 EOF
 

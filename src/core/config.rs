@@ -18,6 +18,7 @@ pub const PACKAGES: &[&str] = &[
     "shared-mime-info",
     "gdk-pixbuf2",
     "noto-fonts",
+    "python",
     "vulkan-tools",
 ];
 

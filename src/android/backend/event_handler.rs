@@ -306,6 +306,19 @@ fn process_window_events(backend: &mut WaylandBackend) {
 
 /// Render each Activity window's toplevel to its EGL surface.
 fn render_activity_windows(backend: &mut WaylandBackend) {
+    let time = backend.compositor.start_time.elapsed().as_millis() as u32;
+
+    // Send frame callbacks for windows that can't be rendered yet (no EGL/VK surface).
+    // Without this, EGL clients (e.g. Factorio via llvmpipe) block forever in
+    // eglSwapBuffers waiting for a frame callback that never comes.
+    if let Some(wm) = backend.window_manager.as_ref() {
+        for (_, window) in &wm.windows {
+            if window.egl_surface.is_none() && window.vk_surface.is_none() {
+                send_frames_surface_tree(window.surface_kind.wl_surface(), time);
+            }
+        }
+    }
+
     let window_ids: Vec<u32> = backend
         .window_manager
         .as_ref()
@@ -318,7 +331,6 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
         })
         .unwrap_or_default();
 
-    let time = backend.compositor.start_time.elapsed().as_millis() as u32;
     let scale = backend.scale_factor;
 
     for window_id in window_ids {
