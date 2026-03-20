@@ -458,7 +458,12 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                                 let stride = dmabuf.strides().next().unwrap_or(sz.w as u32 * 4);
                                 if let Some(fd) = fd {
                                     use std::os::unix::io::AsRawFd;
-                                    match vk.get_or_import_dmabuf(fd.as_raw_fd(), sz.w as u32, sz.h as u32, stride, vk_fmt) {
+                                    let raw_fd = fd.as_raw_fd();
+                                    // Skip blit if same dmabuf fd as last render (no new content)
+                                    if window.last_vk_fd == Some(raw_fd) {
+                                        done = true;
+                                    } else {
+                                    match vk.get_or_import_dmabuf(raw_fd, sz.w as u32, sz.h as u32, stride, vk_fmt) {
                                         Ok(imported) => {
                                             match vk.blit_dmabuf_to_swapchain(&imported, vk_surface) {
                                                 Ok(()) => {
@@ -467,6 +472,7 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                                                         if let Some(w) = wm.windows.get_mut(&window_id) {
                                                             w.last_render_method = "VK dmabuf";
                                                             w.last_buffer_size = Some((sz.w as u32, sz.h as u32));
+                                                            w.last_vk_fd = Some(raw_fd);
                                                         }
                                                     }
                                                 }
@@ -474,6 +480,7 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                                             }
                                         }
                                         Err(e) => log::warn!("Vulkan dmabuf import failed: {e}"),
+                                    }
                                     }
                                 }
                             }

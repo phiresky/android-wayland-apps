@@ -170,25 +170,50 @@ which the compositor imports via the same Vulkan zero-copy path as native Vulkan
 The compositor destroys the EGL surface before creating the Vulkan swapchain on the
 same ANativeWindow (Android doesn't allow both).
 
-### Mesa patches required
+### Building Mesa (Turnip) from source
 
-Two patches in `patches/` for Mesa 26.0.1:
+Mesa main (26.1.0-devel+) has correct Adreno 830 support out of the box
+(`chip_id=0x44050001` with `a8xx_gen1` properties, KGSL backend). No patches needed
+for Vulkan. The Zink/EGL Wayland fallback patches are only needed for OpenGL.
 
-1. **`mesa-zink-wayland-fallback.patch`**: Two changes to `platform_wayland.c`:
-   - Fall back to kopper/swrast path when DRM/GBM unavailable
-   - `dri2_setup_device` passes `software=true` when `fd_render_gpu < 0`
-   Without these, `eglInitialize` fails on Wayland (Mesa assumes DRM always available,
-   and `dri2_setup_device` asserts on missing render node fd).
+**Build deps** (install as root in proot):
+```sh
+pacman -S --needed meson ninja gcc cmake python-mako python-packaging python-yaml \
+  libdrm libxshmfence wayland wayland-protocols pkgconf libxrandr libelf llvm clang \
+  lm_sensors libglvnd vulkan-icd-loader glslang bison flex binutils
+```
 
-2. **`mesa-adreno830-chipid.patch`**: Backport real Adreno 830 GPU config from Mesa main.
-   Samsung's chip reports `0x44050001` but Mesa 26.0.1 only matches `0x44050000` —
-   the patch wildcards the revision byte (`0x440500ff`). More critically, it replaces
-   the "totally fake" GPU config with correct values: `a8xx_gen2` properties,
-   `reg_size_vec4=128`, `tile_align_w=96`, `a8xx_gen2_raw_magic_regs`. Without this,
-   Turnip triggers KGSL GUILTY resets (GPU faults) during rendering.
+**Configure and build** (as alarm user):
+```sh
+cd ~/mesa
+CC=gcc CXX=g++ meson setup builddir \
+  -Dgallium-drivers= -Dvulkan-drivers=freedreno -Dplatforms=wayland \
+  -Dglx=disabled -Degl=disabled -Dgles1=disabled -Dgles2=disabled \
+  -Dopengl=false -Dbuildtype=release -Dfreedreno-kmds=kgsl,msm --prefix=/usr
+ninja -C builddir -j4
+```
 
-**Build:** Must use gcc (not clang — clang produces Turnip that doesn't recognize
-the GPU). Build in proot with `ninja -j4`.
+**Important:** `-Dfreedreno-kmds=kgsl,msm` (not just `kgsl`). With only `kgsl`, Mesa
+disables libdrm to avoid the dependency, but the Wayland WSI needs libdrm for
+dmabuf-based swapchains (`WSI_IMAGE_TYPE_DRM`). Adding `msm` keeps libdrm linked.
+
+**Install** (as root):
+```sh
+ninja -C builddir install
+```
+
+This installs `libvulkan_freedreno.so` and the Turnip ICD JSON.
+
+### Legacy: Mesa 26.0.x patches
+
+Two patches in `patches/` were needed for Mesa 26.0.1 (no longer needed on main):
+
+1. **`mesa-zink-wayland-fallback.patch`**: Fall back to kopper/swrast path when
+   DRM/GBM unavailable, and use software EGLDevice when no render node fd.
+   Only needed for OpenGL via Zink (not Vulkan).
+
+2. **`mesa-adreno830-chipid.patch`**: Backport real Adreno 830 GPU config.
+   Mesa main already has the correct config with `chip_id=0x44050001`.
 
 ### Common issues
 

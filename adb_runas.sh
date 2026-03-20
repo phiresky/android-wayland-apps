@@ -20,7 +20,7 @@ APK_DIR=$(adb shell pm path "$PKG" </dev/null | grep base.apk | head -1 | sed 's
 LIBDIR="$APK_DIR/lib/arm64"
 
 # Default to alarm user; override with USERNAME=root
-PROOT_USER="${USERNAME:-alarm}"
+PROOT_USER="${USER_NAME:-alarm}"
 
 if [ "$PROOT_USER" = "root" ]; then
     HOMEDIR=/root
