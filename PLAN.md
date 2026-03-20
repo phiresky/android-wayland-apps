@@ -160,7 +160,12 @@ Goal: eliminate CPU copy in the rendering path.
 - [ ] Main UI shows setup status including whether all necessary permissions are granted.
 - [ ] hideable apps in app launcher are configurable - long press shows menu with hide buton and there's a button to unhide all.
 
-- [ ] SOUND SUPPORT. pipewire.
+- [ ] SOUND SUPPORT: PipeWire sink that bridges to Android AudioTrack.
+  - PipeWire daemon already runs in proot (pipewire + wireplumber)
+  - Need a custom PipeWire sink plugin (Rust) that reads audio from PipeWire
+    and plays it via Android's AudioTrack/AAudio API (NDK)
+  - Box64 apps (Factorio) use SDL audio → PipeWire → our sink → Android speaker
+  - Native ARM64 apps can use PipeWire directly
 - [ ] eliminate all C use because C is dirty
 
 ## Milestone 8: NixOS

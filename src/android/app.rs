@@ -55,15 +55,15 @@ pub fn run_compositor_loop(setup_done: Arc<AtomicBool>) {
     };
     compositor.state.wake_fd = Some(wake_fd);
 
-    // Query display density via JNI.
-    let scale_factor = get_display_density().unwrap_or(2.0);
-    log::info!("Display density: {scale_factor}");
+    // Query display info via JNI.
+    let (scale_factor, display_w, display_h) = get_display_info().unwrap_or((2.0, 2160, 1584));
+    log::info!("Display: {display_w}x{display_h}, density: {scale_factor}");
 
-    // Create wl_output with default size (updated when activities report dimensions).
+    // Create wl_output with the device's physical display resolution.
     let output = Output::new(
         "Android Wayland Launcher".into(),
         PhysicalProperties {
-            size: (1920, 1080).into(),
+            size: (display_w, display_h).into(),
             subpixel: Subpixel::HorizontalRgb,
             make: "Android".into(),
             model: "Wayland Launcher".into(),
@@ -74,7 +74,7 @@ pub fn run_compositor_loop(setup_done: Arc<AtomicBool>) {
     let _global = output.create_global::<State>(&dh);
     output.change_current_state(
         Some(Mode {
-            size: (1920, 1080).into(),
+            size: (display_w, display_h).into(),
             refresh: 60000,
         }),
         Some(Transform::Normal),
@@ -154,27 +154,31 @@ pub fn run_compositor_loop(setup_done: Arc<AtomicBool>) {
     }
 }
 
-/// Query the display density (scale factor) from Android DisplayMetrics via JNI.
-fn get_display_density() -> Result<f64, jni::errors::Error> {
+/// Query display density and physical resolution from Android via JNI.
+/// Uses getRealMetrics() to get the full display size (not the app window size).
+fn get_display_info() -> Result<(f64, i32, i32), jni::errors::Error> {
     jni_context::with_jni(|env, activity| {
-        // activity.getResources().getDisplayMetrics().density
         let resources = env
-            .call_method(
-                activity,
-                "getResources",
-                "()Landroid/content/res/Resources;",
-                &[],
-            )?
+            .call_method(activity, "getResources", "()Landroid/content/res/Resources;", &[])?
             .l()?;
         let metrics = env
-            .call_method(
-                &resources,
-                "getDisplayMetrics",
-                "()Landroid/util/DisplayMetrics;",
-                &[],
-            )?
+            .call_method(&resources, "getDisplayMetrics", "()Landroid/util/DisplayMetrics;", &[])?
             .l()?;
-        let density = env.get_field(&metrics, "density", "F")?.f()?;
-        Ok(density as f64)
+        let density = env.get_field(&metrics, "density", "F")?.f()? as f64;
+
+        // getRealMetrics gives full display size (not windowed app size in DeX)
+        let wm = env
+            .call_method(activity, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;",
+                &[jni::objects::JValue::Object(&jni::objects::JObject::from(env.new_string("window")?))])?
+            .l()?;
+        let display = env
+            .call_method(&wm, "getDefaultDisplay", "()Landroid/view/Display;", &[])?
+            .l()?;
+        let real_metrics = env.new_object("android/util/DisplayMetrics", "()V", &[])?;
+        env.call_method(&display, "getRealMetrics", "(Landroid/util/DisplayMetrics;)V",
+            &[jni::objects::JValue::Object(&real_metrics)])?;
+        let width = env.get_field(&real_metrics, "widthPixels", "I")?.i()?;
+        let height = env.get_field(&real_metrics, "heightPixels", "I")?.i()?;
+        Ok((density, width, height))
     })
 }
