@@ -43,5 +43,5 @@ pub const LAUNCHER_IGNORE: &[&str] = &["avahi-discover", "bssh", "bvnc"];
 /// Icon is the hicolor theme name (looked up in rootfs), or empty string for none.
 pub const LAUNCHER_EXTRA: &[(&str, &str, &str)] = &[
     ("EGL Gears", "eglgears_wayland", "@drawable/ic_eglgears"),
-    ("Vulkan Cube", "vkcube-wayland", "@drawable/ic_vkcube"),
+    ("Vulkan Cube", "vkcube", "@drawable/ic_vkcube"),
 ];

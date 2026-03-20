@@ -280,16 +280,13 @@ fn setup_machine_id() {
 
     setup_log("[setup] Generating /etc/machine-id...");
 
-    // Read 16 random bytes and hex-encode to a 32-char ID (systemd format)
-    let mut buf = [0u8; 16];
-    if let Ok(mut f) = File::open("/dev/urandom") {
-        if Read::read_exact(&mut f, &mut buf).is_err() {
-            // fallback: leave zeros, still valid hex
-        }
+    ArchProcess {
+        command: "systemd-machine-id-setup".into(),
+        user: None,
+        log: None,
+        kill_on_exit: true,
     }
-    let hex: String = buf.iter().map(|b| format!("{:02x}", b)).collect();
-    fs::write(&machine_id, format!("{}\n", hex))
-        .unwrap_or_else(|e| log::error!("[setup] Failed to write machine-id: {}", e));
+    .run();
 }
 
 /// Configure Firefox to work inside proot.

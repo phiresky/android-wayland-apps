@@ -207,7 +207,12 @@ fn process_window_events(backend: &mut WaylandBackend) {
                 if let Some(wm) = backend.window_manager.as_mut()
                     && let Some(window) = wm.windows.get_mut(&window_id) {
                         window.size = (width, height).into();
-                        window.needs_redraw = true;
+                        // Only set needs_redraw for non-Vulkan windows.
+                        // For Vulkan, needs_redraw is set by client commits only —
+                        // re-blitting the old committed buffer shows stale content.
+                        if window.vk_surface.is_none() {
+                            window.needs_redraw = true;
+                        }
                         let logical_w = (width as f64 / scale).round() as i32;
                         let logical_h_from_content = (height as f64 / scale).round() as i32;
                         // If the user has resized the window (width changed or height grew
@@ -319,6 +324,18 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
         }
     }
 
+    // Mark windows as needing redraw based on committed surfaces.
+    let committed: Vec<WlSurface> = backend.compositor.state.committed_surfaces.drain(..).collect();
+    if let Some(wm) = backend.window_manager.as_mut() {
+        for surface in &committed {
+            for (_, window) in wm.windows.iter_mut() {
+                if window.surface_kind.wl_surface() == surface {
+                    window.needs_redraw = true;
+                }
+            }
+        }
+    }
+
     let window_ids: Vec<u32> = backend
         .window_manager
         .as_ref()
@@ -411,36 +428,55 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                 });
 
                 if let Some(dmabuf) = dmabuf {
-                    // Lazy-create Vulkan swapchain on first dmabuf
+                    let dmabuf_sz = dmabuf.size();
+                    let buf_w = dmabuf_sz.w as u32;
+                    let buf_h = dmabuf_sz.h as u32;
+
+                    // Check if we need to (re)create the Vulkan swapchain:
+                    // - No surface yet, or
+                    // - Client buffer size changed (resize)
                     let needs_vk_surface = backend.window_manager.as_ref()
                         .and_then(|wm| wm.windows.get(&window_id))
-                        .map(|w| w.vk_surface.is_none() && w.native_window.is_some())
+                        .map(|w| {
+                            if w.vk_surface.is_none() && w.native_window.is_some() {
+                                return true;
+                            }
+                            // Recreate if buffer size changed
+                            if let Some(ref vks) = w.vk_surface {
+                                if vks.extent.width != buf_w || vks.extent.height != buf_h {
+                                    return true;
+                                }
+                            }
+                            false
+                        })
                         .unwrap_or(false);
 
                     if needs_vk_surface {
-                        // Destroy EGL surface first — Android won't allow both
-                        // EGL and Vulkan surfaces on the same ANativeWindow
                         if let Some(wm) = backend.window_manager.as_mut() {
                             if let Some(window) = wm.windows.get_mut(&window_id) {
                                 if window.egl_surface.is_some() {
                                     log::info!("Destroying EGL surface for Vulkan takeover on window_id={}", window_id);
                                     window.egl_surface = None;
                                 }
-                            }
-                        }
-                        if let Some(wm) = backend.window_manager.as_ref() {
-                            if let Some(window) = wm.windows.get(&window_id) {
+                                window.needs_redraw = true;
+
                                 if let Some(native_window) = window.native_window {
-                                    match vk.create_window_surface(native_window) {
+                                    let result = if let Some(ref old_vk) = window.vk_surface {
+                                        // Resize: chain new swapchain from old (no surface destroy)
+                                        vk.resize_swapchain(old_vk, native_window, buf_w, buf_h)
+                                    } else {
+                                        // First creation
+                                        vk.create_window_surface(native_window, buf_w, buf_h)
+                                    };
+                                    match result {
                                         Ok(vk_surface) => {
-                                            log::info!("Lazy-created Vulkan surface for window_id={}", window_id);
-                                            if let Some(wm) = backend.window_manager.as_mut() {
-                                                if let Some(window) = wm.windows.get_mut(&window_id) {
-                                                    window.vk_surface = Some(vk_surface);
-                                                }
-                                            }
+                                            log::info!("Vulkan surface for window_id={} at {}x{}", window_id, buf_w, buf_h);
+                                            window.vk_surface = Some(vk_surface);
                                         }
-                                        Err(e) => log::error!("Vulkan surface creation failed: {e}"),
+                                        Err(e) => {
+                                            log::error!("Vulkan surface creation failed: {e}");
+                                            window.vk_surface = None;
+                                        }
                                     }
                                 }
                             }
@@ -459,8 +495,7 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                                 if let Some(fd) = fd {
                                     use std::os::unix::io::AsRawFd;
                                     let raw_fd = fd.as_raw_fd();
-                                    // Skip blit if same dmabuf fd as last render (no new content)
-                                    if window.last_vk_fd == Some(raw_fd) {
+                                    if !window.needs_redraw {
                                         done = true;
                                     } else {
                                     match vk.get_or_import_dmabuf(raw_fd, sz.w as u32, sz.h as u32, stride, vk_fmt) {
@@ -472,7 +507,7 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                                                         if let Some(w) = wm.windows.get_mut(&window_id) {
                                                             w.last_render_method = "VK dmabuf";
                                                             w.last_buffer_size = Some((sz.w as u32, sz.h as u32));
-                                                            w.last_vk_fd = Some(raw_fd);
+                                                            w.needs_redraw = false;
                                                         }
                                                     }
                                                 }
@@ -726,14 +761,23 @@ fn launch_pending_activities(backend: &mut WaylandBackend) {
             wm.windows.iter()
                 .filter(|(_, w)| !w.activity_launched)
                 .filter_map(|(&id, w)| {
-                    // Read the client's committed geometry (if any).
+                    // Read the client's committed geometry, or fall back to buffer size.
+                    // Many simple apps (vkcube, eglgears) don't set XDG geometry.
                     let geo_size = match &w.surface_kind {
                         SurfaceKind::Toplevel(_) => {
                             wl_compositor::with_states(w.surface_kind.wl_surface(), |states| {
-                                states.cached_state.get::<SurfaceCachedState>()
+                                let geo = states.cached_state.get::<SurfaceCachedState>()
                                     .current()
                                     .geometry
-                                    .map(|g| g.size)
+                                    .map(|g| g.size);
+                                if geo.is_some() {
+                                    return geo;
+                                }
+                                // No geometry set — use buffer size as fallback
+                                type RssType = std::sync::Mutex<smithay::backend::renderer::utils::RendererSurfaceState>;
+                                states.data_map.get::<RssType>()
+                                    .and_then(|rss| rss.lock().ok())
+                                    .and_then(|guard| guard.buffer_size())
                             })
                         }
                         SurfaceKind::Layer(_) => None,

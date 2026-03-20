@@ -94,6 +94,8 @@ pub struct State {
     pub pending_layer_surfaces: Vec<LayerSurface>,
     /// Eventfd to wake the compositor thread when clients commit buffers.
     pub wake_fd: Option<RawFd>,
+    /// Surfaces that had a commit since last render (for needs_redraw).
+    pub committed_surfaces: Vec<WlSurface>,
     /// Text input state for soft keyboard integration.
     pub text_input_state: TextInputState,
     /// Pending soft keyboard show/hide request from text_input_v3.
@@ -207,6 +209,8 @@ impl CompositorHandler for State {
         on_commit_buffer_handler::<Self>(surface);
         // Update PopupManager so newly-mapped popups are tracked on their parent.
         self.popup_manager.commit(surface);
+        // Track committed surface so the render loop can set needs_redraw.
+        self.committed_surfaces.push(surface.clone());
         // Wake the compositor thread to render the new content.
         if let Some(&fd) = self.wake_fd.as_ref() {
             signal_wake(fd);
@@ -292,7 +296,8 @@ impl ClientState {
 impl ClientData for ClientState {
     fn initialized(&self, _client_id: ClientId) {}
 
-    fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {
+    fn disconnected(&self, client_id: ClientId, reason: DisconnectReason) {
+        log::info!("Client disconnected: {client_id:?} reason={reason:?}");
         self.alive.store(false, std::sync::atomic::Ordering::Relaxed);
     }
 }
@@ -386,6 +391,7 @@ impl Compositor {
             pending_toplevels: Vec::new(),
             pending_layer_surfaces: Vec::new(),
             wake_fd: None,
+            committed_surfaces: Vec::new(),
             text_input_state: TextInputState::default(),
             soft_keyboard_request: None,
             destroyed_toplevels: Vec::new(),

@@ -35,6 +35,22 @@ pub struct VulkanWindowSurface {
     pub extent: vk::Extent2D,
 }
 
+impl VulkanRenderer {
+    /// Destroy a window surface's Vulkan objects (swapchain, image views, surface).
+    pub fn destroy_window_surface(&self, ws: &VulkanWindowSurface) {
+        unsafe {
+            // Wait for all GPU work to complete before destroying
+            let _ = self.device.device_wait_idle();
+            for &view in &ws.image_views {
+                self.device.destroy_image_view(view, None);
+            }
+            self.swapchain_fn.destroy_swapchain(ws.swapchain, None);
+            let surface_fn = khr::surface::Instance::new(&self._entry, &self.instance);
+            surface_fn.destroy_surface(ws.surface, None);
+        }
+    }
+}
+
 /// An imported dmabuf as Vulkan resources.
 pub struct ImportedDmabuf {
     pub image: vk::Image,
@@ -145,14 +161,20 @@ impl VulkanRenderer {
     ) -> Result<std::cell::Ref<'_, ImportedDmabuf>, String> {
         {
             let cache = self.dmabuf_cache.borrow();
-            if cache.contains_key(&fd) {
-                drop(cache);
-                return Ok(std::cell::Ref::map(self.dmabuf_cache.borrow(), |c| {
-                    c.get(&fd).unwrap_or_else(|| unreachable!())
-                }));
+            if let Some(cached) = cache.get(&fd) {
+                // Validate size matches — fd numbers get reused by the kernel
+                if cached.width == width && cached.height == height {
+                    drop(cache);
+                    return Ok(std::cell::Ref::map(self.dmabuf_cache.borrow(), |c| {
+                        c.get(&fd).unwrap_or_else(|| unreachable!())
+                    }));
+                }
+                // Size mismatch: fd was reused for a different buffer
+                log::info!("[vk-renderer] Evicting stale cache fd={} (was {}x{}, now {}x{})",
+                    fd, cached.width, cached.height, width, height);
             }
         }
-        // Not cached — import and store
+        // Not cached or evicted — import and store
         let imported = self.import_dmabuf(fd, width, height, stride, format)?;
         log::info!("[vk-renderer] Cached dmabuf fd={} ({}x{}, cache size={})",
             fd, width, height, self.dmabuf_cache.borrow().len() + 1);
@@ -263,22 +285,70 @@ impl VulkanRenderer {
         Ok(ImportedDmabuf { image, buffer, memory, view, width, height, stride_pixels })
     }
 
-    /// Create a swapchain for an Android native window.
+    /// Create a swapchain for an Android native window at the given buffer size.
+    /// Android's SurfaceFlinger scales the buffer to fill the SurfaceView.
     pub fn create_window_surface(
         &self,
         native_window: *mut c_void,
+        buffer_width: u32,
+        buffer_height: u32,
     ) -> Result<VulkanWindowSurface, String> {
-        let android_surface_fn = khr::android_surface::Instance::new(&self._entry, &self.instance);
-        let surface_info = vk::AndroidSurfaceCreateInfoKHR::default()
-            .window(native_window);
+        self.create_or_resize_swapchain(native_window, buffer_width, buffer_height, None)
+    }
 
-        let surface = unsafe { android_surface_fn.create_android_surface(&surface_info, None) }
-            .map_err(|e| format!("create_android_surface: {e}"))?;
+    /// Resize an existing swapchain by creating a new one chained from the old.
+    /// Avoids destroying/recreating the VkSurfaceKHR (which races with Android).
+    pub fn resize_swapchain(
+        &self,
+        old: &VulkanWindowSurface,
+        native_window: *mut c_void,
+        buffer_width: u32,
+        buffer_height: u32,
+    ) -> Result<VulkanWindowSurface, String> {
+        let _ = unsafe { self.device.device_wait_idle() };
+        let result = self.create_or_resize_swapchain(
+            native_window, buffer_width, buffer_height,
+            Some(old),
+        );
+        // Destroy old swapchain's image views (swapchain itself is retired by oldSwapchain)
+        unsafe {
+            for &view in &old.image_views {
+                self.device.destroy_image_view(view, None);
+            }
+            self.swapchain_fn.destroy_swapchain(old.swapchain, None);
+        }
+        result
+    }
+
+    fn create_or_resize_swapchain(
+        &self,
+        native_window: *mut c_void,
+        buffer_width: u32,
+        buffer_height: u32,
+        old: Option<&VulkanWindowSurface>,
+    ) -> Result<VulkanWindowSurface, String> {
+        // Tell Android to expect buffers at this size — SurfaceFlinger scales to fill
+        unsafe extern "C" { fn ANativeWindow_setBuffersGeometry(window: *mut c_void, w: i32, h: i32, format: i32) -> i32; }
+        unsafe { ANativeWindow_setBuffersGeometry(native_window, buffer_width as i32, buffer_height as i32, 0) };
+
+        let (surface, owns_surface) = if let Some(old) = old {
+            (old.surface, false) // Reuse existing surface
+        } else {
+            let android_surface_fn = khr::android_surface::Instance::new(&self._entry, &self.instance);
+            let surface_info = vk::AndroidSurfaceCreateInfoKHR::default()
+                .window(native_window);
+            let surface = unsafe { android_surface_fn.create_android_surface(&surface_info, None) }
+                .map_err(|e| format!("create_android_surface: {e}"))?;
+            (surface, true)
+        };
 
         let surface_fn = khr::surface::Instance::new(&self._entry, &self.instance);
         let caps = unsafe {
             surface_fn.get_physical_device_surface_capabilities(self.physical_device, surface)
-        }.map_err(|e| format!("get_surface_capabilities: {e}"))?;
+        }.map_err(|e| {
+            if owns_surface { unsafe { surface_fn.destroy_surface(surface, None); } }
+            format!("get_surface_capabilities: {e}")
+        })?;
 
         let formats = unsafe {
             surface_fn.get_physical_device_surface_formats(self.physical_device, surface)
@@ -289,19 +359,18 @@ impl VulkanRenderer {
             .or(formats.first())
             .ok_or("No surface formats")?;
 
-        log::info!("[vk-renderer] Surface format: {:?}, extent: {}x{}",
-            format.format.as_raw(), caps.current_extent.width, caps.current_extent.height);
-
-        let image_count = (caps.min_image_count + 1).min(
+        // Use minimum images to avoid stale frame issues with multi-buffering
+        let image_count = caps.min_image_count.max(2).min(
             if caps.max_image_count == 0 { u32::MAX } else { caps.max_image_count }
         );
 
         let extent = if caps.current_extent.width != u32::MAX {
             caps.current_extent
         } else {
-            vk::Extent2D { width: 1920, height: 1080 }
+            vk::Extent2D { width: buffer_width, height: buffer_height }
         };
 
+        let old_swapchain = old.map(|o| o.swapchain).unwrap_or(vk::SwapchainKHR::null());
         let swapchain_info = vk::SwapchainCreateInfoKHR::default()
             .surface(surface)
             .min_image_count(image_count)
@@ -314,7 +383,8 @@ impl VulkanRenderer {
             .pre_transform(vk::SurfaceTransformFlagsKHR::IDENTITY)
             .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
             .present_mode(vk::PresentModeKHR::FIFO)
-            .clipped(true);
+            .clipped(true)
+            .old_swapchain(old_swapchain);
 
         let swapchain = unsafe { self.swapchain_fn.create_swapchain(&swapchain_info, None) }
             .map_err(|e| format!("create_swapchain: {e}"))?;

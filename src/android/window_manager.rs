@@ -93,8 +93,6 @@ pub struct WindowState {
     pub last_render_method: &'static str,
     /// Last buffer size committed by the client.
     pub last_buffer_size: Option<(u32, u32)>,
-    /// Last dmabuf fd rendered via Vulkan (skip re-blit if unchanged).
-    pub last_vk_fd: Option<i32>,
     /// Render mode for this window's client, detected from client env vars.
     /// `None` means not yet checked.
     pub render_mode: Option<RenderMode>,
@@ -183,7 +181,6 @@ impl WindowManager {
             vk_surface: None,
             last_render_method: "none",
             last_buffer_size: None,
-            last_vk_fd: None,
             render_mode: None,
         });
 
