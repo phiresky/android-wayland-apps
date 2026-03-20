@@ -74,9 +74,11 @@ pub fn run_setup() {
     setup_sysdata();
     setup_machine_id();
     setup_dns();
+    setup_alpm_user();
     install_dependencies();
     setup_user();
     disable_bwrap();
+    disable_flatpak_spawn();
     fix_bsdtar();
     setup_firefox_config();
     fix_xkb_symlink();
@@ -323,14 +325,18 @@ pub fn setup_firefox_config() {
                defaultPref(\"security.sandbox.warn_unprivileged_namespaces\", false);\n";
     fs::write(&cfg_file, cfg)
         .unwrap_or_else(|e| log::error!("[setup] Failed to write Firefox config: {}", e));
+
 }
 
 /// Ensure resolv.conf exists with a working nameserver.
 /// glibc inside proot needs this for DNS resolution.
 fn setup_dns() {
     let resolv_conf = Path::new(config::ARCH_FS_ROOT).join("etc/resolv.conf");
-    if resolv_conf.exists() {
-        return;
+    // Check if a nameserver is already configured (file may exist with only comments).
+    if let Ok(contents) = fs::read_to_string(&resolv_conf) {
+        if contents.lines().any(|l| l.trim_start().starts_with("nameserver")) {
+            return;
+        }
     }
     setup_log("[setup] Writing resolv.conf...");
     if let Some(parent) = resolv_conf.parent() {
@@ -338,6 +344,43 @@ fn setup_dns() {
     }
     fs::write(&resolv_conf, "nameserver 8.8.8.8\n")
         .unwrap_or_else(|e| log::error!("[setup] Failed to write resolv.conf: {}", e));
+}
+
+/// Create the `alpm` user/group required by pacman >= 7.0 for downloads.
+/// Without this user, pacman fails with "problem setting DownloadUser 'alpm'".
+fn setup_alpm_user() {
+    let fs_root = Path::new(config::ARCH_FS_ROOT);
+    let passwd = fs_root.join("etc/passwd");
+    let group = fs_root.join("etc/group");
+
+    // Check if alpm already exists
+    if let Ok(content) = fs::read_to_string(&passwd) {
+        if content.contains("alpm:") {
+            return;
+        }
+    }
+
+    setup_log("[setup] Creating alpm user for pacman downloads...");
+
+    // Append alpm group (GID 946 is Arch's standard)
+    if let Ok(mut content) = fs::read_to_string(&group) {
+        if !content.contains("alpm:") {
+            if !content.ends_with('\n') {
+                content.push('\n');
+            }
+            content.push_str("alpm:x:946:\n");
+            let _ = fs::write(&group, content);
+        }
+    }
+
+    // Append alpm user (UID 946)
+    if let Ok(mut content) = fs::read_to_string(&passwd) {
+        if !content.ends_with('\n') {
+            content.push('\n');
+        }
+        content.push_str("alpm:x:946:946:Arch Linux Package Manager:/:/usr/bin/nologin\n");
+        let _ = fs::write(&passwd, content);
+    }
 }
 
 /// Install dependencies via pacman if the check command fails.
@@ -627,6 +670,60 @@ else:
     }
 }
 
+/// Replace flatpak-spawn with a shim that runs commands unsandboxed.
+///
+/// glycin (gdk-pixbuf image loader) may invoke flatpak-spawn instead of bwrap
+/// to sandbox sub-processes. flatpak-spawn doesn't exist in the rootfs and
+/// glycin crashes if it's missing. The shim strips all options and execs the command.
+pub fn disable_flatpak_spawn() {
+    let flatpak_spawn = Path::new(config::ARCH_FS_ROOT).join("usr/bin/flatpak-spawn");
+
+    // Already our shim
+    if flatpak_spawn.exists() {
+        if let Ok(contents) = fs::read(&flatpak_spawn) {
+            if contents.starts_with(b"#!/bin/sh") {
+                return;
+            }
+        }
+    }
+
+    let shim = r#"#!/bin/sh
+# flatpak-spawn shim: runs the command unsandboxed (proot can't do namespaces).
+# Strips all flatpak-spawn options and execs the trailing command.
+dir=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --sandbox|--watch-bus|--latest-version|--no-network|--clear-env|--host|--verbose)
+            shift ;;
+        --directory=*)
+            dir="${1#--directory=}"; shift ;;
+        --forward-fd=*|--env=*)
+            shift ;;
+        -*)
+            shift ;;
+        *)
+            break ;;
+    esac
+done
+if [ -n "$dir" ]; then
+    cd "$dir" 2>/dev/null || true
+fi
+exec "$@"
+"#;
+
+    setup_log("[setup] Installing flatpak-spawn shim (sandboxing incompatible with proot)");
+    if let Err(e) = fs::write(&flatpak_spawn, shim) {
+        log::error!("[setup] Failed to write flatpak-spawn shim: {}", e);
+        return;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&flatpak_spawn, fs::Permissions::from_mode(0o755));
+    }
+}
+
 /// Wrap bsdtar so permission errors don't abort makepkg source extraction.
 ///
 /// proot fakes root with `--root-id` but the Android filesystem still rejects
@@ -850,6 +947,12 @@ if ! dbus-send --session --dest=org.freedesktop.DBus /org/freedesktop/DBus org.f
     eval $(dbus-launch --sh-syntax)
     export DBUS_SESSION_BUS_ADDRESS DBUS_SESSION_BUS_PID
 fi
+
+# Symlink Wayland and PipeWire sockets into the new XDG_RUNTIME_DIR
+for _sock in wayland-0 pipewire-0; do
+    [ -S "/tmp/$_sock" ] && [ ! -e "$XDG_RUNTIME_DIR/$_sock" ] && \
+        ln -sf "/tmp/$_sock" "$XDG_RUNTIME_DIR/$_sock" 2>/dev/null
+done
 "#;
     if let Err(e) = fs::write(&start_dbus, script) {
         log::error!("[setup] Failed to write start-dbus: {}", e);
@@ -865,15 +968,20 @@ fi
 
 /// Create an empty system flatpak repo so `flatpak run` doesn't error
 /// when checking /var/lib/flatpak/repo (we only use --user installs).
+/// Needs a valid OSTree repo structure (config file + directories).
 fn setup_flatpak_system_repo() {
-    let repo = Path::new(config::ARCH_FS_ROOT).join("var/lib/flatpak/repo/objects");
-    if repo.exists() {
+    let repo_dir = Path::new(config::ARCH_FS_ROOT).join("var/lib/flatpak/repo");
+    let config_file = repo_dir.join("config");
+    if config_file.exists() {
         return;
     }
     setup_log("[setup] Creating empty flatpak system repo...");
-    let _ = fs::create_dir_all(&repo);
-    let refs = Path::new(config::ARCH_FS_ROOT).join("var/lib/flatpak/repo/refs");
-    let _ = fs::create_dir_all(&refs);
+    for subdir in ["objects", "refs/heads", "refs/mirrors", "refs/remotes", "tmp", "state"] {
+        let _ = fs::create_dir_all(repo_dir.join(subdir));
+    }
+    let config = "[core]\nrepo_version=1\nmode=bare-user-only\n";
+    fs::write(&config_file, config)
+        .unwrap_or_else(|e| log::error!("[setup] Failed to write flatpak repo config: {}", e));
 }
 
 /// Fix the xkb symlink if it's absolute (won't resolve outside proot).

@@ -147,32 +147,28 @@ and `XDG_RUNTIME_DIR=/tmp`. Turnip's ICD is found via the default Vulkan loader 
 | Client type | Status | Path |
 |-------------|--------|------|
 | Vulkan (vkcube, games) | **Zero-copy, working** | Turnip → dmabuf → Vulkan import → swapchain |
-| OpenGL (via Zink) | **GPU renders, on-screen corrupted** | Zink→Turnip→Kopper→dmabuf; DEVICE LOST breaks WSI display |
-| wl_shm (software) | **Works** | CPU shared memory → GLES renderer |
+| OpenGL (via Zink) | **Working** | Zink → Turnip → Kopper → Vulkan WSI → dmabuf → Vulkan import → swapchain |
+| wl_shm (software) | **Working** | CPU shared memory → GLES renderer |
 
-### OpenGL via Zink status
+### OpenGL via Zink
 
-**GPU rendering confirmed:** glmark2 scores 1415 off-screen (1416fps) via
+OpenGL apps use **Zink** (Mesa's OpenGL-over-Vulkan layer) with **Kopper** (Zink's WSI).
+The Vulkan WSI creates `zwp_linux_buffer_params` with dmabuf fds (LINEAR modifier),
+which the compositor imports via the same Vulkan zero-copy path as native Vulkan clients.
+
+**Benchmarks:** glmark2 scores 1415 on-screen at 60fps via
 `MESA_LOADER_DRIVER_OVERRIDE=zink GALLIUM_DRIVER=zink`.
 
-**Pipeline now works:** Three Mesa patches fix the EGL→Kopper→Vulkan WSI→dmabuf path:
-1. Fallback from DRM to swrast when GBM unavailable (existing patch)
-2. `dri2_setup_device` uses software EGLDevice when `fd_render_gpu < 0` (new)
-3. Adreno 830 chip_id wildcard (existing patch)
+**Two Mesa patches** fix the EGL → Kopper → Vulkan WSI → dmabuf pipeline:
+1. `mesa-zink-wayland-fallback.patch`: Fall back to kopper/swrast path when DRM/GBM
+   unavailable, and use software EGLDevice when no render node fd exists.
+2. `mesa-adreno830-chipid.patch`: Backport real Adreno 830 GPU config from Mesa main —
+   correct `reg_size_vec4` (96→128), `tile_align_w` (64→96), `a8xx_gen2` properties,
+   and raw magic registers. The stock Mesa 26.0.1 config was "totally fake" and caused
+   GPU faults (KGSL GUILTY reset).
 
-The Vulkan WSI now creates `zwp_linux_buffer_params` with dmabuf fds (LINEAR modifier).
 The compositor destroys the EGL surface before creating the Vulkan swapchain on the
 same ANativeWindow (Android doesn't allow both).
-
-**On-screen rendering corrupted:** Zink hits a non-fatal `DEVICE LOST` error during
-rendering (happens even off-screen). Off-screen, Zink recovers and runs at 1416fps.
-On-screen, the DEVICE LOST disrupts the Vulkan WSI swapchain, causing corrupted/black
-display. This is a Zink/Turnip rendering bug on Adreno 830, not a compositor issue.
-
-**Previous root cause (FIXED):** The Vulkan WSI used `wl_shm` instead of dmabuf because
-`wsi_device->sw = false` (Turnip is `INTEGRATED_GPU`, not CPU). But zero
-`zwp_linux_buffer_params` appear in Wayland protocol traces — the dmabuf path
-is not being taken for unknown reasons. Investigation ongoing.
 
 ### Mesa patches required
 
@@ -184,9 +180,12 @@ Two patches in `patches/` for Mesa 26.0.1:
    Without these, `eglInitialize` fails on Wayland (Mesa assumes DRM always available,
    and `dri2_setup_device` asserts on missing render node fd).
 
-2. **`mesa-adreno830-chipid.patch`**: Wildcard Adreno 830 chip revision
-   (`0x44050000` → `0x440500ff`). Samsung's chip reports `0x44050001` but
-   Mesa 26.0.1 only matches exact `0x44050000`.
+2. **`mesa-adreno830-chipid.patch`**: Backport real Adreno 830 GPU config from Mesa main.
+   Samsung's chip reports `0x44050001` but Mesa 26.0.1 only matches `0x44050000` —
+   the patch wildcards the revision byte (`0x440500ff`). More critically, it replaces
+   the "totally fake" GPU config with correct values: `a8xx_gen2` properties,
+   `reg_size_vec4=128`, `tile_align_w=96`, `a8xx_gen2_raw_magic_regs`. Without this,
+   Turnip triggers KGSL GUILTY resets (GPU faults) during rendering.
 
 **Build:** Must use gcc (not clang — clang produces Turnip that doesn't recognize
 the GPU). Build in proot with `ninja -j4`.
@@ -237,63 +236,87 @@ The GLES renderer (smithay GlesRenderer) is still used for wl_shm clients. Both
 renderers coexist: each window has both an EGL surface and a Vulkan swapchain,
 and the compositor picks the right path based on buffer type.
 
-## Previous Zero-Copy Attempts (all failed on Samsung/Qualcomm)
+## All Approaches Tried
 
-The current mmap fallback involves a CPU copy per frame. We tried every available
-direct zero-copy path on the Samsung SM8750 (Snapdragon 8 Elite). All failed.
+Before finding the working Vulkan import path, we tried every standard zero-copy
+approach on the Samsung SM8750 (Snapdragon 8 Elite). All failed except #10.
 
-### Results summary
+### Summary
 
-| Approach | Result | Details |
-|----------|--------|---------|
-| EGL dmabuf import | **No extension** | Android EGL lacks `EGL_EXT_image_dma_buf_import` entirely |
-| Relax EGL check | **EGL_NO_IMAGE_KHR** | `eglCreateImageKHR(EGL_LINUX_DMA_BUF_EXT)` returns null even without the extension check |
-| AHardwareBuffer from dmabuf fd | **EINVAL (-22)** | Samsung gralloc rejects bare KGSL native_handle — needs vendor-specific metadata ints |
-| GL_EXT_memory_object_fd (DMA_BUF) | **GL_INVALID_VALUE** | `glImportMemoryFdEXT` succeeds but `glTexStorageMem2DEXT` fails — driver only supports Vulkan opaque fd interop |
-| GL_EXT_memory_object_fd (OPAQUE) | **GL_INVALID_VALUE** | Same — opaque fd import appears to succeed but texture binding fails |
-| TEXTURE_TILING_EXT hint | **SIGSEGV** | `glTexParameteri(TEXTURE_TILING_EXT)` crashes Qualcomm driver — not a valid pname |
-| Vulkan layer approach | **Not feasible** | `VK_ANDROID_external_memory_android_hardware_buffer` is compiled out in Turnip's Linux build (proot) |
+| # | Approach | Result |
+|---|----------|--------|
+| 1 | EGL dmabuf import | **No extension** — `EGL_EXT_image_dma_buf_import` not available on Android |
+| 2 | Relax EGL extension check | **EGL_NO_IMAGE_KHR** — `eglCreateImageKHR(EGL_LINUX_DMA_BUF_EXT)` returns null |
+| 3 | AHardwareBuffer from dmabuf fd | **EINVAL** — Samsung gralloc rejects bare KGSL native_handle |
+| 4 | GL_EXT_memory_object_fd (DMA_BUF) | **GL_INVALID_VALUE** — `glTexStorageMem2DEXT` always fails |
+| 5 | GL_EXT_memory_object_fd (OPAQUE) | **GL_INVALID_VALUE** — same failure with opaque fd handle type |
+| 6 | Vulkan bridge (dmabuf → opaque fd → GL) | **GL_INVALID_VALUE** — GL still rejects the memory object |
+| 7 | TEXTURE_TILING_EXT hint | **SIGSEGV** — crashes Qualcomm driver |
+| 8 | Vulkan layer (`VK_ANDROID_external_memory_android_hardware_buffer`) | **Not feasible** — compiled out in Turnip Linux build |
+| 9 | wlroots-android-bridge style (minigbm/gralloc) | **Not attempted** — too invasive |
+| **10** | **Proprietary Qualcomm Vulkan + `DMA_BUF_BIT_EXT`** | **WORKING — zero-copy** |
 
-### Approach A: AHardwareBuffer_createFromHandle — FAILED (EINVAL)
+### #1–2: EGL dmabuf import
 
-**Implemented in:** `patches/smithay/src/backend/renderer/gles/mod.rs` (`import_dmabuf_via_ahb`)
+Android EGL completely lacks `EGL_EXT_image_dma_buf_import`. Even bypassing the
+extension check and calling `eglCreateImageKHR(EGL_LINUX_DMA_BUF_EXT)` directly
+returns `EGL_NO_IMAGE_KHR`. The EGL implementation simply doesn't support dmabuf
+as an image source.
 
-- Private VNDK function in `libnativewindow.so` — symbols load fine via dlsym
-- Constructs `native_handle_t` with dmabuf fd + `AHardwareBuffer_Desc` with width/height/format/stride
-- Samsung gralloc rejects with EINVAL because the `native_handle_t` lacks vendor-specific metadata fields (Samsung gralloc handles contain ~20 extra ints for tile mode, internal format, buffer ID, etc.)
-- **Would work on AOSP/Pixel** devices with a more permissive gralloc
+### #3: AHardwareBuffer from dmabuf fd (EINVAL)
 
-### Approach B: GL_EXT_memory_object_fd — FAILED (GL_INVALID_VALUE)
+Used private VNDK function `AHardwareBuffer_createFromHandle` from `libnativewindow.so`
+(symbols load fine via dlsym). Constructs `native_handle_t` with dmabuf fd +
+`AHardwareBuffer_Desc` with width/height/format/stride. Samsung gralloc rejects with
+EINVAL because the `native_handle_t` lacks vendor-specific metadata fields (Samsung
+gralloc handles contain ~20 extra ints for tile mode, internal format, buffer ID, etc.).
+Would likely work on AOSP/Pixel devices with a more permissive gralloc.
 
-**Implemented in:** `patches/smithay/src/backend/renderer/gles/mod.rs` (`import_dmabuf_via_memory_object`, disabled)
+### #4–5: GL_EXT_memory_object_fd (GL_INVALID_VALUE)
 
-- Device has `GL_EXT_memory_object` + `GL_EXT_memory_object_fd` extensions
-- `glImportMemoryFdEXT(mem, size, GL_HANDLE_TYPE_DMA_BUF_FD_EXT, fd)` succeeds (no GL error)
-- `glTexStorageMem2DEXT(GL_TEXTURE_2D, 1, GL_RGBA8, w, h, mem, 0)` always returns `GL_INVALID_VALUE`
-- Tried: actual width, stride-based width, page-aligned size, LINEAR tiling hint
-- Conclusion: Qualcomm's GL_EXT_memory_object_fd only supports Vulkan-exported opaque fds, not dmabuf fds
+Device has `GL_EXT_memory_object` + `GL_EXT_memory_object_fd` extensions.
+`glImportMemoryFdEXT(mem, size, handle_type, fd)` succeeds (no GL error) for both
+`GL_HANDLE_TYPE_DMA_BUF_FD_EXT` and `GL_HANDLE_TYPE_OPAQUE_FD_EXT`. But
+`glTexStorageMem2DEXT(GL_TEXTURE_2D, 1, GL_RGBA8, w, h, mem, 0)` always returns
+`GL_INVALID_VALUE`. Tried: actual width, stride-based width, page-aligned size.
+Conclusion: Qualcomm's implementation is non-functional for external memory import.
 
-### Approach C: Vulkan layer intercepting swapchain — NOT FEASIBLE
+### #6: Vulkan bridge (dmabuf → opaque fd → GL)
 
-- Would require intercepting `vkCreateSwapchainKHR` and replacing buffer allocation
-- `VK_ANDROID_external_memory_android_hardware_buffer` is gated behind `#if DETECT_OS_ANDROID` in Turnip source
-- Mesa inside proot is a Linux build → extension is compiled out
-- Essentially requires reimplementing the entire Vulkan WSI — too complex
+Attempted to convert KGSL dmabuf fds to Vulkan opaque fds using the proprietary
+Qualcomm Vulkan driver (import via `DMA_BUF_BIT_EXT`, export via `OPAQUE_FD_BIT`),
+then import the opaque fd into GL via `GL_EXT_memory_object_fd`. The Vulkan import/export
+works, but GL still rejects the memory object with `GL_INVALID_VALUE` (same as #4–5).
 
-### Approach D: wlroots-android-bridge style (minigbm/gralloc allocator)
+### #7: TEXTURE_TILING_EXT hint (SIGSEGV)
 
-**Not attempted — would require:**
-- Building minigbm (Google's GBM implementation) for ARM64
-- Configuring Mesa to use GBM with gralloc backend instead of raw KGSL
-- Both client and server allocations become AHB-backed
-- This is the only proven path to zero-copy on Android (used by wlroots-android-bridge)
-- See `refs/wlroots-android-bridge/` — they use `cros_gralloc_handle.h` from minigbm
+Attempted `glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_TILING_EXT, GL_LINEAR_TILING_EXT)`
+to hint that the dmabuf memory is linearly tiled. Crashes the Qualcomm driver immediately
+— `GL_TEXTURE_TILING_EXT` is not a valid pname on this hardware.
 
-**Key insight from wlroots-android-bridge**: they don't try to import bare dmabufs. They
-make the ENTIRE allocation stack use AHBs from the start (client GBM → gralloc → AHB).
-The compositor then presents via `ASurfaceTransaction_setBuffer` directly to SurfaceFlinger.
+### #8: Vulkan layer intercepting swapchain
 
-### EGL import path (works once you have a valid AHardwareBuffer)
+Would require intercepting `vkCreateSwapchainKHR` and replacing buffer allocation with
+AHardwareBuffer-backed memory. `VK_ANDROID_external_memory_android_hardware_buffer` is
+gated behind `#if DETECT_OS_ANDROID` in Turnip source. Mesa inside proot is a Linux build,
+so the extension is compiled out. Would essentially require reimplementing the Vulkan WSI.
+
+### #9: wlroots-android-bridge style (minigbm/gralloc allocator)
+
+Not attempted. Would require building minigbm (Google's GBM implementation) for ARM64,
+configuring Mesa to use GBM with gralloc backend instead of raw KGSL, making both client
+and server allocations AHB-backed. This is the approach used by `refs/wlroots-android-bridge/`
+— they use `cros_gralloc_handle.h` from minigbm and present via `ASurfaceTransaction_setBuffer`.
+Key insight: they don't import bare dmabufs at all — the entire stack uses AHBs from the start.
+
+### #10: Proprietary Qualcomm Vulkan + DMA_BUF_BIT_EXT (WORKING)
+
+The proprietary Qualcomm Vulkan driver accepts Turnip's KGSL dmabufs via
+`VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT` — even though `VK_EXT_external_memory_dma_buf`
+is NOT advertised. Both drivers share the same KGSL kernel driver, so the GPU memory
+is never copied. See "Zero-Copy: Vulkan Compositor" section above for details.
+
+### EGL import path (reference — works with valid AHardwareBuffer)
 
 ```c
 // Step 1: AHB → EGLClientBuffer
@@ -311,8 +334,8 @@ glBindTexture(GL_TEXTURE_2D, tex);
 glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, image);
 ```
 
-This path is confirmed to work (EGL bindings loaded, functions resolved). The
-bottleneck is always step 0: getting a valid AHardwareBuffer from a KGSL dmabuf fd.
+This path works (EGL bindings loaded, functions resolved). The bottleneck is
+step 0: getting a valid AHardwareBuffer from a KGSL dmabuf fd (blocked by #3).
 
 ## References
 

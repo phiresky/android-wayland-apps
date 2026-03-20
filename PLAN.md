@@ -195,5 +195,3 @@ We do not really care about the purity aspects of NixOS though, so we should do 
 - PipeWire camera crashes (SIGBUS in protocol-native module) — disabled for now
 - Mesa must be built with gcc, not clang (clang produces Turnip that doesn't recognize Adreno 830)
 - Mesa build in proot has intermittent `posix_spawn` failures with `-j4`
-- Mesa must be built with gcc, not clang (clang produces Turnip that doesn't recognize Adreno 830)
-- Mesa build in proot has intermittent `posix_spawn` failures with `-j4`

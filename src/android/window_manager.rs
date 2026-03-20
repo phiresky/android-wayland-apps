@@ -89,6 +89,55 @@ pub struct WindowState {
     pub preferred_size: Option<Size<i32, Logical>>,
     /// Vulkan swapchain for zero-copy dmabuf compositing (bypasses GLES).
     pub vk_surface: Option<crate::android::backend::vulkan_renderer::VulkanWindowSurface>,
+    /// Last render method used for this window (for debug overlay).
+    pub last_render_method: &'static str,
+    /// Last buffer size committed by the client.
+    pub last_buffer_size: Option<(u32, u32)>,
+    /// Render mode for this window's client, detected from client env vars.
+    /// `None` means not yet checked.
+    pub render_mode: Option<RenderMode>,
+}
+
+/// How the compositor should render a client's buffers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderMode {
+    /// Zero-copy Vulkan blit for dmabuf surfaces (default).
+    Vulkan,
+    /// GLES compositing with CPU readback (fallback / debug).
+    Gles,
+}
+
+/// Global toggle: true = Vulkan (default), false = GLES.
+/// Toggled from DebugActivity via JNI.
+static USE_VULKAN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn use_vulkan_rendering() -> bool {
+    USE_VULKAN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn set_vulkan_rendering(enabled: bool) {
+    USE_VULKAN.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// JNI callback: toggle render mode from DebugActivity.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_phiresky_wayland_1android_DebugActivity_nativeSetVulkanRendering(
+    _env: JNIEnv,
+    _class: JObject,
+    enabled: jni::sys::jboolean,
+) {
+    let val = enabled != 0;
+    log::info!("Render mode toggled: {}", if val { "Vulkan" } else { "GLES" });
+    set_vulkan_rendering(val);
+}
+
+/// JNI callback: get current render mode.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_phiresky_wayland_1android_DebugActivity_nativeGetVulkanRendering(
+    _env: JNIEnv,
+    _class: JObject,
+) -> jni::sys::jboolean {
+    if use_vulkan_rendering() { 1 } else { 0 }
 }
 
 /// Manages the mapping between XDG toplevels and Android Activities.
@@ -130,6 +179,9 @@ impl WindowManager {
             created_time: Instant::now(),
             preferred_size: None,
             vk_surface: None,
+            last_render_method: "none",
+            last_buffer_size: None,
+            render_mode: None,
         });
 
         window_id

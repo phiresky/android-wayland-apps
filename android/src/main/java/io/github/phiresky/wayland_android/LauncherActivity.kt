@@ -203,7 +203,9 @@ class LauncherActivity : Activity() {
 
     private fun handleBuiltinAction(action: String) {
         if (action == "__builtin:debug") {
-            startActivity(Intent(this, DebugActivity::class.java))
+            startActivity(Intent(this, DebugActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NEW_DOCUMENT)
+            })
         }
     }
 
@@ -218,19 +220,29 @@ class LauncherActivity : Activity() {
 
     private fun scanDesktopFiles(): List<DesktopEntry> {
         val apps = mutableListOf<DesktopEntry>()
-        val appsDir = File("$rootfs/usr/share/applications")
+        val seen = mutableSetOf<String>()
 
-        if (!appsDir.isDirectory) return apps
+        val appsDirs = listOf(
+            "$rootfs/usr/share/applications",
+            "$rootfs/var/lib/flatpak/exports/share/applications",
+            "$rootfs/home/alarm/.local/share/flatpak/exports/share/applications",
+            "$rootfs/home/alarm/.local/share/applications",
+        )
 
-        val files = appsDir.listFiles { _, name -> name.endsWith(".desktop") } ?: return apps
+        for (dirPath in appsDirs) {
+            val dir = File(dirPath)
+            if (!dir.isDirectory) continue
+            val files = dir.listFiles { _, name -> name.endsWith(".desktop") } ?: continue
 
-        for (file in files) {
-            // Check ignore list against filename (without .desktop extension)
-            val baseName = file.name.replace(".desktop", "")
-            if (baseName in ignoreList) continue
+            for (file in files) {
+                val baseName = file.name.replace(".desktop", "")
+                if (baseName in ignoreList) continue
+                if (baseName in seen) continue
+                seen.add(baseName)
 
-            val entry = parseDesktopFile(file)
-            if (entry != null) apps.add(entry)
+                val entry = parseDesktopFile(file)
+                if (entry != null) apps.add(entry)
+            }
         }
 
         // Add extra hardcoded entries

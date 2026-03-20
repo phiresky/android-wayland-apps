@@ -37,7 +37,6 @@
             android:taskAffinity=""
             android:documentLaunchMode="always"
             android:stateNotNeeded="true"
-            android:noHistory="true"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|screenLayout|smallestScreenSize|uiMode|density|navigation" />
 
         <activity

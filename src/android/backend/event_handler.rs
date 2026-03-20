@@ -117,6 +117,10 @@ pub fn dispatch_wayland(backend: &mut WaylandBackend) {
     {
         log::error!("Failed to dispatch clients: {:?}", e);
     }
+
+    backend.compositor.clients.retain(|c| {
+        c.get_data::<ClientState>().is_some_and(|s| s.is_alive())
+    });
     // Process soft keyboard show/hide from text_input_v3.
     if let Some(visible) = backend.compositor.state.soft_keyboard_request.take() {
         let window_id = backend
@@ -360,8 +364,28 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
             use smithay::wayland::dmabuf::get_dmabuf;
             use smithay::backend::allocator::Buffer;
             use smithay::backend::renderer::utils::RendererSurfaceState;
+            use crate::android::window_manager::RenderMode;
+
+            // Set render mode from global toggle on first commit
+            if let Some(wm) = backend.window_manager.as_mut() {
+                if let Some(window) = wm.windows.get_mut(&window_id) {
+                    if window.render_mode.is_none() {
+                        window.render_mode = Some(if crate::android::window_manager::use_vulkan_rendering() {
+                            RenderMode::Vulkan
+                        } else {
+                            RenderMode::Gles
+                        });
+                    }
+                }
+            }
+
+            let render_mode = backend.window_manager.as_ref()
+                .and_then(|wm| wm.windows.get(&window_id))
+                .and_then(|w| w.render_mode)
+                .unwrap_or(RenderMode::Vulkan);
 
             let mut done = false;
+            if render_mode == RenderMode::Vulkan {
             if let Some(ref vk) = backend.vk_renderer {
                 // Check if surface has a dmabuf buffer
                 let dmabuf = with_states(&wl_surface, |states| {
@@ -425,7 +449,15 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                                     match vk.get_or_import_dmabuf(fd.as_raw_fd(), sz.w as u32, sz.h as u32, stride, vk_fmt) {
                                         Ok(imported) => {
                                             match vk.blit_dmabuf_to_swapchain(&imported, vk_surface) {
-                                                Ok(()) => { done = true; }
+                                                Ok(()) => {
+                                                    done = true;
+                                                    if let Some(wm) = backend.window_manager.as_mut() {
+                                                        if let Some(w) = wm.windows.get_mut(&window_id) {
+                                                            w.last_render_method = "VK dmabuf";
+                                                            w.last_buffer_size = Some((sz.w as u32, sz.h as u32));
+                                                        }
+                                                    }
+                                                }
                                                 Err(e) => log::warn!("Vulkan blit failed: {e}"),
                                             }
                                         }
@@ -437,6 +469,7 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                     }
                 }
             }
+            } // render_mode == Vulkan
             done
         };
 
@@ -537,11 +570,14 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
             };
             let _ = cr.submit_surface(egl_surface);
         }
-        // Count rendered frame for FPS tracking.
+        // Count rendered frame for FPS tracking + mark GLES render method.
         if let Some(wm) = backend.window_manager.as_mut()
             && let Some(window) = wm.windows.get_mut(&window_id)
         {
             window.frame_count += 1;
+            if window.last_render_method != "VK dmabuf" {
+                window.last_render_method = "GLES shm";
+            }
         }
 
     }
@@ -564,33 +600,53 @@ fn update_status_overlay(backend: &mut WaylandBackend) {
     let num_clients = backend.compositor.clients.len();
     let num_toplevels = toplevels.len();
 
-    let mut info = format!("Clients: {}  Toplevels: {}  Scale: {:.2}\n", num_clients, num_toplevels, backend.scale_factor);
+    let scale = backend.scale_factor;
+    let mut info = format!("Clients: {}  Toplevels: {}  Scale: {:.2}\n", num_clients, num_toplevels, scale);
 
     if let Some(wm) = backend.window_manager.as_mut() {
         for (id, window) in &mut wm.windows {
-            let title = wl_compositor::with_states(window.surface_kind.wl_surface(), |states| {
-                states
-                    .data_map
+            let wl_surface = window.surface_kind.wl_surface();
+            let (title, app_id, buf_size, has_frac_scale) = wl_compositor::with_states(wl_surface, |states| {
+                let title = states.data_map
                     .get::<XdgToplevelSurfaceData>()
                     .and_then(|data| data.lock().ok())
                     .and_then(|attrs| attrs.title.clone())
-                    .unwrap_or_default()
+                    .unwrap_or_default();
+                let app_id = states.data_map
+                    .get::<XdgToplevelSurfaceData>()
+                    .and_then(|data| data.lock().ok())
+                    .and_then(|attrs| attrs.app_id.clone())
+                    .unwrap_or_default();
+                // Get buffer logical size from renderer surface state
+                type RssType = std::sync::Mutex<smithay::backend::renderer::utils::RendererSurfaceState>;
+                let buf_size = states.data_map.get::<RssType>()
+                    .and_then(|rss| rss.lock().ok())
+                    .and_then(|guard| guard.buffer_size());
+                // Check if client bound fractional_scale
+                let has_frac = states.data_map
+                    .get::<smithay::wayland::fractional_scale::FractionalScaleStateUserData>()
+                    .is_some();
+                (title, app_id, buf_size, has_frac)
             });
-            let has_surface = window.egl_surface.is_some();
             let fps = if elapsed_secs > 0.0 {
                 window.frame_count as f64 / elapsed_secs
             } else {
                 0.0
             };
             window.frame_count = 0;
+            let display_name = if !title.is_empty() { &title } else if !app_id.is_empty() { &app_id } else { "(untitled)" };
+            let phys = format!("{}x{}", window.size.w, window.size.h);
+            let logical_w = (window.size.w as f64 / scale).round() as i32;
+            let logical_h = (window.size.h as f64 / scale).round() as i32;
+            let buf_str = buf_size.map(|s| format!("{}x{}", s.w, s.h)).unwrap_or_else(|| "?".into());
+            let pref_str = window.preferred_size.map(|p| format!("{}x{}", p.w, p.h)).unwrap_or_else(|| "-".into());
+            let surface_type = if window.vk_surface.is_some() { "VK" } else if window.egl_surface.is_some() { "EGL" } else { "-" };
+            let frac = if has_frac_scale { "frac" } else { "1x" };
             info.push_str(&format!(
-                "  [{}] {}  {}x{}  {}  {:.1} fps\n",
-                id,
-                if title.is_empty() { "(untitled)" } else { &title },
-                window.size.w,
-                window.size.h,
-                if has_surface { "visible" } else { "hidden" },
-                fps,
+                "  [{}] {} | {}  phys={}  log={}x{}  buf={}  pref={}  {} {} {:.0}fps\n",
+                id, display_name, window.last_render_method,
+                phys, logical_w, logical_h, buf_str, pref_str,
+                surface_type, frac, fps,
             ));
         }
     }
@@ -949,3 +1005,4 @@ fn handle_activity_key(
         );
     }
 }
+

@@ -88,6 +88,7 @@ pub fn run_compositor_loop(setup_done: Arc<AtomicBool>) {
     let window_manager = WindowManager::new();
 
     // Init Vulkan renderer (proprietary Qualcomm driver, for zero-copy dmabuf compositing).
+    // Per-client override: launch with WAYLAND_ANDROID_RENDER_MODE=gles to force GLES path.
     let vk_renderer = match crate::android::backend::vulkan_renderer::VulkanRenderer::new() {
         Ok(vk) => {
             log::info!("Vulkan renderer initialized");

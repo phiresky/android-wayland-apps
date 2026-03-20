@@ -87,7 +87,7 @@ impl ArchProcess {
                 "PROOT_LOADER",
                 context.native_library_dir.join("libproot_loader.so"),
             )
-            .env("PROOT_TMP_DIR", context.data_dir);
+            .env("PROOT_TMP_DIR", &context.data_dir);
 
         if *USE_NO_SECCOMP.get().unwrap_or(&false) {
             process.env("PROOT_NO_SECCOMP", "1");
@@ -163,7 +163,11 @@ impl ArchProcess {
             .arg("QT_QPA_PLATFORM=wayland")
             .arg("GTK_OVERLAY_SCROLLING=0")
             .arg("TERM=xterm-256color")
-            .arg("SHELL=/bin/bash");
+            .arg("SHELL=/bin/bash")
+            // Firefox sandbox uses seccomp which conflicts with proot's own seccomp
+            .arg("MOZ_DISABLE_CONTENT_SANDBOX=1")
+            .arg("MOZ_DISABLE_GMP_SANDBOX=1")
+            .arg("MOZ_DISABLE_SOCKET_PROCESS_SANDBOX=1");
 
         // LD_PRELOAD: fix_ttyname shim if present
         let fix_ttyname = Path::new(config::ARCH_FS_ROOT).join("usr/lib/fix_ttyname.so");
@@ -171,10 +175,19 @@ impl ArchProcess {
             process.arg("LD_PRELOAD=/usr/lib/fix_ttyname.so");
         }
 
-        // Run sh directly — --root-id already virtualizes the UID inside proot,
-        // and USER/HOME are set above. runuser/su would call setuid() which fails
-        // with PROOT_NO_SECCOMP=1 since the kernel rejects it from a non-root process.
-        process.arg("sh").arg("-c").arg(&self.command);
+        let wrapped_command = self.command.clone();
+
+        // --root-id fakes UID 0 for proot internals (bind mounts etc.).
+        // For non-root users, drop to the target user via `su` so the
+        // process actually runs with the right uid/gid and $HOME.
+        if user == "root" {
+            process.arg("sh").arg("-c").arg(&wrapped_command);
+        } else {
+            // su (without -l) changes uid/gid but preserves the environment.
+            // We already set HOME/USER/PATH above via env -i, so we just need
+            // the uid change. proot's seccomp intercepts setuid to make this work.
+            process.arg("su").arg(user).arg("-c").arg(&wrapped_command);
+        }
 
         let failed = || Output {
             status: ExitStatus::from_raw(1),

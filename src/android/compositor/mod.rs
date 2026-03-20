@@ -269,15 +269,32 @@ pub fn send_frames_surface_tree(surface: &WlSurface, time: u32) {
     );
 }
 
-#[derive(Default)]
 pub struct ClientState {
     compositor_state: CompositorClientState,
+    alive: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Default for ClientState {
+    fn default() -> Self {
+        Self {
+            compositor_state: CompositorClientState::default(),
+            alive: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        }
+    }
+}
+
+impl ClientState {
+    pub fn is_alive(&self) -> bool {
+        self.alive.load(std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 impl ClientData for ClientState {
     fn initialized(&self, _client_id: ClientId) {}
 
-    fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {}
+    fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {
+        self.alive.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 impl OutputHandler for State {}

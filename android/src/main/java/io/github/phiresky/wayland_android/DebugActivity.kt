@@ -8,11 +8,12 @@ import android.os.Looper
 import android.util.TypedValue
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.Switch
 import android.widget.TextView
 
 /**
  * Full-screen activity showing live compositor debug info (clients, toplevels, FPS).
- * Auto-refreshes every second while visible.
+ * Auto-refreshes every second while visible. Includes a Vulkan/GLES render mode toggle.
  */
 class DebugActivity : Activity() {
 
@@ -47,6 +48,19 @@ class DebugActivity : Activity() {
             setPadding(dp(16), dp(16), dp(16), dp(12))
         }
         root.addView(title)
+
+        // Vulkan/GLES toggle
+        val toggle = Switch(this).apply {
+            text = "Vulkan rendering (new windows)"
+            setTextColor(0xFFCCCCCC.toInt())
+            isChecked = nativeGetVulkanRendering()
+            setPadding(dp(16), dp(4), dp(16), dp(4))
+            setOnCheckedChangeListener { _, isChecked ->
+                nativeSetVulkanRendering(isChecked)
+                text = if (isChecked) "Vulkan rendering (new windows)" else "GLES rendering (new windows)"
+            }
+        }
+        root.addView(toggle)
 
         // Scrollable status content
         val scroll = ScrollView(this).apply {
@@ -85,4 +99,13 @@ class DebugActivity : Activity() {
         TypedValue.applyDimension(
             TypedValue.COMPLEX_UNIT_DIP, value.toFloat(), resources.displayMetrics
         ).toInt()
+
+    private external fun nativeSetVulkanRendering(enabled: Boolean)
+    private external fun nativeGetVulkanRendering(): Boolean
+
+    companion object {
+        init {
+            System.loadLibrary("android_wayland_launcher")
+        }
+    }
 }

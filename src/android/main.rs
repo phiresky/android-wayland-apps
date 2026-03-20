@@ -68,8 +68,9 @@ extern "system" fn Java_io_github_phiresky_wayland_1android_MainActivity_nativeI
     // Firefox may be installed after initial setup.
     setup::setup_firefox_config();
 
-    // Disable bwrap (bubblewrap) — it can't work inside proot.
+    // Disable bwrap/flatpak-spawn — sandboxing can't work inside proot.
     setup::disable_bwrap();
+    setup::disable_flatpak_spawn();
 
     // Check if rootfs is present AND dependencies are installed.
     let needs_setup = !setup::is_setup_complete();
