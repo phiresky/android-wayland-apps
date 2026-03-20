@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Run a command inside the app's proot Arch rootfs on the device.
-# Usage: ./adb_runas.sh [user] [command...]
-#        ./adb_runas.sh alarm pacman -S mesa-demos
-#        ./adb_runas.sh pacman -S mesa-demos   (runs as root)
-#        ./adb_runas.sh                        (interactive root shell)
-#        ./adb_runas.sh alarm                  (interactive alarm shell)
+# Runs as alarm user by default, set USERNAME=root for root.
+# Usage: ./adb_runas.sh [command...]
+#        ./adb_runas.sh pacman -S mesa-demos   (runs as alarm)
+#        ./adb_runas.sh                        (interactive alarm shell)
+#        USERNAME=root ./adb_runas.sh              (interactive root shell)
+#        USERNAME=root ./adb_runas.sh pacman -S mesa-demos
 #        echo 'complex | cmd' | ./adb_runas.sh (stdin script, no escaping needed)
 #        ./adb_runas.sh <<'EOF'                (heredoc script)
 #        MOZ_ENABLE_WAYLAND=1 firefox 2>&1
@@ -18,12 +19,8 @@ ROOTFS=./files/arch
 APK_DIR=$(adb shell pm path "$PKG" </dev/null | grep base.apk | head -1 | sed 's|package:||;s|/base.apk||' | tr -d '\r')
 LIBDIR="$APK_DIR/lib/arm64"
 
-# Check if first arg is a known user (alarm) or root
-PROOT_USER=root
-if [ $# -gt 0 ] && [ "$1" = "alarm" ]; then
-    PROOT_USER="$1"
-    shift
-fi
+# Default to alarm user; override with USERNAME=root
+PROOT_USER="${USERNAME:-alarm}"
 
 if [ "$PROOT_USER" = "root" ]; then
     HOMEDIR=/root

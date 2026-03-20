@@ -8,8 +8,9 @@ Rust-based Wayland compositor on Android. Linux apps run in proot+Arch ARM, rend
 ./build-install.sh               # source .env, cargo ndk build, gradlew installDebug
 ./build-install.sh --release      # pass extra args to cargo ndk build
 ./run.sh                  # force-stop, start app, stream filtered logcat
-./adb_runas.sh            # interactive shell in proot Arch rootfs
-./adb_runas.sh pacman -S mesa-demos   # run a command in proot
+./adb_runas.sh            # interactive shell in proot Arch rootfs (as alarm)
+./adb_runas.sh pacman -S mesa-demos   # run a command in proot (as alarm)
+USERNAME=root ./adb_runas.sh         # interactive root shell
 ```
 
 - `cargo ndk` args (`-t arm64-v8a --platform 35`) are set in `.env` via `CARGO_NDK_TARGET`/`CARGO_NDK_PLATFORM`
