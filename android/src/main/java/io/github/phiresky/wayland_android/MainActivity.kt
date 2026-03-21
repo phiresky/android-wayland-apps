@@ -46,6 +46,11 @@ class MainActivity : Activity() {
                         .addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
                 )
             } else {
+                // Restore persisted PipeWire toggle before nativeInit reads it
+                val prefs = getSharedPreferences("compositor_prefs", MODE_PRIVATE)
+                val pwEnabled = prefs.getBoolean("pipewire_enabled", false)
+                nativeSetPipewireEnabled(pwEnabled)
+
                 needsSetup = nativeInit(this)
                 compositorStarted = true
             }
@@ -169,6 +174,9 @@ class MainActivity : Activity() {
         // Native method: initializes compositor, returns true if first-run setup is needed.
         @JvmStatic
         private external fun nativeInit(activity: Activity): Boolean
+
+        @JvmStatic
+        private external fun nativeSetPipewireEnabled(enabled: Boolean)
 
         /** Called from native code via JNI to update the status text. */
         @JvmStatic

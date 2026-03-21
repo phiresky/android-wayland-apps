@@ -1,11 +1,15 @@
 package io.github.phiresky.wayland_android
 
 import android.app.Activity
+import android.app.AlarmManager
+import android.app.PendingIntent
+import android.content.Intent
 import android.graphics.Typeface
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.util.TypedValue
+import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Switch
@@ -82,9 +86,29 @@ class DebugActivity : Activity() {
             setPadding(dp(16), dp(4), dp(16), dp(4))
             setOnCheckedChangeListener { _, isChecked ->
                 nativeSetPipewireEnabled(isChecked)
+                getSharedPreferences("compositor_prefs", MODE_PRIVATE)
+                    .edit().putBoolean("pipewire_enabled", isChecked).apply()
             }
         }
         root.addView(pipewireToggle)
+
+        // Restart button — kills the process so PipeWire toggle takes effect
+        val restartBtn = Button(this).apply {
+            text = "Restart App"
+            setPadding(dp(16), dp(4), dp(16), dp(4))
+            setOnClickListener {
+                val intent = packageManager.getLaunchIntentForPackage(packageName)!!
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                val pending = PendingIntent.getActivity(
+                    this@DebugActivity, 0, intent,
+                    PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE
+                )
+                val am = getSystemService(ALARM_SERVICE) as AlarmManager
+                am.setExact(AlarmManager.RTC, System.currentTimeMillis() + 500, pending)
+                android.os.Process.killProcess(android.os.Process.myPid())
+            }
+        }
+        root.addView(restartBtn)
 
         // Scrollable status content
         val scroll = ScrollView(this)

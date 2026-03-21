@@ -27,6 +27,7 @@ dependencies = [
  "libc",
  "libloading",
  "pathdiff",
+ "pipewire-audio",
  "pipewire-cam",
  "raw-window-handle",
  "smithay",
@@ -908,6 +909,15 @@ dependencies = [
  "once_cell",
  "pipewire-sys",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "pipewire-audio"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "pipewire",
+ "tracing",
 ]
 
 [[package]]

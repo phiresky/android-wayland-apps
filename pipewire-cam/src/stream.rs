@@ -49,6 +49,14 @@ impl PipeWireCamera {
         let _ = std::fs::remove_file(&vc_link);
         let _ = std::os::unix::fs::symlink(&vc_lib, &vc_link);
 
+        // audioconvert SPA plugin (needed by adapter module for audio streams)
+        let ac_dir = format!("{}/audioconvert", spa_dir);
+        let _ = std::fs::create_dir_all(&ac_dir);
+        let ac_lib = format!("{}/libspa-audioconvert.so", module_dir);
+        let ac_link = format!("{}/libspa-audioconvert.so", ac_dir);
+        let _ = std::fs::remove_file(&ac_link);
+        let _ = std::os::unix::fs::symlink(&ac_lib, &ac_link);
+
         // Minimal PipeWire client config
         let config_dir = format!("{}/pw-config", data_dir);
         let _ = std::fs::create_dir_all(&config_dir);
@@ -59,6 +67,7 @@ impl PipeWireCamera {
              context.spa-libs = {\n\
                  support.* = support/libspa-support\n\
                  videoconvert = videoconvert/libspa-videoconvert\n\
+                 audioconvert = audioconvert/libspa-audioconvert\n\
              }\n\
              context.modules = [\n\
                  { name = libpipewire-module-protocol-native }\n\

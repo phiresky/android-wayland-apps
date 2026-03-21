@@ -93,6 +93,7 @@ extern "system" fn Java_io_github_phiresky_wayland_1android_MainActivity_nativeI
 
     if crate::core::config::pipewire_enabled() {
         crate::android::camera::start();
+        crate::android::audio::start();
     }
 
     // Spawn the compositor on a background thread, independent of Activity lifecycle.
