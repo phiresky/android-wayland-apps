@@ -30,7 +30,7 @@ pub fn clear_ui_logger() {
 
 /// Log to both logcat and the optional UI logger.
 fn setup_log(msg: &str) {
-    log::info!("{}", msg);
+    tracing::info!("{}", msg);
     if let Ok(guard) = UI_LOGGER.lock()
         && let Some(f) = guard.as_ref() {
             f(msg);
@@ -264,7 +264,7 @@ fn setup_sysdata() {
 
     for (path, content) in proc_files {
         fs::write(fs_root.join(path), content)
-            .unwrap_or_else(|e| log::error!("[setup] Failed to write {}: {}", path, e));
+            .unwrap_or_else(|e| tracing::error!("[setup] Failed to write {}: {}", path, e));
     }
 }
 
@@ -313,7 +313,7 @@ pub fn setup_firefox_config() {
     let autoconfig_js = "pref(\"general.config.filename\", \"wayland_android.cfg\");\n\
                          pref(\"general.config.obscure_value\", 0);\n";
     fs::write(pref_dir.join("autoconfig.js"), autoconfig_js)
-        .unwrap_or_else(|e| log::error!("[setup] Failed to write autoconfig.js: {}", e));
+        .unwrap_or_else(|e| tracing::error!("[setup] Failed to write autoconfig.js: {}", e));
 
     // The .cfg file must start with a comment line (Firefox requirement)
     let cfg = "// Auto-configured by wayland_android for proot compatibility\n\
@@ -321,7 +321,7 @@ pub fn setup_firefox_config() {
                defaultPref(\"media.cubeb.sandbox\", false);\n\
                defaultPref(\"security.sandbox.warn_unprivileged_namespaces\", false);\n";
     fs::write(&cfg_file, cfg)
-        .unwrap_or_else(|e| log::error!("[setup] Failed to write Firefox config: {}", e));
+        .unwrap_or_else(|e| tracing::error!("[setup] Failed to write Firefox config: {}", e));
 
 }
 
@@ -340,7 +340,7 @@ fn setup_dns() {
         let _ = fs::create_dir_all(parent);
     }
     fs::write(&resolv_conf, "nameserver 8.8.8.8\n")
-        .unwrap_or_else(|e| log::error!("[setup] Failed to write resolv.conf: {}", e));
+        .unwrap_or_else(|e| tracing::error!("[setup] Failed to write resolv.conf: {}", e));
 }
 
 /// Create the `alpm` user/group required by pacman >= 7.0 for downloads.
@@ -456,7 +456,7 @@ fn setup_user() {
         &sudoers_file,
         format!("{} ALL=(ALL) NOPASSWD: ALL\n", user),
     )
-    .unwrap_or_else(|e| log::error!("[setup] Failed to write sudoers for {}: {}", user, e));
+    .unwrap_or_else(|e| tracing::error!("[setup] Failed to write sudoers for {}: {}", user, e));
 }
 
 /// Replace bwrap (bubblewrap) with a shim that runs commands unsandboxed.
@@ -478,7 +478,7 @@ pub fn disable_bwrap() {
         }
         // Real binary — move it aside
         if let Err(e) = fs::rename(&bwrap, &bwrap_real) {
-            log::error!("[setup] Failed to rename bwrap: {}", e);
+            tracing::error!("[setup] Failed to rename bwrap: {}", e);
             return;
         }
     }
@@ -656,7 +656,7 @@ else:
 
     setup_log("[setup] Installing bwrap shim (sandboxing incompatible with proot)");
     if let Err(e) = fs::write(&bwrap, shim) {
-        log::error!("[setup] Failed to write bwrap shim: {}", e);
+        tracing::error!("[setup] Failed to write bwrap shim: {}", e);
         return;
     }
 
@@ -710,7 +710,7 @@ exec "$@"
 
     setup_log("[setup] Installing flatpak-spawn shim (sandboxing incompatible with proot)");
     if let Err(e) = fs::write(&flatpak_spawn, shim) {
-        log::error!("[setup] Failed to write flatpak-spawn shim: {}", e);
+        tracing::error!("[setup] Failed to write flatpak-spawn shim: {}", e);
         return;
     }
 
@@ -744,7 +744,7 @@ fn fix_bsdtar() {
     let _ = fs::create_dir_all(fs_root.join("usr/local/bin"));
     let shim = "#!/bin/sh\n/usr/bin/bsdtar \"$@\"\nexit 0\n";
     if let Err(e) = fs::write(&wrapper, shim) {
-        log::error!("[setup] Failed to write bsdtar wrapper: {}", e);
+        tracing::error!("[setup] Failed to write bsdtar wrapper: {}", e);
         return;
     }
 
@@ -806,7 +806,7 @@ char *ttyname(int fd) {
 "#;
 
     if let Err(e) = fs::write(&c_source, source_code) {
-        log::error!("[setup] Failed to write fix_ttyname.c: {}", e);
+        tracing::error!("[setup] Failed to write fix_ttyname.c: {}", e);
         return;
     }
 
@@ -824,7 +824,7 @@ char *ttyname(int fd) {
     {
         setup_log("[setup] ttyname fix built successfully");
     } else {
-        log::error!(
+        tracing::error!(
             "[setup] Failed to build fix_ttyname.so: {}",
             String::from_utf8_lossy(&output.stderr)
         );
@@ -847,7 +847,7 @@ fn setup_storage_mountpoints() {
         let path = fs_root.join(dir);
         if !path.exists() {
             if let Err(e) = fs::create_dir_all(&path) {
-                log::error!("[setup] Failed to create /{}: {}", dir, e);
+                tracing::error!("[setup] Failed to create /{}: {}", dir, e);
             }
         }
     }
@@ -871,7 +871,7 @@ fn setup_pipewire_config() {
     );
     if patched != conf {
         if let Err(e) = fs::write(&conf_path, &patched) {
-            log::error!("[setup] Failed to patch pipewire.conf: {e}");
+            tracing::error!("[setup] Failed to patch pipewire.conf: {e}");
         }
     }
 }
@@ -914,7 +914,7 @@ fn setup_flatpak_dbus() {
 </busconfig>
 "#;
     fs::write(&dbus_conf, conf)
-        .unwrap_or_else(|e| log::error!("[setup] Failed to write dbus config: {}", e));
+        .unwrap_or_else(|e| tracing::error!("[setup] Failed to write dbus config: {}", e));
 
     // Helper script to start both buses (idempotent)
     let _ = fs::create_dir_all(fs_root.join("usr/local/bin"));
@@ -952,7 +952,7 @@ for _sock in wayland-0 pipewire-0; do
 done
 "#;
     if let Err(e) = fs::write(&start_dbus, script) {
-        log::error!("[setup] Failed to write start-dbus: {}", e);
+        tracing::error!("[setup] Failed to write start-dbus: {}", e);
         return;
     }
 
@@ -978,7 +978,7 @@ fn setup_flatpak_system_repo() {
     }
     let config = "[core]\nrepo_version=1\nmode=bare-user-only\n";
     fs::write(&config_file, config)
-        .unwrap_or_else(|e| log::error!("[setup] Failed to write flatpak repo config: {}", e));
+        .unwrap_or_else(|e| tracing::error!("[setup] Failed to write flatpak repo config: {}", e));
 }
 
 /// Fix the xkb symlink if it's absolute (won't resolve outside proot).
@@ -1024,6 +1024,6 @@ pub fn fix_xkb_symlink() {
     ));
     let _ = fs::remove_file(&xkb_path);
     if let Err(e) = symlink(&rel_target, &xkb_path) {
-        log::error!("[setup] Failed to create xkb symlink: {}", e);
+        tracing::error!("[setup] Failed to create xkb symlink: {}", e);
     }
 }

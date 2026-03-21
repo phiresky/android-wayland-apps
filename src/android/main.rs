@@ -36,23 +36,21 @@ extern "system" fn Java_io_github_phiresky_wayland_1android_MainActivity_nativeI
     activity: JObject,
 ) -> bool {
     if INITIALIZED.swap(true, Ordering::SeqCst) {
-        log::info!("nativeInit called again — compositor already running");
+        tracing::info!("nativeInit called again — compositor already running");
         return false;
     }
 
     unsafe { std::env::set_var("RUST_BACKTRACE", "full") };
 
-    // Initialize Android logger — Info level to avoid flooding logcat buffer.
-    android_logger::init_once(
-        android_logger::Config::default().with_max_level(log::LevelFilter::Info),
-    );
+    // Initialize tracing subscriber for Android logcat output.
+    crate::android::utils::android_tracing::AndroidLogSubscriber::init();
 
     // Store global JNI context (VM + Activity).
     jni_context::init(&mut env, &activity);
 
     // Build the application context (resolves data_dir, native_library_dir, etc.)
     if let Err(e) = ApplicationContext::build(&mut env, &activity) {
-        log::error!("Failed to build ApplicationContext: {e}");
+        tracing::error!("Failed to build ApplicationContext: {e}");
         return false;
     }
 
@@ -89,7 +87,7 @@ extern "system" fn Java_io_github_phiresky_wayland_1android_MainActivity_nativeI
             setup::clear_ui_logger();
             let _ = hide_setup_overlay();
             done.store(true, Ordering::Release);
-            log::info!("Background setup complete");
+            tracing::info!("Background setup complete");
         });
     }
 
@@ -134,7 +132,7 @@ fn hide_setup_overlay() -> Result<(), jni::errors::Error> {
             "(Landroid/app/Activity;)V",
             &[JValue::Object(activity)],
         )?;
-        log::info!("Setup overlay hidden");
+        tracing::info!("Setup overlay hidden");
         Ok(())
     })
 }

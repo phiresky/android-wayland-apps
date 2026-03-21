@@ -80,9 +80,9 @@ pub fn dispatch_wayland(backend: &mut WaylandBackend) {
                 .collect();
             for (kind, window_id) in lookups {
                 if let Some(window_id) = window_id {
-                    log::info!("{kind} destroyed, finishing Activity window_id={window_id}");
+                    tracing::info!("{kind} destroyed, finishing Activity window_id={window_id}");
                     if let Err(e) = finish_activity(window_id) {
-                        log::error!("Failed to finish Activity for window_id={window_id}: {e}");
+                        tracing::error!("Failed to finish Activity for window_id={window_id}: {e}");
                     }
                     wm.remove_window(window_id);
                 }
@@ -103,11 +103,11 @@ pub fn dispatch_wayland(backend: &mut WaylandBackend) {
                 .insert_client(stream, Arc::new(ClientState::default()))
             {
                 Ok(client) => backend.compositor.clients.push(client),
-                Err(e) => log::error!("Failed to insert client: {:?}", e),
+                Err(e) => tracing::error!("Failed to insert client: {:?}", e),
             }
         }
         Ok(None) => {}
-        Err(e) => log::error!("Failed to accept listener: {:?}", e),
+        Err(e) => tracing::error!("Failed to accept listener: {:?}", e),
     }
 
     if let Err(e) = backend
@@ -115,7 +115,7 @@ pub fn dispatch_wayland(backend: &mut WaylandBackend) {
         .display
         .dispatch_clients(&mut backend.compositor.state)
     {
-        log::error!("Failed to dispatch clients: {:?}", e);
+        tracing::error!("Failed to dispatch clients: {:?}", e);
     }
 
     backend.compositor.clients.retain(|c| {
@@ -137,7 +137,7 @@ pub fn dispatch_wayland(backend: &mut WaylandBackend) {
             });
         if let Some(window_id) = window_id {
             if let Err(e) = set_soft_keyboard_visible(window_id, visible) {
-                log::error!("Failed to set soft keyboard visibility: {e}");
+                tracing::error!("Failed to set soft keyboard visibility: {e}");
             }
         }
     }
@@ -147,7 +147,7 @@ pub fn dispatch_wayland(backend: &mut WaylandBackend) {
         .display
         .flush_clients()
     {
-        log::error!("Failed to flush clients: {:?}", e);
+        tracing::error!("Failed to flush clients: {:?}", e);
     }
 }
 
@@ -188,13 +188,13 @@ fn process_window_events(backend: &mut WaylandBackend) {
                         .and_then(|r| r.create_surface_for_native_window(handle).ok());
 
                     if let Some(surface) = surface {
-                        log::info!("Created EGL surface for window_id={}", window_id);
+                        tracing::info!("Created EGL surface for window_id={}", window_id);
                         if let Some(wm) = backend.window_manager.as_mut()
                             && let Some(window) = wm.windows.get_mut(&window_id) {
                                 window.egl_surface = Some(surface);
                             }
                     } else {
-                        log::error!("Failed to create EGL surface for window_id={}", window_id);
+                        tracing::error!("Failed to create EGL surface for window_id={}", window_id);
                     }
                 }
             }
@@ -233,7 +233,7 @@ fn process_window_events(backend: &mut WaylandBackend) {
                             SurfaceKind::Toplevel(toplevel) => {
                                 // Configure toplevel with logical size so apps render
                                 // at the right scale for the display density.
-                                log::info!("SurfaceChanged window_id={window_id}: physical={width}x{height} -> configure logical={logical_w}x{logical_h} (preferred={:?}, scale={scale})",
+                                tracing::info!("SurfaceChanged window_id={window_id}: physical={width}x{height} -> configure logical={logical_w}x{logical_h} (preferred={:?}, scale={scale})",
                                     window.preferred_size);
                                 toplevel.with_pending_state(|state| {
                                     state.size = Some((logical_w, logical_h).into());
@@ -256,7 +256,7 @@ fn process_window_events(backend: &mut WaylandBackend) {
                                 |fs| fs.set_preferred_scale(scale),
                             );
                         });
-                        log::info!("Window {} resized to {}x{} (logical {}x{}, scale {})",
+                        tracing::info!("Window {} resized to {}x{} (logical {}x{}, scale {})",
                             window_id, width, height, logical_w, logical_h, scale);
                     }
             }
@@ -265,7 +265,7 @@ fn process_window_events(backend: &mut WaylandBackend) {
                     && let Some(window) = wm.windows.get_mut(&window_id) {
                         window.egl_surface = None;
                         window.native_window = None;
-                        log::info!("Surface destroyed for window_id={}", window_id);
+                        tracing::info!("Surface destroyed for window_id={}", window_id);
                     }
             }
             WindowEvent::WindowClosed { window_id, is_finishing } => {
@@ -279,7 +279,7 @@ fn process_window_events(backend: &mut WaylandBackend) {
                         wm.remove_window(window_id);
                     }
                 } else {
-                    log::info!("Window {} destroyed by Android (config change), keeping toplevel alive", window_id);
+                    tracing::info!("Window {} destroyed by Android (config change), keeping toplevel alive", window_id);
                 }
             }
             WindowEvent::Touch {
@@ -465,7 +465,7 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                         if let Some(wm) = backend.window_manager.as_mut() {
                             if let Some(window) = wm.windows.get_mut(&window_id) {
                                 if window.egl_surface.is_some() {
-                                    log::info!("Destroying EGL surface for Vulkan takeover on window_id={}", window_id);
+                                    tracing::info!("Destroying EGL surface for Vulkan takeover on window_id={}", window_id);
                                     window.egl_surface = None;
                                 }
                                 window.needs_redraw = true;
@@ -480,11 +480,11 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                                     };
                                     match result {
                                         Ok(vk_surface) => {
-                                            log::info!("Vulkan surface for window_id={} at {}x{}", window_id, buf_w, buf_h);
+                                            tracing::info!("Vulkan surface for window_id={} at {}x{}", window_id, buf_w, buf_h);
                                             window.vk_surface = Some(vk_surface);
                                         }
                                         Err(e) => {
-                                            log::error!("Vulkan surface creation failed: {e}");
+                                            tracing::error!("Vulkan surface creation failed: {e}");
                                             window.vk_surface = None;
                                         }
                                     }
@@ -519,10 +519,10 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                                                         }
                                                     }
                                                 }
-                                                Err(e) => log::warn!("Vulkan blit failed: {e}"),
+                                                Err(e) => tracing::warn!("Vulkan blit failed: {e}"),
                                             }
                                         }
-                                        Err(e) => log::warn!("Vulkan dmabuf import failed: {e}"),
+                                        Err(e) => tracing::warn!("Vulkan dmabuf import failed: {e}"),
                                     }
                                     }
                                 }
@@ -557,7 +557,7 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
             };
 
             let Ok((renderer, mut framebuffer)) = cr.bind_surface(egl_surface) else {
-                log::error!("Failed to bind surface for window_id={}", window_id);
+                tracing::error!("Failed to bind surface for window_id={}", window_id);
                 continue;
             };
 
@@ -596,18 +596,18 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
 
             let Ok(mut frame) = renderer.render(&mut framebuffer, size, Transform::Flipped180)
             else {
-                log::error!("Failed to begin render for window_id={}", window_id);
+                tracing::error!("Failed to begin render for window_id={}", window_id);
                 continue;
             };
 
             if let Err(e) = frame.clear(Color32F::new(0.0, 0.0, 0.0, 1.0), &[damage]) {
-                log::warn!("frame.clear failed for window_id={}: {e:?}", window_id);
+                tracing::warn!("frame.clear failed for window_id={}: {e:?}", window_id);
             }
             if let Err(e) = draw_render_elements(&mut frame, scale, &elements, &[damage]) {
-                log::warn!("draw_render_elements failed for window_id={}: {e:?}", window_id);
+                tracing::warn!("draw_render_elements failed for window_id={}: {e:?}", window_id);
             }
             if let Err(e) = frame.finish() {
-                log::warn!("frame.finish failed for window_id={}: {e:?}", window_id);
+                tracing::warn!("frame.finish failed for window_id={}: {e:?}", window_id);
             }
 
             send_frames_surface_tree(&wl_surface, time);
@@ -713,9 +713,9 @@ fn update_status_overlay(backend: &mut WaylandBackend) {
         }
     }
 
-    log::debug!("Status: {}", info.trim());
+    tracing::debug!("Status: {}", info.trim());
     if let Err(e) = send_status_jni(&info) {
-        log::error!("Status overlay JNI call failed: {e}");
+        tracing::error!("Status overlay JNI call failed: {e}");
     }
 }
 
@@ -795,7 +795,7 @@ fn launch_pending_activities(backend: &mut WaylandBackend) {
                          (s.h as f64 * scale).round() as i32 + DEX_TITLE_BAR_HEIGHT)
                     }).filter(|&(w, h)| w > 0 && h > 0);
 
-                    log::info!("launch_pending: window_id={id} geo_size={geo_size:?} bounds={bounds:?} elapsed={}ms",
+                    tracing::info!("launch_pending: window_id={id} geo_size={geo_size:?} bounds={bounds:?} elapsed={}ms",
                         w.created_time.elapsed().as_millis());
                     if bounds.is_some() {
                         // Client has committed with geometry — launch with bounds.
@@ -1056,7 +1056,7 @@ fn handle_activity_key(
     }
 
     let Some(linux_keycode) = super::keymap::android_keycode_to_smithay(key_code) else {
-        log::debug!("Unmapped Android keycode: {}", key_code);
+        tracing::debug!("Unmapped Android keycode: {}", key_code);
         return;
     };
     let key_state = if action == ACTION_DOWN {

@@ -21,7 +21,7 @@ pub fn run_compositor_loop(setup_done: Arc<AtomicBool>) {
     // Create eventfd for waking the compositor from JNI/Wayland commits.
     let wake_fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK) };
     if wake_fd < 0 {
-        log::error!("Failed to create eventfd");
+        tracing::error!("Failed to create eventfd");
         return;
     }
 
@@ -29,7 +29,7 @@ pub fn run_compositor_loop(setup_done: Arc<AtomicBool>) {
     let renderer = match init_egl_headless() {
         Ok(r) => r,
         Err(e) => {
-            log::error!("Failed to init headless EGL: {e}");
+            tracing::error!("Failed to init headless EGL: {e}");
             return;
         }
     };
@@ -41,7 +41,7 @@ pub fn run_compositor_loop(setup_done: Arc<AtomicBool>) {
     use smithay::backend::allocator::format::FormatSet;
     let mut dmabuf_formats = renderer.renderer.dmabuf_formats();
     if dmabuf_formats.iter().next().is_none() {
-        log::warn!("EGL has no dmabuf formats — advertising common formats for Vulkan WSI");
+        tracing::warn!("EGL has no dmabuf formats — advertising common formats for Vulkan WSI");
         dmabuf_formats = FormatSet::from_formats_hardcoded();
     }
 
@@ -49,7 +49,7 @@ pub fn run_compositor_loop(setup_done: Arc<AtomicBool>) {
     let mut compositor = match Compositor::build(dmabuf_formats) {
         Ok(c) => c,
         Err(e) => {
-            log::error!("Failed to build compositor: {e}");
+            tracing::error!("Failed to build compositor: {e}");
             return;
         }
     };
@@ -57,7 +57,7 @@ pub fn run_compositor_loop(setup_done: Arc<AtomicBool>) {
 
     // Query display info via JNI.
     let (scale_factor, display_w, display_h) = get_display_info().unwrap_or((2.0, 2160, 1584));
-    log::info!("Display: {display_w}x{display_h}, density: {scale_factor}");
+    tracing::info!("Display: {display_w}x{display_h}, density: {scale_factor}");
 
     // Create wl_output with the device's physical display resolution.
     let output = Output::new(
@@ -91,11 +91,11 @@ pub fn run_compositor_loop(setup_done: Arc<AtomicBool>) {
     // Per-client override: launch with WAYLAND_ANDROID_RENDER_MODE=gles to force GLES path.
     let vk_renderer = match crate::android::backend::vulkan_renderer::VulkanRenderer::new() {
         Ok(vk) => {
-            log::info!("Vulkan renderer initialized");
+            tracing::info!("Vulkan renderer initialized");
             Some(vk)
         }
         Err(e) => {
-            log::warn!("Vulkan renderer init failed: {e}");
+            tracing::warn!("Vulkan renderer init failed: {e}");
             None
         }
     };
@@ -117,7 +117,7 @@ pub fn run_compositor_loop(setup_done: Arc<AtomicBool>) {
     }
     backend.compositor.init_keyboard();
     launch();
-    log::info!("Compositor loop started");
+    tracing::info!("Compositor loop started");
 
     // Main poll loop.
     let listener_fd = backend.compositor.listener.as_raw_fd();
@@ -139,7 +139,7 @@ pub fn run_compositor_loop(setup_done: Arc<AtomicBool>) {
         if ret < 0 {
             let err = std::io::Error::last_os_error();
             if err.kind() != std::io::ErrorKind::Interrupted {
-                log::error!("Compositor poll failed: {err}");
+                tracing::error!("Compositor poll failed: {err}");
                 break;
             }
             continue;
