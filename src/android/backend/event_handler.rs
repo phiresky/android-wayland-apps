@@ -186,10 +186,10 @@ fn process_window_events(backend: &mut WaylandBackend) {
                 if let Some(wm) = backend.window_manager.as_mut()
                     && let Some(window) = wm.windows.get_mut(&window_id) {
                         window.size = (width, height).into();
-                        // Only set needs_redraw for non-Vulkan windows.
-                        // For Vulkan, needs_redraw is set by client commits only —
+                        // Only set needs_redraw for non-AHB windows.
+                        // For AHB/dmabuf, needs_redraw is set by client commits only —
                         // re-blitting the old committed buffer shows stale content.
-                        if window.vk_surface.is_none() {
+                        if window.ahb_surface.is_none() {
                             window.needs_redraw = true;
                         }
                         let logical_w = (width as f64 / scale).round() as i32;
@@ -322,7 +322,7 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
     // eglSwapBuffers waiting for a frame callback that never comes.
     if let Some(wm) = backend.window_manager.as_ref() {
         for (_, window) in &wm.windows {
-            if window.egl_surface.is_none() && window.vk_surface.is_none() && window.ahb_surface.is_none() {
+            if window.egl_surface.is_none() && window.ahb_surface.is_none() {
                 send_frames_surface_tree(window.surface_kind.wl_surface(), time);
             }
         }
@@ -346,7 +346,7 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
         .map(|wm| {
             wm.windows
                 .iter()
-                .filter(|(_, w)| (w.egl_surface.is_some() || w.vk_surface.is_some() || w.native_window.is_some()) && w.size.w > 0 && w.size.h > 0)
+                .filter(|(_, w)| (w.egl_surface.is_some() || w.ahb_surface.is_some() || w.native_window.is_some()) && w.size.w > 0 && w.size.h > 0)
                 .map(|(id, _)| *id)
                 .collect()
         })
@@ -439,7 +439,7 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                     let vk_fmt = crate::android::backend::vulkan_renderer::VulkanRenderer::fourcc_to_vk_format(fmt.code as u32);
 
                     // === AHB / ASurfaceTransaction path ===
-                    // Try this first; falls back to swapchain if creation fails.
+                    // Create AHB surface for dmabuf clients.
                     {
                         let needs_ahb = backend.window_manager.as_ref()
                             .and_then(|wm| wm.windows.get(&window_id))
@@ -454,7 +454,7 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                                             tracing::info!("Destroying EGL for AHB takeover window_id={}", window_id);
                                             window.egl_surface = None;
                                         }
-                                        let sc = crate::android::backend::surface_transaction::SurfaceControl::from_window(
+                                        let sc = crate::android::backend::surface_transaction::SurfaceControlHandle::from_window(
                                             native_window, &format!("wl-{window_id}"));
                                         if let Some(sc) = sc {
                                             match vk.create_ahb_target(buf_w, buf_h) {
@@ -562,103 +562,6 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                         }
                     }
 
-                    // === Swapchain fallback (when AHB path not active) ===
-                    // Check if we need to (re)create the Vulkan swapchain:
-                    // - No surface yet, or
-                    // - Client buffer size changed (resize)
-                    let needs_vk_surface = !done && backend.window_manager.as_ref()
-                        .and_then(|wm| wm.windows.get(&window_id))
-                        .map(|w| {
-                            if w.vk_surface.is_none() && w.ahb_surface.is_none() && w.native_window.is_some() {
-                                return true;
-                            }
-                            // Recreate if buffer size changed
-                            if let Some(ref vks) = w.vk_surface {
-                                if vks.extent.width != buf_w || vks.extent.height != buf_h {
-                                    return true;
-                                }
-                            }
-                            false
-                        })
-                        .unwrap_or(false);
-
-                    if needs_vk_surface {
-                        if let Some(wm) = backend.window_manager.as_mut() {
-                            if let Some(window) = wm.windows.get_mut(&window_id) {
-                                if window.egl_surface.is_some() {
-                                    tracing::info!("Destroying EGL surface for Vulkan takeover on window_id={}", window_id);
-                                    window.egl_surface = None;
-                                }
-                                window.needs_redraw = true;
-
-                                if let Some(native_window) = window.native_window {
-                                    let result = if let Some(ref old_vk) = window.vk_surface {
-                                        // Resize: chain new swapchain from old (no surface destroy)
-                                        vk.resize_swapchain(old_vk, native_window, buf_w, buf_h, vk_fmt)
-                                    } else {
-                                        // First creation
-                                        vk.create_window_surface(native_window, buf_w, buf_h, vk_fmt)
-                                    };
-                                    match result {
-                                        Ok(vk_surface) => {
-                                            tracing::info!("Vulkan surface for window_id={} at {}x{}", window_id, buf_w, buf_h);
-                                            // Flush SurfaceFlinger's initial buffer by presenting
-                                            // black frames to all swapchain images. Without this,
-                                            // the SurfaceView's initial buffer stays in the
-                                            // consumer queue and strobes against Vulkan frames.
-                                            for _ in 0..vk_surface.images.len() {
-                                                let _ = vk.present_black(&vk_surface);
-                                            }
-                                            window.vk_surface = Some(vk_surface);
-                                        }
-                                        Err(e) => {
-                                            tracing::error!("Vulkan surface creation failed: {e}");
-                                            window.vk_surface = None;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Now try to blit if we have a vk_surface
-                    if let Some(ref wm) = backend.window_manager {
-                        if let Some(window) = wm.windows.get(&window_id) {
-                            if let Some(ref vk_surface) = window.vk_surface {
-                                let sz = dmabuf.size();
-                                let fd = dmabuf.handles().next();
-                                let stride = dmabuf.strides().next().unwrap_or(sz.w as u32 * 4);
-                                if let Some(fd) = fd {
-                                    use std::os::unix::io::AsRawFd;
-                                    let raw_fd = fd.as_raw_fd();
-                                    tracing::info!("[vk-render] fd={} needs_redraw={}", raw_fd, window.needs_redraw);
-                                    if !window.needs_redraw {
-                                        done = true;
-                                    } else {
-                                    tracing::debug!("[vk-render] blit fd={} needs_redraw=true", raw_fd);
-                                    match vk.get_or_import_dmabuf(raw_fd, sz.w as u32, sz.h as u32, stride, vk_fmt) {
-                                        Ok(imported) => {
-                                            match vk.blit_dmabuf_to_swapchain(&imported, vk_surface) {
-                                                Ok(()) => {
-                                                    done = true;
-                                                    if let Some(wm) = backend.window_manager.as_mut() {
-                                                        if let Some(w) = wm.windows.get_mut(&window_id) {
-                                                            w.last_render_method = "VK dmabuf";
-                                                            w.last_buffer_size = Some((sz.w as u32, sz.h as u32));
-                                                            w.needs_redraw = false;
-                                                        }
-                                                    }
-                                                }
-                                                Err(e) => tracing::warn!("Vulkan blit failed: {e}"),
-                                            }
-                                        }
-                                        Err(e) => tracing::warn!("Vulkan dmabuf import failed: {e}"),
-                                    }
-                                    }
-                                }
-                            }
-                        }
-                    }
                 }
             }
             } // render_mode == Vulkan
@@ -684,7 +587,7 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
             // 2. Window has had a commit (needs_redraw) — so we know it's wl_shm
             // Creating EGL on a window that will later use Vulkan causes a stale
             // EGL frame to persist in SurfaceFlinger's queue, causing strobe.
-            if window.egl_surface.is_none() && window.vk_surface.is_none() && window.ahb_surface.is_none()
+            if window.egl_surface.is_none() && window.ahb_surface.is_none()
                 && window.native_window.is_some() && window.needs_redraw {
                 if let Some(handle) = wm.get_native_handle(window_id) {
                     if let Some(surface) = backend.renderer.as_ref()
@@ -852,7 +755,7 @@ fn update_status_overlay(backend: &mut WaylandBackend) {
             let logical_h = (window.size.h as f64 / scale).round() as i32;
             let buf_str = buf_size.map(|s| format!("{}x{}", s.w, s.h)).unwrap_or_else(|| "?".into());
             let pref_str = window.preferred_size.map(|p| format!("{}x{}", p.w, p.h)).unwrap_or_else(|| "-".into());
-            let surface_type = if window.vk_surface.is_some() { "VK" } else if window.egl_surface.is_some() { "EGL" } else { "-" };
+            let surface_type = if window.ahb_surface.is_some() { "AHB" } else if window.egl_surface.is_some() { "EGL" } else { "-" };
             let frac = if has_frac_scale { "frac" } else { "1x" };
             info.push_str(&format!(
                 "  [{}] {} | {}  phys={}  log={}x{}  buf={}  pref={}  {} {} {:.0}fps\n",

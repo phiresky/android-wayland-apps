@@ -17,20 +17,14 @@ use raw_window_handle::AndroidNdkWindowHandle;
 
 use std::os::unix::io::RawFd;
 use crate::android::backend::signal_wake;
-use crate::android::backend::surface_transaction::SurfaceControl;
+use crate::android::backend::surface_transaction::SurfaceControlHandle;
 use crate::android::backend::vulkan_renderer::AhbTarget;
 
-// FFI for ANativeWindow (in libandroid.so)
-#[link(name = "android")]
-unsafe extern "C" {
-    fn ANativeWindow_fromSurface(env: *mut jni::sys::JNIEnv, surface: jobject) -> *mut c_void;
-    fn ANativeWindow_acquire(window: *mut c_void);
-    fn ANativeWindow_release(window: *mut c_void);
-}
+use ndk_sys::ANativeWindow;
 
 /// Events sent from JNI callbacks (UI thread) to the compositor (render thread).
 pub enum WindowEvent {
-    SurfaceCreated { window_id: u32, native_window: *mut c_void },
+    SurfaceCreated { window_id: u32, native_window: *mut ANativeWindow },
     SurfaceChanged { window_id: u32, width: i32, height: i32 },
     SurfaceDestroyed { window_id: u32 },
     WindowClosed { window_id: u32, is_finishing: bool },
@@ -78,7 +72,7 @@ impl SurfaceKind {
 pub struct WindowState {
     pub window_id: u32,
     pub surface_kind: SurfaceKind,
-    pub native_window: Option<*mut c_void>,
+    pub native_window: Option<*mut ANativeWindow>,
     pub egl_surface: Option<EGLSurface>,
     pub size: Size<i32, Physical>,
     pub needs_redraw: bool,
@@ -94,9 +88,7 @@ pub struct WindowState {
     /// DeX enforces a minimum window height larger than small dialogs need,
     /// so we cap the Wayland configure to this size and center the content.
     pub preferred_size: Option<Size<i32, Logical>>,
-    /// Vulkan swapchain for zero-copy dmabuf compositing (bypasses GLES).
-    pub vk_surface: Option<crate::android::backend::vulkan_renderer::VulkanWindowSurface>,
-    /// AHB + ASurfaceTransaction path (replaces swapchain when active).
+    /// AHB + ASurfaceTransaction path for dmabuf compositing.
     pub ahb_surface: Option<AhbWindowSurface>,
     /// Last render method used for this window (for debug overlay).
     pub last_render_method: &'static str,
@@ -112,7 +104,7 @@ pub struct WindowState {
 
 /// Per-window ASurfaceTransaction state.
 pub struct AhbWindowSurface {
-    pub surface_control: SurfaceControl,
+    pub surface_control: SurfaceControlHandle,
     pub ahb_target: AhbTarget,
     /// True while SurfaceFlinger is displaying the previous frame.
     /// Cleared by OnComplete callback — prevents rendering faster than vsync.
@@ -231,7 +223,6 @@ impl WindowManager {
             activity_launched: false,
             created_time: Instant::now(),
             preferred_size: None,
-            vk_surface: None,
             ahb_surface: None,
             last_render_method: "none",
             last_buffer_size: None,
@@ -354,7 +345,7 @@ impl WindowManager {
     pub fn remove_window(&mut self, window_id: u32) {
         if let Some(state) = self.windows.remove(&window_id) {
             if let Some(native_window) = state.native_window {
-                unsafe { ANativeWindow_release(native_window) };
+                unsafe { ndk_sys::ANativeWindow_release(native_window) };
             }
             tracing::info!("Removed window_id={}", window_id);
         }
@@ -364,7 +355,7 @@ impl WindowManager {
     pub fn get_native_handle(&self, window_id: u32) -> Option<AndroidNdkWindowHandle> {
         self.windows.get(&window_id).and_then(|w| {
             w.native_window.and_then(|ptr| {
-                NonNull::new(ptr).map(AndroidNdkWindowHandle::new)
+                NonNull::new(ptr as *mut c_void).map(AndroidNdkWindowHandle::new)
             })
         })
     }
@@ -403,10 +394,10 @@ extern "system" fn Java_io_github_phiresky_wayland_1android_WaylandWindowActivit
     surface: JObject,
 ) {
     let native_window = unsafe {
-        ANativeWindow_fromSurface(env.get_raw() as *mut _, surface.as_raw())
+        ndk_sys::ANativeWindow_fromSurface(env.get_raw() as *mut _, surface.as_raw())
     };
     if !native_window.is_null() {
-        unsafe { ANativeWindow_acquire(native_window) };
+        unsafe { ndk_sys::ANativeWindow_acquire(native_window) };
         tracing::info!("JNI: surfaceCreated window_id={}", window_id);
         send_event(WindowEvent::SurfaceCreated {
             window_id: window_id as u32,

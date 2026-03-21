@@ -1,13 +1,13 @@
 //! Vulkan renderer for zero-copy dmabuf compositing on Android.
 //!
 //! Uses the proprietary Qualcomm Vulkan driver to import client dmabufs
-//! (from Turnip/KGSL) and composite them onto Android surfaces. Both drivers
-//! use KGSL, so dmabuf import is zero-copy.
+//! (from Turnip/KGSL) and blit them onto AHardwareBuffer targets for
+//! presentation via ASurfaceTransaction.
 
 use ash::vk;
 use ash::khr;
 use std::collections::HashMap;
-use std::ffi::{c_char, c_void, CString};
+use std::ffi::{c_char, CString};
 use std::os::unix::io::RawFd;
 
 use super::surface_transaction::{
@@ -23,11 +23,10 @@ pub struct VulkanRenderer {
     device: ash::Device,
     queue: vk::Queue,
     queue_family_index: u32,
-    swapchain_fn: khr::swapchain::Device,
     external_memory_fd_fn: khr::external_memory_fd::Device,
     ahb_fn: ash::android::external_memory_android_hardware_buffer::Device,
     /// Cache imported dmabufs by fd to avoid re-importing every frame.
-    /// Clients reuse a small pool of ~3 swapchain buffers.
+    /// Clients reuse a small pool of ~3 buffers.
     dmabuf_cache: std::cell::RefCell<HashMap<RawFd, ImportedDmabuf>>,
 }
 
@@ -38,32 +37,6 @@ pub struct AhbTarget {
     pub vk_memory: vk::DeviceMemory,
     pub width: u32,
     pub height: u32,
-}
-
-/// Per-window swapchain state.
-pub struct VulkanWindowSurface {
-    pub surface: vk::SurfaceKHR,
-    pub swapchain: vk::SwapchainKHR,
-    pub images: Vec<vk::Image>,
-    pub image_views: Vec<vk::ImageView>,
-    pub format: vk::Format,
-    pub extent: vk::Extent2D,
-}
-
-impl VulkanRenderer {
-    /// Destroy a window surface's Vulkan objects (swapchain, image views, surface).
-    pub fn destroy_window_surface(&self, ws: &VulkanWindowSurface) {
-        unsafe {
-            // Wait for all GPU work to complete before destroying
-            let _ = self.device.device_wait_idle();
-            for &view in &ws.image_views {
-                self.device.destroy_image_view(view, None);
-            }
-            self.swapchain_fn.destroy_swapchain(ws.swapchain, None);
-            let surface_fn = khr::surface::Instance::new(&self._entry, &self.instance);
-            surface_fn.destroy_surface(ws.surface, None);
-        }
-    }
 }
 
 /// An imported dmabuf as Vulkan resources.
@@ -87,22 +60,14 @@ impl VulkanRenderer {
         let entry = unsafe { ash::Entry::load() }
             .map_err(|e| format!("Failed to load Vulkan: {e}"))?;
 
-        // Create instance with android_surface
         let app_name = cstr("wayland-compositor");
         let app_info = vk::ApplicationInfo::default()
             .application_name(&app_name)
             .application_version(1)
             .api_version(vk::make_api_version(0, 1, 1, 0));
 
-        let inst_ext_names = [
-            cstr("VK_KHR_surface"),
-            cstr("VK_KHR_android_surface"),
-        ];
-        let inst_ext_ptrs: Vec<*const c_char> = inst_ext_names.iter().map(|s| s.as_ptr()).collect();
-
         let instance_info = vk::InstanceCreateInfo::default()
-            .application_info(&app_info)
-            .enabled_extension_names(&inst_ext_ptrs);
+            .application_info(&app_info);
 
         let instance = unsafe { entry.create_instance(&instance_info, None) }
             .map_err(|e| format!("vkCreateInstance: {e}"))?;
@@ -127,7 +92,6 @@ impl VulkanRenderer {
 
         // Create device with required extensions
         let dev_ext_names = [
-            cstr("VK_KHR_swapchain"),
             cstr("VK_KHR_external_memory"),
             cstr("VK_KHR_external_memory_fd"),
             cstr("VK_ANDROID_external_memory_android_hardware_buffer"),
@@ -148,11 +112,10 @@ impl VulkanRenderer {
 
         let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
 
-        let swapchain_fn = khr::swapchain::Device::new(&instance, &device);
         let external_memory_fd_fn = khr::external_memory_fd::Device::new(&instance, &device);
         let ahb_fn = ash::android::external_memory_android_hardware_buffer::Device::new(&instance, &device);
 
-        tracing::info!("[vk-renderer] Vulkan renderer initialized (with AHB support)");
+        tracing::info!("[vk-renderer] Vulkan renderer initialized");
 
         Ok(Self {
             _entry: entry,
@@ -161,12 +124,13 @@ impl VulkanRenderer {
             device,
             queue,
             queue_family_index,
-            swapchain_fn,
             external_memory_fd_fn,
             ahb_fn,
             dmabuf_cache: std::cell::RefCell::new(HashMap::new()),
         })
     }
+
+    // ── Dmabuf import ──────────────────────────────────────────────────────
 
     /// Get or import a dmabuf. Caches by fd for reuse across frames.
     pub fn get_or_import_dmabuf(
@@ -180,19 +144,16 @@ impl VulkanRenderer {
         {
             let cache = self.dmabuf_cache.borrow();
             if let Some(cached) = cache.get(&fd) {
-                // Validate size matches — fd numbers get reused by the kernel
                 if cached.width == width && cached.height == height {
                     drop(cache);
                     return Ok(std::cell::Ref::map(self.dmabuf_cache.borrow(), |c| {
                         c.get(&fd).unwrap_or_else(|| unreachable!())
                     }));
                 }
-                // Size mismatch: fd was reused for a different buffer
                 tracing::info!("[vk-renderer] Evicting stale cache fd={} (was {}x{}, now {}x{})",
                     fd, cached.width, cached.height, width, height);
             }
         }
-        // Not cached or evicted — import and store
         let imported = self.import_dmabuf(fd, width, height, stride, format)?;
         tracing::info!("[vk-renderer] Cached dmabuf fd={} ({}x{}, cache size={})",
             fd, width, height, self.dmabuf_cache.borrow().len() + 1);
@@ -214,7 +175,6 @@ impl VulkanRenderer {
         let fd_dup = unsafe { libc::dup(fd) };
         if fd_dup < 0 { return Err("dup failed".into()); }
 
-        // Query memory properties for this fd
         let mut fd_props = vk::MemoryFdPropertiesKHR::default();
         unsafe {
             self.external_memory_fd_fn.get_memory_fd_properties(
@@ -230,7 +190,6 @@ impl VulkanRenderer {
         }
         let mem_type_index = fd_props.memory_type_bits.trailing_zeros();
 
-        // Create image with external memory flag
         let mut external_info = vk::ExternalMemoryImageCreateInfo::default()
             .handle_types(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT);
 
@@ -252,10 +211,9 @@ impl VulkanRenderer {
 
         let mem_reqs = unsafe { self.device.get_image_memory_requirements(image) };
 
-        // Import the dmabuf fd as device memory
         let mut import_info = vk::ImportMemoryFdInfoKHR::default()
             .handle_type(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT)
-            .fd(fd_dup); // Vulkan takes ownership
+            .fd(fd_dup);
 
         let alloc_info = vk::MemoryAllocateInfo::default()
             .push_next(&mut import_info)
@@ -268,7 +226,6 @@ impl VulkanRenderer {
         unsafe { self.device.bind_image_memory(image, memory, 0) }
             .map_err(|e| format!("vkBindImageMemory: {e}"))?;
 
-        // Also create a VkBuffer bound to the same memory for stride-aware copies
         let buf_size = (stride as u64) * (height as u64);
         let buffer_info = vk::BufferCreateInfo::default()
             .size(buf_size)
@@ -281,609 +238,27 @@ impl VulkanRenderer {
         unsafe { self.device.bind_buffer_memory(buffer, memory, 0) }
             .map_err(|e| format!("vkBindBufferMemory: {e}"))?;
 
-        // Create image view for sampling
         let view_info = vk::ImageViewCreateInfo::default()
             .image(image)
             .view_type(vk::ImageViewType::TYPE_2D)
             .format(format)
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: vk::ImageAspectFlags::COLOR,
-                base_mip_level: 0,
-                level_count: 1,
-                base_array_layer: 0,
-                layer_count: 1,
+                base_mip_level: 0, level_count: 1,
+                base_array_layer: 0, layer_count: 1,
             });
 
         let view = unsafe { self.device.create_image_view(&view_info, None) }
             .map_err(|e| format!("vkCreateImageView: {e}"))?;
 
-        let stride_pixels = stride / 4; // 4 bytes per pixel for RGBA/BGRA
+        let stride_pixels = stride / 4;
 
         tracing::debug!("[vk-renderer] Imported dmabuf {}x{} stride={}", width, height, stride);
 
         Ok(ImportedDmabuf { image, buffer, memory, view, width, height, stride_pixels })
     }
 
-    /// Create a swapchain for an Android native window at the given buffer size.
-    /// Android's SurfaceFlinger scales the buffer to fill the SurfaceView.
-    pub fn create_window_surface(
-        &self,
-        native_window: *mut c_void,
-        buffer_width: u32,
-        buffer_height: u32,
-        preferred_format: vk::Format,
-    ) -> Result<VulkanWindowSurface, String> {
-        self.create_or_resize_swapchain(native_window, buffer_width, buffer_height, preferred_format, None)
-    }
-
-    /// Resize an existing swapchain by creating a new one chained from the old.
-    /// Avoids destroying/recreating the VkSurfaceKHR (which races with Android).
-    pub fn resize_swapchain(
-        &self,
-        old: &VulkanWindowSurface,
-        native_window: *mut c_void,
-        buffer_width: u32,
-        buffer_height: u32,
-        preferred_format: vk::Format,
-    ) -> Result<VulkanWindowSurface, String> {
-        let _ = unsafe { self.device.device_wait_idle() };
-        let result = self.create_or_resize_swapchain(
-            native_window, buffer_width, buffer_height, preferred_format,
-            Some(old),
-        );
-        // Destroy old swapchain's image views (swapchain itself is retired by oldSwapchain)
-        unsafe {
-            for &view in &old.image_views {
-                self.device.destroy_image_view(view, None);
-            }
-            self.swapchain_fn.destroy_swapchain(old.swapchain, None);
-        }
-        result
-    }
-
-    fn create_or_resize_swapchain(
-        &self,
-        native_window: *mut c_void,
-        buffer_width: u32,
-        buffer_height: u32,
-        preferred_format: vk::Format,
-        old: Option<&VulkanWindowSurface>,
-    ) -> Result<VulkanWindowSurface, String> {
-        // Tell Android the buffer size and pixel format — SurfaceFlinger scales to fill.
-        // Format 5 = HAL_PIXEL_FORMAT_BGRA_8888, needed when dmabufs use DRM_FORMAT_XRGB8888.
-        // Format 0 = keep current format (let Vulkan choose).
-        let android_fmt = if preferred_format == vk::Format::B8G8R8A8_UNORM { 5 } else { 0 };
-        unsafe extern "C" { fn ANativeWindow_setBuffersGeometry(window: *mut c_void, w: i32, h: i32, format: i32) -> i32; }
-        unsafe { ANativeWindow_setBuffersGeometry(native_window, buffer_width as i32, buffer_height as i32, android_fmt) };
-
-        let (surface, owns_surface) = if let Some(old) = old {
-            (old.surface, false) // Reuse existing surface
-        } else {
-            let android_surface_fn = khr::android_surface::Instance::new(&self._entry, &self.instance);
-            let surface_info = vk::AndroidSurfaceCreateInfoKHR::default()
-                .window(native_window);
-            let surface = unsafe { android_surface_fn.create_android_surface(&surface_info, None) }
-                .map_err(|e| format!("create_android_surface: {e}"))?;
-            (surface, true)
-        };
-
-        let surface_fn = khr::surface::Instance::new(&self._entry, &self.instance);
-        let caps = unsafe {
-            surface_fn.get_physical_device_surface_capabilities(self.physical_device, surface)
-        }.map_err(|e| {
-            if owns_surface { unsafe { surface_fn.destroy_surface(surface, None); } }
-            format!("get_surface_capabilities: {e}")
-        })?;
-
-        let formats = unsafe {
-            surface_fn.get_physical_device_surface_formats(self.physical_device, surface)
-        }.map_err(|e| format!("get_surface_formats: {e}"))?;
-
-        // Match the swapchain format to the dmabuf format. vkCmdCopyBufferToImage
-        // copies raw bytes, so source and destination formats must match.
-        let format = formats.iter()
-            .find(|f| f.format == preferred_format)
-            .or_else(|| formats.iter().find(|f| f.format == vk::Format::B8G8R8A8_UNORM))
-            .or_else(|| formats.iter().find(|f| f.format == vk::Format::R8G8B8A8_UNORM))
-            .or(formats.first())
-            .ok_or("No surface formats")?;
-
-        // Use exactly 1 image to prevent strobe from stale frames in the buffer queue.
-        // Android requires min_image_count ≥ 2, but we try 1 first.
-        let image_count = 1u32.max(caps.min_image_count).min(
-            if caps.max_image_count == 0 { u32::MAX } else { caps.max_image_count }
-        );
-
-        let extent = if caps.current_extent.width != u32::MAX {
-            caps.current_extent
-        } else {
-            vk::Extent2D { width: buffer_width, height: buffer_height }
-        };
-
-        let old_swapchain = old.map(|o| o.swapchain).unwrap_or(vk::SwapchainKHR::null());
-        let swapchain_info = vk::SwapchainCreateInfoKHR::default()
-            .surface(surface)
-            .min_image_count(image_count)
-            .image_format(format.format)
-            .image_color_space(format.color_space)
-            .image_extent(extent)
-            .image_array_layers(1)
-            .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST)
-            .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
-            .pre_transform(vk::SurfaceTransformFlagsKHR::IDENTITY)
-            .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
-            .present_mode(vk::PresentModeKHR::FIFO)
-            .clipped(true)
-            .old_swapchain(old_swapchain);
-
-        let swapchain = unsafe { self.swapchain_fn.create_swapchain(&swapchain_info, None) }
-            .map_err(|e| format!("create_swapchain: {e}"))?;
-
-        let images = unsafe { self.swapchain_fn.get_swapchain_images(swapchain) }
-            .map_err(|e| format!("get_swapchain_images: {e}"))?;
-
-        let image_views: Vec<vk::ImageView> = images.iter().map(|&img| {
-            let view_info = vk::ImageViewCreateInfo::default()
-                .image(img)
-                .view_type(vk::ImageViewType::TYPE_2D)
-                .format(format.format)
-                .subresource_range(vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0, level_count: 1,
-                    base_array_layer: 0, layer_count: 1,
-                });
-            unsafe { self.device.create_image_view(&view_info, None) }
-        }).collect::<Result<Vec<_>, _>>()
-            .map_err(|e| format!("create_image_view: {e}"))?;
-
-        tracing::info!("[vk-renderer] Swapchain created: {}x{}, {} images, fmt={} (requested={})",
-            extent.width, extent.height, images.len(), format.format.as_raw(), preferred_format.as_raw());
-
-        Ok(VulkanWindowSurface {
-            surface, swapchain, images, image_views,
-            format: format.format, extent,
-        })
-    }
-
-    /// Present a solid color to a window surface (test that presentation works).
-    pub fn present_clear_color(
-        &self,
-        window: &VulkanWindowSurface,
-        r: f32, g: f32, b: f32,
-    ) -> Result<(), String> {
-        let (image_index, _) = unsafe {
-            self.swapchain_fn.acquire_next_image(
-                window.swapchain, u64::MAX,
-                vk::Semaphore::null(), vk::Fence::null(),
-            )
-        }.map_err(|e| format!("acquire_next_image: {e}"))?;
-
-        // Create command pool + buffer (TODO: cache)
-        let pool_info = vk::CommandPoolCreateInfo::default()
-            .queue_family_index(self.queue_family_index)
-            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
-        let pool = unsafe { self.device.create_command_pool(&pool_info, None) }
-            .map_err(|e| format!("create_command_pool: {e}"))?;
-
-        let alloc_info = vk::CommandBufferAllocateInfo::default()
-            .command_pool(pool)
-            .level(vk::CommandBufferLevel::PRIMARY)
-            .command_buffer_count(1);
-        let cmd = unsafe { self.device.allocate_command_buffers(&alloc_info) }
-            .map_err(|e| format!("allocate_command_buffers: {e}"))?[0];
-
-        let begin_info = vk::CommandBufferBeginInfo::default()
-            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-        unsafe { self.device.begin_command_buffer(cmd, &begin_info) }
-            .map_err(|e| format!("begin_command_buffer: {e}"))?;
-
-        let range = vk::ImageSubresourceRange {
-            aspect_mask: vk::ImageAspectFlags::COLOR,
-            base_mip_level: 0, level_count: 1,
-            base_array_layer: 0, layer_count: 1,
-        };
-
-        // Transition to TRANSFER_DST
-        let barrier = vk::ImageMemoryBarrier::default()
-            .image(window.images[image_index as usize])
-            .old_layout(vk::ImageLayout::UNDEFINED)
-            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-            .subresource_range(range);
-        unsafe {
-            self.device.cmd_pipeline_barrier(cmd,
-                vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::TRANSFER,
-                vk::DependencyFlags::empty(), &[], &[], &[barrier]);
-        }
-
-        // Clear
-        let clear_color = vk::ClearColorValue { float32: [r, g, b, 1.0] };
-        unsafe {
-            self.device.cmd_clear_color_image(cmd,
-                window.images[image_index as usize],
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL, &clear_color, &[range]);
-        }
-
-        // Transition to PRESENT
-        let barrier2 = vk::ImageMemoryBarrier::default()
-            .image(window.images[image_index as usize])
-            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-            .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
-            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-            .subresource_range(range);
-        unsafe {
-            self.device.cmd_pipeline_barrier(cmd,
-                vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-                vk::DependencyFlags::empty(), &[], &[], &[barrier2]);
-        }
-
-        unsafe { self.device.end_command_buffer(cmd) }
-            .map_err(|e| format!("end_command_buffer: {e}"))?;
-
-        // Submit + wait + present
-        let submit_info = vk::SubmitInfo::default()
-            .command_buffers(std::slice::from_ref(&cmd));
-        unsafe {
-            self.device.queue_submit(self.queue, &[submit_info], vk::Fence::null())
-                .map_err(|e| format!("queue_submit: {e}"))?;
-            self.device.queue_wait_idle(self.queue)
-                .map_err(|e| format!("queue_wait_idle: {e}"))?;
-        }
-
-        let present_info = vk::PresentInfoKHR::default()
-            .swapchains(std::slice::from_ref(&window.swapchain))
-            .image_indices(std::slice::from_ref(&image_index));
-        unsafe { self.swapchain_fn.queue_present(self.queue, &present_info) }
-            .map_err(|e| format!("queue_present: {e}"))?;
-
-        // Cleanup (TODO: don't recreate every frame)
-        unsafe {
-            self.device.free_command_buffers(pool, &[cmd]);
-            self.device.destroy_command_pool(pool, None);
-        }
-
-        Ok(())
-    }
-
-    /// Copy an imported dmabuf onto a swapchain image and present.
-    /// Uses VkBuffer + vkCmdCopyBufferToImage for explicit stride control.
-    pub fn blit_dmabuf_to_swapchain(
-        &self,
-        dmabuf: &ImportedDmabuf,
-        window: &VulkanWindowSurface,
-    ) -> Result<(), String> {
-        // Use a fence to ensure the image is actually available before writing.
-        // Without proper synchronization, Android's buffer queue can show stale frames.
-        let fence_info = vk::FenceCreateInfo::default();
-        let acquire_fence = unsafe { self.device.create_fence(&fence_info, None) }
-            .map_err(|e| format!("create_fence: {e}"))?;
-
-        let (image_index, _) = unsafe {
-            self.swapchain_fn.acquire_next_image(
-                window.swapchain, u64::MAX,
-                vk::Semaphore::null(), acquire_fence,
-            )
-        }.map_err(|e| format!("acquire_next_image: {e}"))?;
-
-        unsafe {
-            self.device.wait_for_fences(&[acquire_fence], true, u64::MAX)
-                .map_err(|e| format!("wait_fence: {e}"))?;
-            self.device.destroy_fence(acquire_fence, None);
-        }
-
-        tracing::info!("[vk-blit] img={} sc={}x{} buf={}x{} stride={}",
-            image_index, window.extent.width, window.extent.height,
-            dmabuf.width, dmabuf.height, dmabuf.stride_pixels);
-
-        // Command pool + buffer (TODO: cache)
-        let pool_info = vk::CommandPoolCreateInfo::default()
-            .queue_family_index(self.queue_family_index)
-            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
-        let pool = unsafe { self.device.create_command_pool(&pool_info, None) }
-            .map_err(|e| format!("create_cmd_pool: {e}"))?;
-
-        let alloc_info = vk::CommandBufferAllocateInfo::default()
-            .command_pool(pool)
-            .level(vk::CommandBufferLevel::PRIMARY)
-            .command_buffer_count(1);
-        let cmd = unsafe { self.device.allocate_command_buffers(&alloc_info) }
-            .map_err(|e| format!("alloc_cmd_buf: {e}"))?[0];
-
-        let begin_info = vk::CommandBufferBeginInfo::default()
-            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-        unsafe { self.device.begin_command_buffer(cmd, &begin_info) }
-            .map_err(|e| format!("begin_cmd_buf: {e}"))?;
-
-        let color_range = vk::ImageSubresourceRange {
-            aspect_mask: vk::ImageAspectFlags::COLOR,
-            base_mip_level: 0, level_count: 1,
-            base_array_layer: 0, layer_count: 1,
-        };
-        let color_layers = vk::ImageSubresourceLayers {
-            aspect_mask: vk::ImageAspectFlags::COLOR,
-            mip_level: 0, base_array_layer: 0, layer_count: 1,
-        };
-
-        // Transition destination (swapchain image) to TRANSFER_DST
-        let dst_barrier = vk::ImageMemoryBarrier::default()
-            .image(window.images[image_index as usize])
-            .old_layout(vk::ImageLayout::UNDEFINED)
-            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-            .subresource_range(color_range);
-
-        unsafe {
-            self.device.cmd_pipeline_barrier(cmd,
-                vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::TRANSFER,
-                vk::DependencyFlags::empty(), &[], &[], &[dst_barrier]);
-        }
-
-        // Clear swapchain image to black first (client may be smaller than swapchain)
-        let clear_color = vk::ClearColorValue { float32: [0.0, 0.0, 0.0, 1.0] };
-        unsafe {
-            self.device.cmd_clear_color_image(cmd,
-                window.images[image_index as usize],
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL, &clear_color, &[color_range]);
-        }
-
-        // Two-step copy: buffer → LINEAR staging image → swapchain (via blit).
-        // The blit handles BGRA→RGBA format conversion since Android's Vulkan
-        // swapchain only supports R8G8B8A8 but dmabufs use B8G8R8A8.
-        // Can't blit directly from the imported VkImage because Qualcomm
-        // interprets OPTIMAL tiling as UBWC (compressed), causing stripes.
-        let staging = self.get_or_create_staging(dmabuf.width, dmabuf.height,
-            Self::fourcc_to_vk_format(0x34325258))?;
-
-        let staging_to_dst = vk::ImageMemoryBarrier::default()
-            .image(staging.0)
-            .old_layout(vk::ImageLayout::UNDEFINED)
-            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-            .subresource_range(color_range);
-        unsafe {
-            self.device.cmd_pipeline_barrier(cmd,
-                vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::TRANSFER,
-                vk::DependencyFlags::empty(), &[], &[], &[staging_to_dst]);
-        }
-        let copy_region = vk::BufferImageCopy {
-            buffer_offset: 0,
-            buffer_row_length: dmabuf.stride_pixels,
-            buffer_image_height: dmabuf.height,
-            image_subresource: color_layers,
-            image_offset: vk::Offset3D { x: 0, y: 0, z: 0 },
-            image_extent: vk::Extent3D { width: dmabuf.width, height: dmabuf.height, depth: 1 },
-        };
-        unsafe {
-            self.device.cmd_copy_buffer_to_image(cmd, dmabuf.buffer, staging.0,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[copy_region]);
-        }
-
-        let staging_to_src = vk::ImageMemoryBarrier::default()
-            .image(staging.0)
-            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-            .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
-            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-            .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
-            .subresource_range(color_range);
-        unsafe {
-            self.device.cmd_pipeline_barrier(cmd,
-                vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::TRANSFER,
-                vk::DependencyFlags::empty(), &[], &[], &[staging_to_src]);
-        }
-        let blit_w = dmabuf.width.min(window.extent.width) as i32;
-        let blit_h = dmabuf.height.min(window.extent.height) as i32;
-        let blit_region = vk::ImageBlit {
-            src_subresource: color_layers,
-            src_offsets: [
-                vk::Offset3D { x: 0, y: 0, z: 0 },
-                vk::Offset3D { x: blit_w, y: blit_h, z: 1 },
-            ],
-            dst_subresource: color_layers,
-            dst_offsets: [
-                vk::Offset3D { x: 0, y: 0, z: 0 },
-                vk::Offset3D { x: blit_w, y: blit_h, z: 1 },
-            ],
-        };
-        unsafe {
-            self.device.cmd_blit_image(cmd, staging.0,
-                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                window.images[image_index as usize],
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                &[blit_region], vk::Filter::NEAREST);
-        }
-
-        // Transition swapchain image to PRESENT
-        let present_barrier = vk::ImageMemoryBarrier::default()
-            .image(window.images[image_index as usize])
-            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-            .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
-            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-            .subresource_range(color_range);
-        unsafe {
-            self.device.cmd_pipeline_barrier(cmd,
-                vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-                vk::DependencyFlags::empty(), &[], &[], &[present_barrier]);
-        }
-
-        unsafe { self.device.end_command_buffer(cmd) }
-            .map_err(|e| format!("end_cmd_buf: {e}"))?;
-
-        // Submit + wait + present
-        let submit_info = vk::SubmitInfo::default()
-            .command_buffers(std::slice::from_ref(&cmd));
-        unsafe {
-            self.device.queue_submit(self.queue, &[submit_info], vk::Fence::null())
-                .map_err(|e| format!("queue_submit: {e}"))?;
-            self.device.queue_wait_idle(self.queue)
-                .map_err(|e| format!("queue_wait_idle: {e}"))?;
-        }
-
-        let present_info = vk::PresentInfoKHR::default()
-            .swapchains(std::slice::from_ref(&window.swapchain))
-            .image_indices(std::slice::from_ref(&image_index));
-        unsafe { self.swapchain_fn.queue_present(self.queue, &present_info) }
-            .map_err(|e| format!("queue_present: {e}"))?;
-
-        unsafe {
-            self.device.free_command_buffers(pool, &[cmd]);
-            self.device.destroy_command_pool(pool, None);
-            self.device.destroy_image(staging.0, None);
-            self.device.free_memory(staging.1, None);
-        }
-
-        Ok(())
-    }
-
-    /// Present a black frame to flush stale buffers from Android's display queue.
-    pub fn present_black(&self, window: &VulkanWindowSurface) -> Result<(), String> {
-        let (image_index, _) = unsafe {
-            self.swapchain_fn.acquire_next_image(window.swapchain, u64::MAX,
-                vk::Semaphore::null(), vk::Fence::null())
-        }.map_err(|e| format!("acquire: {e}"))?;
-
-        let pool_info = vk::CommandPoolCreateInfo::default()
-            .queue_family_index(self.queue_family_index)
-            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
-        let pool = unsafe { self.device.create_command_pool(&pool_info, None) }
-            .map_err(|e| format!("pool: {e}"))?;
-        let alloc = vk::CommandBufferAllocateInfo::default()
-            .command_pool(pool).level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1);
-        let cmd = unsafe { self.device.allocate_command_buffers(&alloc) }
-            .map_err(|e| format!("cmd: {e}"))?[0];
-
-        let begin = vk::CommandBufferBeginInfo::default()
-            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-        unsafe { self.device.begin_command_buffer(cmd, &begin) }.map_err(|e| format!("{e}"))?;
-
-        let range = vk::ImageSubresourceRange {
-            aspect_mask: vk::ImageAspectFlags::COLOR,
-            base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1,
-        };
-        let to_dst = vk::ImageMemoryBarrier::default()
-            .image(window.images[image_index as usize])
-            .old_layout(vk::ImageLayout::UNDEFINED)
-            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-            .subresource_range(range);
-        unsafe { self.device.cmd_pipeline_barrier(cmd,
-            vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::TRANSFER,
-            vk::DependencyFlags::empty(), &[], &[], &[to_dst]); }
-
-        let black = vk::ClearColorValue { float32: [0.0, 0.0, 0.0, 1.0] };
-        unsafe { self.device.cmd_clear_color_image(cmd,
-            window.images[image_index as usize],
-            vk::ImageLayout::TRANSFER_DST_OPTIMAL, &black, &[range]); }
-
-        let to_present = vk::ImageMemoryBarrier::default()
-            .image(window.images[image_index as usize])
-            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-            .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
-            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-            .subresource_range(range);
-        unsafe { self.device.cmd_pipeline_barrier(cmd,
-            vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-            vk::DependencyFlags::empty(), &[], &[], &[to_present]); }
-
-        unsafe { self.device.end_command_buffer(cmd) }.map_err(|e| format!("{e}"))?;
-        let submit = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&cmd));
-        unsafe {
-            self.device.queue_submit(self.queue, &[submit], vk::Fence::null()).map_err(|e| format!("{e}"))?;
-            self.device.queue_wait_idle(self.queue).map_err(|e| format!("{e}"))?;
-        }
-        let present = vk::PresentInfoKHR::default()
-            .swapchains(std::slice::from_ref(&window.swapchain))
-            .image_indices(std::slice::from_ref(&image_index));
-        unsafe { self.swapchain_fn.queue_present(self.queue, &present) }
-            .map_err(|e| format!("{e}"))?;
-        unsafe {
-            self.device.free_command_buffers(pool, &[cmd]);
-            self.device.destroy_command_pool(pool, None);
-        }
-        Ok(())
-    }
-
-    /// Get or create a shared LINEAR staging image for format conversion.
-    /// Reuses the existing one if size matches, otherwise recreates.
-    fn get_or_create_staging(&self, width: u32, height: u32, format: vk::Format)
-        -> Result<(vk::Image, vk::DeviceMemory), String>
-    {
-        // Check if we already have a staging image of the right size
-        // For simplicity, just create one per blit call and cache would be a future optimization
-        let staging_info = vk::ImageCreateInfo::default()
-            .image_type(vk::ImageType::TYPE_2D)
-            .format(format)
-            .extent(vk::Extent3D { width, height, depth: 1 })
-            .mip_levels(1)
-            .array_layers(1)
-            .samples(vk::SampleCountFlags::TYPE_1)
-            .tiling(vk::ImageTiling::LINEAR)
-            .usage(vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE);
-        let image = unsafe { self.device.create_image(&staging_info, None) }
-            .map_err(|e| format!("create staging image: {e}"))?;
-        let reqs = unsafe { self.device.get_image_memory_requirements(image) };
-        let alloc = vk::MemoryAllocateInfo::default()
-            .allocation_size(reqs.size)
-            .memory_type_index(self.find_memory_type(reqs.memory_type_bits,
-                vk::MemoryPropertyFlags::DEVICE_LOCAL)?);
-        let memory = unsafe { self.device.allocate_memory(&alloc, None) }
-            .map_err(|e| format!("alloc staging memory: {e}"))?;
-        unsafe { self.device.bind_image_memory(image, memory, 0) }
-            .map_err(|e| format!("bind staging memory: {e}"))?;
-        Ok((image, memory))
-    }
-
-    fn find_memory_type(&self, type_filter: u32, properties: vk::MemoryPropertyFlags) -> Result<u32, String> {
-        let mem_props = unsafe {
-            self.instance.get_physical_device_memory_properties(self.physical_device)
-        };
-        for i in 0..mem_props.memory_type_count {
-            if (type_filter & (1 << i)) != 0
-                && mem_props.memory_types[i as usize].property_flags.contains(properties)
-            {
-                return Ok(i);
-            }
-        }
-        Err("No suitable memory type".into())
-    }
-
-    /// Clear the dmabuf cache. Must be called when a client disconnects
-    /// or its window is destroyed — otherwise stale fd→GPU memory mappings
-    /// persist and cause strobing when fd numbers are recycled by the kernel.
-    pub fn clear_dmabuf_cache(&self) {
-        let old = self.dmabuf_cache.borrow_mut().drain().collect::<Vec<_>>();
-        for (fd, imported) in &old {
-            tracing::info!("[vk-renderer] Clearing cached dmabuf fd={} ({}x{})", fd, imported.width, imported.height);
-            self.destroy_imported(imported);
-        }
-    }
-
-    /// Map DRM fourcc to VkFormat.
-    pub fn fourcc_to_vk_format(fourcc: u32) -> vk::Format {
-        match fourcc {
-            // DRM_FORMAT_XRGB8888 / ARGB8888: memory [B,G,R,A]
-            0x34325258 | 0x34325241 => vk::Format::B8G8R8A8_UNORM,
-            // DRM_FORMAT_XBGR8888 / ABGR8888: memory [R,G,B,A]
-            0x34324258 | 0x34324241 => vk::Format::R8G8B8A8_UNORM,
-            _ => vk::Format::B8G8R8A8_UNORM,
-        }
-    }
-
-    /// Destroy an imported dmabuf's Vulkan resources.
-    pub fn destroy_imported(&self, imported: &ImportedDmabuf) {
-        unsafe {
-            self.device.destroy_image_view(imported.view, None);
-            self.device.destroy_image(imported.image, None);
-            self.device.destroy_buffer(imported.buffer, None);
-            self.device.free_memory(imported.memory, None);
-        }
-    }
-
-
-    pub fn device(&self) -> &ash::Device { &self.device }
-    pub fn instance(&self) -> &ash::Instance { &self.instance }
-
-    // ── AHardwareBuffer / ASurfaceTransaction path ─────────────────────────
+    // ── AHardwareBuffer target ─────────────────────────────────────────────
 
     /// Allocate an AHardwareBuffer and import it into Vulkan as a TRANSFER_DST image.
     pub fn create_ahb_target(&self, width: u32, height: u32) -> Result<AhbTarget, String> {
@@ -893,17 +268,15 @@ impl VulkanRenderer {
             AHB_USAGE_GPU_FRAMEBUFFER | AHB_USAGE_GPU_SAMPLED_IMAGE | AHB_USAGE_COMPOSER_OVERLAY,
         ).ok_or("AHardwareBuffer_allocate failed")?;
 
-        // Query Vulkan memory requirements for this AHB
         let mut ahb_props = vk::AndroidHardwareBufferPropertiesANDROID::default();
         unsafe {
-            self.ahb_fn.get_android_hardware_buffer_properties(ahb.as_ptr(), &mut ahb_props)
+            self.ahb_fn.get_android_hardware_buffer_properties(ahb.as_ptr().cast(), &mut ahb_props)
         }.map_err(|e| format!("get_android_hardware_buffer_properties: {e}"))?;
 
         let mem_type_index = ahb_props.memory_type_bits.trailing_zeros();
         tracing::info!("[vk-ahb] AHB props: alloc_size={}, mem_type_bits=0x{:x}",
             ahb_props.allocation_size, ahb_props.memory_type_bits);
 
-        // Create VkImage backed by the AHB
         let mut external_info = vk::ExternalMemoryImageCreateInfo::default()
             .handle_types(vk::ExternalMemoryHandleTypeFlags::ANDROID_HARDWARE_BUFFER_ANDROID);
 
@@ -923,9 +296,8 @@ impl VulkanRenderer {
         let vk_image = unsafe { self.device.create_image(&image_info, None) }
             .map_err(|e| format!("create_image(ahb): {e}"))?;
 
-        // Import AHB memory
         let mut import_ahb = vk::ImportAndroidHardwareBufferInfoANDROID::default()
-            .buffer(ahb.as_ptr());
+            .buffer(ahb.as_ptr().cast());
 
         let alloc_info = vk::MemoryAllocateInfo::default()
             .push_next(&mut import_ahb)
@@ -944,13 +316,11 @@ impl VulkanRenderer {
     }
 
     /// Blit an imported dmabuf onto an AHB-backed VkImage for ASurfaceTransaction.
-    /// Same staging blit as swapchain path, but targets AHB instead.
     pub fn blit_dmabuf_to_ahb(
         &self,
         dmabuf: &ImportedDmabuf,
         target: &AhbTarget,
     ) -> Result<(), String> {
-        // Command pool + buffer
         let pool_info = vk::CommandPoolCreateInfo::default()
             .queue_family_index(self.queue_family_index)
             .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
@@ -1004,7 +374,6 @@ impl VulkanRenderer {
         let staging = self.get_or_create_staging(dmabuf.width, dmabuf.height,
             Self::fourcc_to_vk_format(0x34325258))?;
 
-        // Transition staging to TRANSFER_DST
         let staging_to_dst = vk::ImageMemoryBarrier::default()
             .image(staging.0)
             .old_layout(vk::ImageLayout::UNDEFINED)
@@ -1017,7 +386,6 @@ impl VulkanRenderer {
                 vk::DependencyFlags::empty(), &[], &[], &[staging_to_dst]);
         }
 
-        // Copy dmabuf buffer → staging image (stride-aware)
         let copy_region = vk::BufferImageCopy {
             buffer_offset: 0,
             buffer_row_length: dmabuf.stride_pixels,
@@ -1031,7 +399,6 @@ impl VulkanRenderer {
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[copy_region]);
         }
 
-        // Transition staging to TRANSFER_SRC
         let staging_to_src = vk::ImageMemoryBarrier::default()
             .image(staging.0)
             .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
@@ -1045,7 +412,6 @@ impl VulkanRenderer {
                 vk::DependencyFlags::empty(), &[], &[], &[staging_to_src]);
         }
 
-        // Blit staging (BGRA, LINEAR) → AHB (RGBA, OPTIMAL) with format conversion
         let blit_w = dmabuf.width.min(target.width) as i32;
         let blit_h = dmabuf.height.min(target.height) as i32;
         let blit_region = vk::ImageBlit {
@@ -1084,7 +450,6 @@ impl VulkanRenderer {
         unsafe { self.device.end_command_buffer(cmd) }
             .map_err(|e| format!("end_cmd_buf: {e}"))?;
 
-        // Submit and wait (synchronous for MVP)
         let submit_info = vk::SubmitInfo::default()
             .command_buffers(std::slice::from_ref(&cmd));
         unsafe {
@@ -1094,7 +459,6 @@ impl VulkanRenderer {
                 .map_err(|e| format!("queue_wait_idle: {e}"))?;
         }
 
-        // Cleanup
         unsafe {
             self.device.free_command_buffers(pool, &[cmd]);
             self.device.destroy_command_pool(pool, None);
@@ -1111,6 +475,77 @@ impl VulkanRenderer {
         unsafe {
             self.device.destroy_image(target.vk_image, None);
             self.device.free_memory(target.vk_memory, None);
+        }
+    }
+
+    // ── Helpers ─────────────────────────────────────────────────────────────
+
+    fn get_or_create_staging(&self, width: u32, height: u32, format: vk::Format)
+        -> Result<(vk::Image, vk::DeviceMemory), String>
+    {
+        let staging_info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(format)
+            .extent(vk::Extent3D { width, height, depth: 1 })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::LINEAR)
+            .usage(vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        let image = unsafe { self.device.create_image(&staging_info, None) }
+            .map_err(|e| format!("create staging image: {e}"))?;
+        let reqs = unsafe { self.device.get_image_memory_requirements(image) };
+        let alloc = vk::MemoryAllocateInfo::default()
+            .allocation_size(reqs.size)
+            .memory_type_index(self.find_memory_type(reqs.memory_type_bits,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL)?);
+        let memory = unsafe { self.device.allocate_memory(&alloc, None) }
+            .map_err(|e| format!("alloc staging memory: {e}"))?;
+        unsafe { self.device.bind_image_memory(image, memory, 0) }
+            .map_err(|e| format!("bind staging memory: {e}"))?;
+        Ok((image, memory))
+    }
+
+    fn find_memory_type(&self, type_filter: u32, properties: vk::MemoryPropertyFlags) -> Result<u32, String> {
+        let mem_props = unsafe {
+            self.instance.get_physical_device_memory_properties(self.physical_device)
+        };
+        for i in 0..mem_props.memory_type_count {
+            if (type_filter & (1 << i)) != 0
+                && mem_props.memory_types[i as usize].property_flags.contains(properties)
+            {
+                return Ok(i);
+            }
+        }
+        Err("No suitable memory type".into())
+    }
+
+    /// Clear the dmabuf cache.
+    pub fn clear_dmabuf_cache(&self) {
+        let old = self.dmabuf_cache.borrow_mut().drain().collect::<Vec<_>>();
+        for (fd, imported) in &old {
+            tracing::info!("[vk-renderer] Clearing cached dmabuf fd={} ({}x{})", fd, imported.width, imported.height);
+            self.destroy_imported(imported);
+        }
+    }
+
+    /// Map DRM fourcc to VkFormat.
+    pub fn fourcc_to_vk_format(fourcc: u32) -> vk::Format {
+        match fourcc {
+            0x34325258 | 0x34325241 => vk::Format::B8G8R8A8_UNORM,
+            0x34324258 | 0x34324241 => vk::Format::R8G8B8A8_UNORM,
+            _ => vk::Format::B8G8R8A8_UNORM,
+        }
+    }
+
+    /// Destroy an imported dmabuf's Vulkan resources.
+    pub fn destroy_imported(&self, imported: &ImportedDmabuf) {
+        unsafe {
+            self.device.destroy_image_view(imported.view, None);
+            self.device.destroy_image(imported.image, None);
+            self.device.destroy_buffer(imported.buffer, None);
+            self.device.free_memory(imported.memory, None);
         }
     }
 }

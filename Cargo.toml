@@ -35,6 +35,8 @@ pipewire-cam = { path = "pipewire-cam" }
 tar = "0.4"
 xz2 = "0.1"
 pathdiff = "0.2"
+ndk-sys = "0.6.0"
 
 [patch.crates-io]
 smithay = { path = "patches/smithay" }
+ndk-sys = { path = "patches/ndk-sys" }
