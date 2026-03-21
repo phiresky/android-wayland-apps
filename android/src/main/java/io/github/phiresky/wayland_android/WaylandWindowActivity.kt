@@ -213,6 +213,17 @@ class WaylandWindowActivity : Activity(), SurfaceHolder.Callback {
             return super.finishComposingText()
         }
 
+        override fun setComposingRegion(start: Int, end: Int): Boolean {
+            val editable = editable
+            if (editable != null) {
+                val s = start.coerceIn(0, editable.length)
+                val e = end.coerceIn(0, editable.length)
+                composingText = editable.subSequence(minOf(s, e), maxOf(s, e)).toString()
+                nativeOnImeText(windowId, IME_RECOMPOSE, composingText, 0, 0)
+            }
+            return super.setComposingRegion(start, end)
+        }
+
         override fun setSelection(start: Int, end: Int): Boolean {
             val editable = editable ?: return super.setSelection(start, end)
             val oldStart = android.text.Selection.getSelectionStart(editable)
@@ -240,6 +251,7 @@ class WaylandWindowActivity : Activity(), SurfaceHolder.Callback {
             const val IME_COMPOSING = 0
             const val IME_COMMIT = 1
             const val IME_DELETE = 2
+            const val IME_RECOMPOSE = 3
         }
     }
 

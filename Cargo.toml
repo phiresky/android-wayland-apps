@@ -31,7 +31,7 @@ smithay = { version = "0.7.0", default-features = false, features = [
 ] }
 ash = { version = "0.38", default-features = false, features = ["std", "loaded"] }
 ureq = "2"
-pipewire-cam = { path = "pipewire-cam" }
+## pipewire-cam = { path = "pipewire-cam" }  # disabled for now
 tar = "0.4"
 xz2 = "0.1"
 pathdiff = "0.2"

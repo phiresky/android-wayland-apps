@@ -18,11 +18,23 @@ import android.widget.TextView
 class DebugActivity : Activity() {
 
     private lateinit var content: TextView
+    private lateinit var logContent: TextView
+    private lateinit var logScroll: ScrollView
+    private var userScrolled = false
+    private var programmaticScroll = false
     private val handler = Handler(Looper.getMainLooper())
     private val refresh = object : Runnable {
         override fun run() {
             val status = MainActivity.getLastStatus()
             content.text = status.ifEmpty { "No compositor data yet" }
+            logContent.text = nativeGetDebugLog()
+            if (!userScrolled) {
+                logContent.post {
+                    programmaticScroll = true
+                    logScroll.scrollTo(0, logContent.height)
+                    programmaticScroll = false
+                }
+            }
             handler.postDelayed(this, 1000)
         }
     }
@@ -63,12 +75,7 @@ class DebugActivity : Activity() {
         root.addView(toggle)
 
         // Scrollable status content
-        val scroll = ScrollView(this).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.MATCH_PARENT
-            )
-        }
+        val scroll = ScrollView(this)
 
         content = TextView(this).apply {
             typeface = Typeface.MONOSPACE
@@ -81,7 +88,44 @@ class DebugActivity : Activity() {
         }
 
         scroll.addView(content)
-        root.addView(scroll)
+        root.addView(scroll, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
+        ))
+
+        // Log section title
+        val logTitle = TextView(this).apply {
+            text = "Tracing Log"
+            setTextColor(0xFFE0E0E0.toInt())
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(dp(16), dp(12), dp(16), dp(4))
+        }
+        root.addView(logTitle)
+
+        // Scrollable log content
+        logScroll = ScrollView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 2f
+            )
+            setOnScrollChangeListener { v, _, scrollY, _, _ ->
+                if (programmaticScroll) return@setOnScrollChangeListener
+                val sv = v as ScrollView
+                val child = sv.getChildAt(0) ?: return@setOnScrollChangeListener
+                val atBottom = scrollY + sv.height >= child.height - dp(16)
+                userScrolled = !atBottom
+            }
+        }
+        logContent = TextView(this).apply {
+            typeface = Typeface.MONOSPACE
+            setTextColor(0xFF99CC99.toInt())
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            setPadding(dp(16), dp(8), dp(16), dp(16))
+            setTextIsSelectable(true)
+            text = nativeGetDebugLog()
+        }
+        logScroll.addView(logContent)
+        root.addView(logScroll)
+
         setContentView(root)
     }
 
@@ -102,6 +146,7 @@ class DebugActivity : Activity() {
 
     private external fun nativeSetVulkanRendering(enabled: Boolean)
     private external fun nativeGetVulkanRendering(): Boolean
+    private external fun nativeGetDebugLog(): String
 
     companion object {
         init {
