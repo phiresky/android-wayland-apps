@@ -145,13 +145,30 @@ and explicit vsync control. GLES/EGL is only used as fallback for wl_shm clients
 - Async GPU fence (VK_KHR_external_fence_fd) → sync fd passed to SurfaceFlinger
 - Zero CPU copies; one GPU blit for format conversion
 
-### Phase 3: True zero-copy (in progress)
-- Compositor allocates AHardwareBuffers via custom smithay allocator (AhbAllocator)
-- Exports AHB as dmabuf fd (via AHardwareBuffer_getNativeHandle)
-- Client renders directly into the compositor's AHB
-- Compositor presents the AHB directly — no import, no staging, no GPU blit
-- AhbBufferTracker uses inode matching to recognize compositor-allocated dmabufs
-- Requires wiring server-side allocation into zwp_linux_dmabuf_v1 protocol
+### Zero-copy path (experimental, behind `zero-copy` cargo feature)
+- Compositor allocates AHardwareBuffers, exports as dmabuf fds to clients via
+  GBM socket server (`/tmp/gbm-alloc-0`) + Mesa WSI patch
+- Client renders directly into compositor's AHB → presented directly, no GPU blit
+- ~140µs vs ~280µs per frame, but BGRA color swap unsolved (blocking)
+- 2500 lines of extra code; default OFF in debug UI toggle
+- See GPU_RENDERING.md section 5b for full analysis
+
+## Portability
+
+### Compositor side (device-agnostic)
+- AHardwareBuffer + ASurfaceTransaction: standard NDK APIs, all Android devices
+- VK_ANDROID_external_memory_android_hardware_buffer: required Android Vulkan extension
+- Dmabuf import (VK_EXT_external_memory_dma_buf): works on Qualcomm (unadvertised)
+  and Mali (properly advertised). Compositor tested on Samsung (Adreno 830) and
+  Pixel 7 Pro (Mali-G710).
+
+### Client side (device-specific — improving)
+- **Qualcomm (Samsung, most flagships)**: Turnip (Mesa) talks to KGSL directly. Works.
+- **Mali (Pixel, Exynos)**: No open-source driver for proprietary kbase. Software
+  rendering (llvmpipe) works. Investigating Venus (Vulkan proxy) and Bionic libc-shim
+  for device-agnostic GPU access.
+- **Future**: Venus or libc-shim would give all devices GPU acceleration without
+  device-specific Mesa drivers.
 
 ## Input Path
 

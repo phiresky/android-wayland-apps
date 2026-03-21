@@ -111,7 +111,7 @@ LAUNCHER=./files/.proot_launcher_$SUFFIX.sh
 # rlwrap provides local readline (arrow keys, history, Ctrl+R) since
 # run-as UID switch prevents tcsetattr on adb's PTY
 if [ -t 0 ]; then
-    if [ "$USE_RLWRAP" = 1 ] 2>/dev/null; then
+    if [ "${USE_RLWRAP:-0}" = 1 ]; then
         rlwrap -a adb shell -t run-as "$PKG" sh "$LAUNCHER"
     else
         adb shell -t run-as "$PKG" sh "$LAUNCHER"

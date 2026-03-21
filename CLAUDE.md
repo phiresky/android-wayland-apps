@@ -1,6 +1,6 @@
 # Project: android-wayland-apps
 
-Rust-based Wayland compositor on Android. Linux apps run in proot+Arch ARM, render via smithay compositor to Android Activity EGL surfaces.
+Rust-based Wayland compositor on Android. Linux apps run in proot+Arch ARM, render via smithay compositor to Android Activity surfaces. GPU clients use AHardwareBuffer + ASurfaceTransaction (zero CPU copy). Software clients use GLES/EGL fallback.
 
 ## Scripts
 
@@ -10,7 +10,7 @@ Rust-based Wayland compositor on Android. Linux apps run in proot+Arch ARM, rend
 ./run.sh                  # force-stop, start app, stream filtered logcat
 ./adb_runas.sh            # interactive shell in proot Arch rootfs (as alarm)
 ./adb_runas.sh pacman -S mesa-demos   # run a command in proot (as alarm)
-USERNAME=root ./adb_runas.sh         # interactive root shell
+USER_NAME=root ./adb_runas.sh         # interactive root shell
 ```
 
 - `cargo ndk` args (`-t arm64-v8a --platform 35`) are set in `.env` via `CARGO_NDK_TARGET`/`CARGO_NDK_PLATFORM`
@@ -53,11 +53,13 @@ The app's proot setup is in `src/android/proot/process.rs` (ArchProcess).
 
 - **Compositor thread**: runs independently on a background thread with headless EGL (no window surface). Polls on eventfd + Wayland fds. Survives NativeActivity destruction.
 - **NativeActivity/winit**: minimal lifecycle handler for splash screen and setup overlay only. Not used for rendering or input.
-- **WaylandWindowActivity**: one per XDG toplevel. Each has its own Android Surface + EGL surface. Input via JNI callbacks → mpsc channel → compositor thread.
+- **WaylandWindowActivity**: one per XDG toplevel. Each has its own Android Surface. Compositor creates ASurfaceControl child and presents via ASurfaceTransaction_setBuffer (dmabuf clients) or EGL surface (wl_shm clients). Input via JNI callbacks → mpsc channel → compositor thread.
 - **Foreground service** (`CompositorService`): keeps the process alive when NativeActivity is backgrounded.
 - **Wake mechanism**: eventfd replaces winit's EventLoopProxy. JNI callbacks and Wayland commits signal the eventfd to wake the compositor poll loop.
+- **Proot config**: `proot-config.json` is the single source of truth for proot binds + env vars, read by both `process.rs` (Rust, `include_str!` + `serde_json`) and `adb_runas.sh` (bash + `jq`).
 - Keyboard init deferred until xkb data directory exists (prevents SIGSEGV)
 - Don't use immersive fullscreen on WaylandWindowActivity — breaks in DeX windowed mode
+- GPU env vars (Zink) only set when `/dev/kgsl-3d0` exists (Qualcomm). On non-Qualcomm devices, apps fall back to llvmpipe software rendering.
 
 ## Key Config
 
