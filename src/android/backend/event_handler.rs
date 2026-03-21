@@ -247,13 +247,19 @@ fn process_window_events(backend: &mut WaylandBackend) {
                         tracing::info!("Surface destroyed for window_id={}", window_id);
                     }
             }
+            WindowEvent::CloseRequested { window_id } => {
+                // User requested close (back button, DeX X). Send XDG close to client.
+                // The client may refuse (e.g. "save changes?" dialog).
+                // The Activity only finishes when the client destroys its surface.
+                if let Some(wm) = backend.window_manager.as_ref()
+                    && let Some(window) = wm.windows.get(&window_id) {
+                        window.surface_kind.send_close();
+                    }
+            }
             WindowEvent::WindowClosed { window_id, is_finishing } => {
                 if is_finishing {
-                    // User actually closed the window — tell the Wayland client
-                    if let Some(wm) = backend.window_manager.as_ref()
-                        && let Some(window) = wm.windows.get(&window_id) {
-                            window.surface_kind.send_close();
-                        }
+                    // Activity was actually destroyed (compositor-initiated via finishByWindowId).
+                    // Clean up if the window still exists (safety net).
                     if let Some(wm) = backend.window_manager.as_mut() {
                         wm.remove_window(window_id);
                     }
@@ -290,8 +296,8 @@ fn process_window_events(backend: &mut WaylandBackend) {
             WindowEvent::ImeCommit { window_id, text } => {
                 handle_ime_commit(backend, window_id, text);
             }
-            WindowEvent::ImeDelete { window_id, before, after } => {
-                handle_ime_delete(backend, window_id, before, after);
+            WindowEvent::ImeDelete { window_id, before, after, text } => {
+                handle_ime_delete(backend, window_id, before, after, &text);
             }
             WindowEvent::ImeRecompose { window_id, text } => {
                 handle_ime_recompose(backend, window_id, text);
@@ -1147,15 +1153,17 @@ fn handle_ime_commit(backend: &mut WaylandBackend, window_id: u32, text: String)
 }
 
 /// Handle delete surrounding text from Android IME (e.g. backspace).
-fn handle_ime_delete(backend: &mut WaylandBackend, window_id: u32, before: i32, after: i32) {
+/// `deleted_text` is the actual text being deleted (from the Editable), used for
+/// correct UTF-8 byte counts in text_input_v3 (emoji = 4 bytes, not 1).
+fn handle_ime_delete(backend: &mut WaylandBackend, window_id: u32, before: i32, after: i32, deleted_text: &str) {
     ensure_ime_focus(backend, window_id);
 
     if backend.compositor.state.text_input_state.is_active() {
-        // text_input_v3 path: send delete_surrounding_text + done
-        // Assume 1 byte per char (correct for ASCII/Latin-1)
-        backend.compositor.state.text_input_state.send_delete(before as u32, after as u32);
+        // text_input_v3 path: use actual UTF-8 byte length for correct emoji handling
+        let before_bytes = if deleted_text.is_empty() { before as u32 } else { deleted_text.len() as u32 };
+        backend.compositor.state.text_input_state.send_delete(before_bytes, after as u32);
     } else {
-        // Key-event fallback: send backspace/delete key events
+        // Key-event fallback: use character counts (one backspace per char)
         send_ime_key_events(backend, before as usize, after as usize, "");
     }
 }

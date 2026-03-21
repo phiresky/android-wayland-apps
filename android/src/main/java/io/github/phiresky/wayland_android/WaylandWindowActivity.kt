@@ -30,6 +30,13 @@ class WaylandWindowActivity : Activity(), SurfaceHolder.Callback {
     private lateinit var surfaceView: SurfaceView
     private lateinit var menuAnchor: View
     private var longPressActive = false
+    // Shared Editable across InputConnection instances so text context survives
+    // IME restarts (Gboard restarts the connection before doing corrections).
+    private val sharedEditable: android.text.Editable = android.text.SpannableStringBuilder().also {
+        android.text.Selection.setSelection(it, 0)
+    }
+    /** Set to true when the compositor tells us to close (client destroyed its surface). */
+    var closingByCompositor = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -49,9 +56,15 @@ class WaylandWindowActivity : Activity(), SurfaceHolder.Callback {
             override fun onCheckIsTextEditor(): Boolean = true
 
             override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
-                outAttrs.inputType = InputType.TYPE_CLASS_TEXT
-                outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN
-                return WaylandInputConnection(this, this@WaylandWindowActivity.windowId)
+                outAttrs.inputType = InputType.TYPE_CLASS_TEXT or
+                    InputType.TYPE_TEXT_FLAG_AUTO_CORRECT or
+                    InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN or
+                    EditorInfo.IME_ACTION_NONE
+                val ed = this@WaylandWindowActivity.sharedEditable
+                outAttrs.initialSelStart = android.text.Selection.getSelectionStart(ed)
+                outAttrs.initialSelEnd = android.text.Selection.getSelectionEnd(ed)
+                return WaylandInputConnection(this, this@WaylandWindowActivity.windowId, this@WaylandWindowActivity.sharedEditable)
             }
         }
         surfaceView.isFocusable = true
@@ -150,6 +163,20 @@ class WaylandWindowActivity : Activity(), SurfaceHolder.Callback {
         nativeSurfaceDestroyed(windowId)
     }
 
+    /**
+     * Intercept user-initiated close (back button, DeX X button).
+     * Instead of finishing immediately, ask the Wayland client to close.
+     * The client may refuse (e.g. gedit's "save changes?" dialog).
+     * The Activity only actually finishes when the compositor calls finishByWindowId().
+     */
+    override fun finish() {
+        if (closingByCompositor) {
+            super.finish()
+        } else {
+            nativeRequestClose(windowId)
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         instances.remove(windowId)
@@ -180,29 +207,68 @@ class WaylandWindowActivity : Activity(), SurfaceHolder.Callback {
      * have text context to work with.
      */
     private class WaylandInputConnection(
-        targetView: View,
+        private val view: View,
         private val windowId: Int,
-    ) : BaseInputConnection(targetView, true) {
+        private val sharedEditable: android.text.Editable,
+    ) : BaseInputConnection(view, true) {
 
         private var composingText = ""
+
+        override fun getEditable(): android.text.Editable = sharedEditable
+
+        /** Notify the IME about cursor position, composing region, and text content.
+         *  Gboard relies on CursorAnchorInfo (not getTextBeforeCursor) to track editor state. */
+        private fun notifyImeState() {
+            val imm = view.context.getSystemService(android.content.Context.INPUT_METHOD_SERVICE)
+                as? InputMethodManager ?: return
+            val ed = editable
+            val selStart = android.text.Selection.getSelectionStart(ed)
+            val selEnd = android.text.Selection.getSelectionEnd(ed)
+            val compStart = getComposingSpanStart(ed)
+            val compEnd = getComposingSpanEnd(ed)
+            imm.updateSelection(view, selStart, selEnd, compStart, compEnd)
+
+            val builder = android.view.inputmethod.CursorAnchorInfo.Builder()
+            builder.setSelectionRange(selStart, selEnd)
+            builder.setMatrix(android.graphics.Matrix())
+            if (compStart >= 0 && compEnd > compStart) {
+                builder.setComposingText(compStart, ed.subSequence(compStart, compEnd))
+            }
+            imm.updateCursorAnchorInfo(view, builder.build())
+        }
 
         override fun setComposingText(text: CharSequence, newCursorPosition: Int): Boolean {
             composingText = text.toString()
             nativeOnImeText(windowId, IME_COMPOSING, composingText, 0, 0)
-            return super.setComposingText(text, newCursorPosition)
+            val result = super.setComposingText(text, newCursorPosition)
+            notifyImeState()
+            return result
         }
 
         override fun commitText(text: CharSequence, newCursorPosition: Int): Boolean {
             composingText = ""
             nativeOnImeText(windowId, IME_COMMIT, text.toString(), 0, 0)
-            return super.commitText(text, newCursorPosition)
+            val result = super.commitText(text, newCursorPosition)
+            notifyImeState()
+            return result
         }
 
         override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
             if (beforeLength > 0 || afterLength > 0) {
-                nativeOnImeText(windowId, IME_DELETE, "", beforeLength, afterLength)
+                var deletedBefore = ""
+                val editable = editable
+                if (editable != null) {
+                    val cursor = android.text.Selection.getSelectionStart(editable)
+                    if (cursor >= 0) {
+                        val start = (cursor - beforeLength).coerceAtLeast(0)
+                        deletedBefore = editable.subSequence(start, cursor).toString()
+                    }
+                }
+                nativeOnImeText(windowId, IME_DELETE, deletedBefore, beforeLength, afterLength)
             }
-            return super.deleteSurroundingText(beforeLength, afterLength)
+            val result = super.deleteSurroundingText(beforeLength, afterLength)
+            notifyImeState()
+            return result
         }
 
         override fun finishComposingText(): Boolean {
@@ -210,7 +276,9 @@ class WaylandWindowActivity : Activity(), SurfaceHolder.Callback {
                 nativeOnImeText(windowId, IME_COMMIT, composingText, 0, 0)
             }
             composingText = ""
-            return super.finishComposingText()
+            val result = super.finishComposingText()
+            notifyImeState()
+            return result
         }
 
         override fun setComposingRegion(start: Int, end: Int): Boolean {
@@ -218,10 +286,59 @@ class WaylandWindowActivity : Activity(), SurfaceHolder.Callback {
             if (editable != null) {
                 val s = start.coerceIn(0, editable.length)
                 val e = end.coerceIn(0, editable.length)
-                composingText = editable.subSequence(minOf(s, e), maxOf(s, e)).toString()
+                val regionStart = minOf(s, e)
+                val regionEnd = maxOf(s, e)
+                composingText = editable.subSequence(regionStart, regionEnd).toString()
+
+                // Move cursor to end of composing region so subsequent operations
+                // (backspaces, delete_surrounding_text) target the right text.
+                val cursor = android.text.Selection.getSelectionStart(editable)
+                if (cursor >= 0 && cursor != regionEnd) {
+                    val delta = cursor - regionEnd
+                    val keyCode = if (delta > 0)
+                        KeyEvent.KEYCODE_DPAD_LEFT else KeyEvent.KEYCODE_DPAD_RIGHT
+                    for (i in 0 until kotlin.math.abs(delta)) {
+                        nativeOnKeyEvent(windowId, keyCode, KeyEvent.ACTION_DOWN, 0)
+                        nativeOnKeyEvent(windowId, keyCode, KeyEvent.ACTION_UP, 0)
+                    }
+                }
+
                 nativeOnImeText(windowId, IME_RECOMPOSE, composingText, 0, 0)
             }
             return super.setComposingRegion(start, end)
+        }
+
+        override fun replaceText(start: Int, end: Int, text: CharSequence, newCursorPosition: Int, textAttribute: android.view.inputmethod.TextAttribute?): Boolean {
+            // API 34+: Gboard uses this for corrections (e.g. "hello" → "help").
+            // Use arrow keys + backspace key events for the delete (works for both
+            // text editors and terminals — terminals don't track surrounding text,
+            // so text_input_v3 delete_surrounding_text is a no-op for them).
+            val editable = editable
+            val clampedEnd = if (editable != null) end.coerceAtMost(editable.length) else end
+            // Move cursor to end of replacement range
+            if (editable != null) {
+                val cursor = android.text.Selection.getSelectionStart(editable)
+                if (cursor >= 0 && cursor != clampedEnd) {
+                    val delta = cursor - clampedEnd
+                    val keyCode = if (delta > 0)
+                        KeyEvent.KEYCODE_DPAD_LEFT else KeyEvent.KEYCODE_DPAD_RIGHT
+                    for (i in 0 until kotlin.math.abs(delta)) {
+                        nativeOnKeyEvent(windowId, keyCode, KeyEvent.ACTION_DOWN, 0)
+                        nativeOnKeyEvent(windowId, keyCode, KeyEvent.ACTION_UP, 0)
+                    }
+                }
+            }
+            // Delete old text via backspace key events
+            val deleteCount = clampedEnd - start
+            for (i in 0 until deleteCount) {
+                nativeOnKeyEvent(windowId, KeyEvent.KEYCODE_DEL, KeyEvent.ACTION_DOWN, 0)
+                nativeOnKeyEvent(windowId, KeyEvent.KEYCODE_DEL, KeyEvent.ACTION_UP, 0)
+            }
+            // Insert new text via commit (uses text_input_v3 if available)
+            nativeOnImeText(windowId, IME_COMMIT, text.toString(), 0, 0)
+            val result = super.replaceText(start, end, text, newCursorPosition, textAttribute)
+            notifyImeState()
+            return result
         }
 
         override fun setSelection(start: Int, end: Int): Boolean {
@@ -246,6 +363,8 @@ class WaylandWindowActivity : Activity(), SurfaceHolder.Callback {
             nativeOnKeyEvent(windowId, event.keyCode, event.action, event.metaState)
             return true
         }
+
+        override fun requestCursorUpdates(cursorUpdateMode: Int): Boolean = true
 
         companion object {
             const val IME_COMPOSING = 0
@@ -277,7 +396,10 @@ class WaylandWindowActivity : Activity(), SurfaceHolder.Callback {
         @JvmStatic
         fun finishByWindowId(windowId: Int) {
             val activity = getByWindowId(windowId) ?: return
-            activity.runOnUiThread { activity.finish() }
+            activity.runOnUiThread {
+                activity.closingByCompositor = true
+                activity.finish()
+            }
         }
 
         /**
@@ -320,6 +442,9 @@ class WaylandWindowActivity : Activity(), SurfaceHolder.Callback {
 
         @JvmStatic
         private external fun nativeOnImeText(windowId: Int, imeType: Int, text: String, deleteBefore: Int, deleteAfter: Int)
+
+        @JvmStatic
+        private external fun nativeRequestClose(windowId: Int)
 
         @JvmStatic
         private external fun nativeRightClick(windowId: Int, x: Float, y: Float)

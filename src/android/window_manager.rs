@@ -32,12 +32,13 @@ pub enum WindowEvent {
     SurfaceChanged { window_id: u32, width: i32, height: i32 },
     SurfaceDestroyed { window_id: u32 },
     WindowClosed { window_id: u32, is_finishing: bool },
+    CloseRequested { window_id: u32 },
     Touch { window_id: u32, action: i32, x: f32, y: f32 },
     Key { window_id: u32, key_code: i32, action: i32, meta_state: i32 },
     RightClick { window_id: u32, x: f32, y: f32 },
     ImeComposing { window_id: u32, text: String },
     ImeCommit { window_id: u32, text: String },
-    ImeDelete { window_id: u32, before: i32, after: i32 },
+    ImeDelete { window_id: u32, before: i32, after: i32, text: String },
     ImeRecompose { window_id: u32, text: String },
 }
 
@@ -417,6 +418,19 @@ extern "system" fn Java_io_github_phiresky_wayland_1android_WaylandWindowActivit
     });
 }
 
+/// JNI callback: user requested close (back button, DeX X). Send XDG close to client.
+#[unsafe(no_mangle)]
+extern "system" fn Java_io_github_phiresky_wayland_1android_WaylandWindowActivity_nativeRequestClose(
+    _env: JNIEnv,
+    _class: JObject,
+    window_id: i32,
+) {
+    tracing::info!("JNI: closeRequested window_id={}", window_id);
+    send_event(WindowEvent::CloseRequested {
+        window_id: window_id as u32,
+    });
+}
+
 #[unsafe(no_mangle)]
 extern "system" fn Java_io_github_phiresky_wayland_1android_WaylandWindowActivity_nativeOnTouchEvent(
     _env: JNIEnv,
@@ -469,7 +483,7 @@ extern "system" fn Java_io_github_phiresky_wayland_1android_WaylandWindowActivit
     let event = match ime_type {
         0 => WindowEvent::ImeComposing { window_id: window_id as u32, text },
         1 => WindowEvent::ImeCommit { window_id: window_id as u32, text },
-        2 => WindowEvent::ImeDelete { window_id: window_id as u32, before: delete_before, after: delete_after },
+        2 => WindowEvent::ImeDelete { window_id: window_id as u32, before: delete_before, after: delete_after, text },
         3 => WindowEvent::ImeRecompose { window_id: window_id as u32, text },
         _ => return,
     };
