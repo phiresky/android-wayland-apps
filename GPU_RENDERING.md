@@ -4,8 +4,10 @@
 
 Linux apps running in proot can use hardware GPU acceleration via **Turnip** (Mesa's open-source Vulkan driver for Adreno GPUs) talking to the **KGSL** kernel driver (`/dev/kgsl-3d0`). The compositor imports rendered frames via `zwp_linux_dmabuf_v1`.
 
-**Current status**: Zero-copy GPU compositing via Vulkan bridge. Both client rendering
-and compositor display use the same KGSL GPU memory — no CPU copies.
+**Current status**: Zero-copy GPU compositing via AHardwareBuffer + ASurfaceTransaction.
+Client rendering and compositor display use the same KGSL GPU memory — no CPU copies.
+Compositor blits dmabuf → AHB (GPU-only) and presents via ASurfaceTransaction_setBuffer,
+bypassing the Vulkan swapchain entirely.
 
 ## Device Info
 
@@ -18,16 +20,16 @@ and compositor display use the same KGSL GPU memory — no CPU copies.
 
 Two rendering paths depending on client buffer type:
 
-### Vulkan clients (zero-copy) — dmabuf path
+### Vulkan/GL clients (GPU zero-copy) — dmabuf + AHB path
 ```
 ┌──────────────────────┐    ┌───────────────────────────────┐
 │  Linux App (proot)   │    │  Compositor (Android app)     │
 │                      │    │                               │
 │  Vulkan API          │    │  VulkanRenderer (ash crate)   │
 │  ↓                   │    │  ↓ import DMA_BUF_BIT_EXT     │
-│  Turnip (Mesa)       │    │  ↓ vkCmdCopyBufferToImage     │
-│  ↓                   │    │  ↓ vkQueuePresent             │
-│  KGSL ioctls         │    │  Android SurfaceView          │
+│  Turnip (Mesa)       │    │  ↓ GPU blit → AHardwareBuffer │
+│  ↓                   │    │  ↓ ASurfaceTransaction        │
+│  KGSL ioctls         │    │  → SurfaceFlinger (direct)    │
 │  ↓                   │    │                               │
 │  /dev/kgsl-3d0  ←────────→  Qualcomm proprietary Vulkan   │
 └──────────┬───────────┘    └───────────────┬───────────────┘
@@ -40,6 +42,12 @@ Key insight: both Turnip (Mesa) and the proprietary Qualcomm Vulkan driver talk 
 the same KGSL kernel driver. The proprietary driver accepts Turnip's dmabufs via
 `VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT` (works even though the extension
 `VK_EXT_external_memory_dma_buf` is not advertised).
+
+Presentation uses `ASurfaceTransaction_setBuffer` with `AHardwareBuffer` targets,
+bypassing the Vulkan swapchain. The AHB is imported into Vulkan via
+`VK_ANDROID_external_memory_android_hardware_buffer` as a blit target.
+`ASurfaceTransaction_setOnComplete` provides vsync-locked frame pacing.
+`ASurfaceTransaction_setGeometry` scales the buffer to fill the window.
 
 ### wl_shm clients (CPU) — fallback path
 ```
@@ -76,11 +84,12 @@ The compositor uses the **proprietary Qualcomm Vulkan driver** (NOT Turnip) for
 zero-copy dmabuf compositing. This is separate from smithay's GLES renderer.
 
 - Creates a Vulkan instance + device using Android's `libvulkan.so`
-- Extensions: `VK_KHR_swapchain`, `VK_KHR_external_memory_fd`, `VK_KHR_android_surface`
-- Per-window: creates `VkSwapchainKHR` on the Android `ANativeWindow`
-- Per-frame: imports client dmabuf via `DMA_BUF_BIT_EXT`, creates `VkBuffer` with
-  explicit stride, `vkCmdCopyBufferToImage` to swapchain, `vkQueuePresent`
-- Caches imported dmabufs by fd (~3-5 swapchain buffers, reused across frames)
+- Extensions: `VK_KHR_external_memory_fd`, `VK_ANDROID_external_memory_android_hardware_buffer`
+- Per-window: allocates `AHardwareBuffer` (RGBA, GPU_FRAMEBUFFER | COMPOSER_OVERLAY),
+  imports into Vulkan as `VkImage` via `VK_ANDROID_external_memory_android_hardware_buffer`
+- Per-frame: imports client dmabuf via `DMA_BUF_BIT_EXT`, blits to AHB target
+- Presents via `ASurfaceTransaction_setBuffer` (no Vulkan swapchain)
+- Caches imported dmabufs by fd (~3-5 buffers, reused across frames)
 
 ### 3. Dmabuf Protocol Support
 
@@ -95,7 +104,7 @@ For wl_shm clients or if Vulkan renderer is unavailable:
 - `import_dmabuf_via_ahb()`: AHardwareBuffer path (fails on Samsung gralloc)
 - `import_dmabuf_via_memory_object()`: GL_EXT_memory_object_fd (broken on Qualcomm)
 
-### 5. Rendering Pipeline (zero-copy Vulkan path)
+### 5. Rendering Pipeline (zero-copy GPU path)
 
 ```
 1. Turnip renders scene on GPU via KGSL
@@ -104,20 +113,22 @@ For wl_shm clients or if Vulkan renderer is unavailable:
 4. Compositor receives fd, looks up in dmabuf cache (by fd, validated by size)
 5. If not cached: vkAllocateMemory(DMA_BUF import) + vkCreateBuffer
 6. vkCmdCopyBufferToImage from buffer to LINEAR staging VkImage (BGRA format)
-7. vkCmdBlitImage from staging to swapchain image (BGRA→RGBA conversion)
-8. vkQueuePresent to Android SurfaceView
+7. vkCmdBlitImage from staging to AHB VkImage (BGRA→RGBA conversion)
+8. ASurfaceTransaction_setBuffer(ahb) → SurfaceFlinger
 ```
 
 Steps 1-8 are all GPU operations — zero CPU copies. The staging image in step 6-7
 is needed because:
-- Android's Vulkan swapchain only supports R8G8B8A8, but Turnip/Zink dmabufs use
-  DRM_FORMAT_XRGB8888 (B8G8R8A8 memory layout). `vkCmdBlitImage` handles the
-  format conversion.
+- AHBs are R8G8B8A8, but Turnip/Zink dmabufs use DRM_FORMAT_XRGB8888 (B8G8R8A8
+  memory layout). `vkCmdBlitImage` handles the format conversion.
 - The imported dmabuf VkImage has OPTIMAL tiling, which Qualcomm interprets as UBWC
   (Universal Bandwidth Compression). Since the dmabuf is LINEAR, reading it via the
   imported VkImage directly causes horizontal stripes. The LINEAR staging image avoids this.
-- `ANativeWindow_setBuffersGeometry(format=BGRA)` does NOT work — the Qualcomm
-  Vulkan driver always creates R8G8B8A8 swapchains regardless of the ANativeWindow format.
+
+Presentation uses `ASurfaceTransaction_setBuffer` instead of a Vulkan swapchain.
+Benefits: no BufferQueue overhead, potential hardware overlay / direct scanout,
+explicit vsync via `ASurfaceTransaction_setOnComplete` callback.
+`ASurfaceTransaction_setGeometry` scales the buffer to fill the SurfaceView.
 
 ### 6. Key Implementation Details
 
@@ -125,20 +136,23 @@ is needed because:
   Kernel fd reuse means the same fd number can point to different GPU memory after
   resize. Stale cache entries caused a strobe between current and frozen frames.
 - **Lazy EGL surface creation**: EGL surfaces are NOT created in `surfaceCreated`.
-  Creating EGL eagerly locks the ANativeWindow format to RGBA, which the Vulkan
-  swapchain inherits. Deferring to the first GLES render lets the Vulkan path claim
-  the window first (for dmabuf clients). For wl_shm clients, EGL is created lazily
-  when the GLES render path first needs it.
-- **Swapchain resize**: Uses `oldSwapchain` chaining (not destroy+recreate) to avoid
-  `ERROR_NATIVE_WINDOW_IN_USE_KHR` races. Buffer geometry is set via
-  `ANativeWindow_setBuffersGeometry` to match the client's buffer size — Android's
-  SurfaceFlinger upscales to fill the SurfaceView.
+  Deferring to the first GLES render lets the AHB path claim the window first (for
+  dmabuf clients). For wl_shm clients, EGL is created lazily when needed.
+- **AHB resize**: When the client buffer size changes, the AHB target is destroyed
+  and recreated. The `ASurfaceControl` persists across resizes.
+- **Surface lifecycle**: `ahb_surface` is destroyed on `SurfaceDestroyed` and
+  recreated on the next dmabuf commit after `SurfaceCreated`. This handles task
+  switching (recents → back) where Android destroys and recreates the surface.
 - **Frame callback for unmapped windows**: Frame callbacks are sent for windows without
-  EGL/VK surfaces. Without this, EGL clients (e.g. Factorio via llvmpipe) block
+  EGL/AHB surfaces. Without this, EGL clients (e.g. Factorio via llvmpipe) block
   forever in `eglSwapBuffers` waiting for a callback that never comes.
-- **needs_redraw guard**: Vulkan blits only run on new commits. Re-blitting without
+- **Vsync throttling**: `ASurfaceTransaction_setOnComplete` callback sets a
+  `frame_in_flight` flag. The compositor skips blitting (and suppresses frame
+  callbacks) while the previous frame is still on screen, naturally throttling
+  clients to the display refresh rate.
+- **needs_redraw guard**: Blits only run on new commits. Re-blitting without
   new content causes a race condition — the compositor reads the dmabuf while the
-  client writes the next frame to the same GPU memory (fd reuse in swapchain pool).
+  client writes the next frame to the same GPU memory.
 
 ## How to Reproduce (vkcube test)
 
@@ -176,9 +190,9 @@ and `XDG_RUNTIME_DIR=/tmp`. Turnip's ICD is found via the default Vulkan loader 
 
 | Client type | Status | Path |
 |-------------|--------|------|
-| Vulkan (vkcube) | **Working** | Turnip → dmabuf → VkBuffer import → staging blit → swapchain |
-| OpenGL (via Zink) | **Working** | Zink → Turnip → Kopper → dmabuf → same Vulkan path |
-| OpenGL (box64, e.g. Factorio) | **Working** | x86_64 Zink via box64 → dmabuf → Vulkan path |
+| Vulkan (vkcube) | **Working** | Turnip → dmabuf → GPU blit → AHB → ASurfaceTransaction |
+| OpenGL (via Zink) | **Working** | Zink → Turnip → Kopper → dmabuf → same AHB path |
+| OpenGL (box64, e.g. Factorio) | **Working** | x86_64 Zink via box64 → dmabuf → AHB path |
 | wl_shm (software) | **Working** | CPU shared memory → GLES renderer (lazy EGL surface) |
 
 ### OpenGL via Zink
@@ -284,17 +298,18 @@ KGSL kernel driver, so the GPU memory is never copied.
 dmabuf fd (from KGSL/Turnip)
   → vkAllocateMemory(DMA_BUF_BIT_EXT)           ✓ zero-copy import
   → vkCreateBuffer (explicit stride)             ✓ raw buffer view
-  → vkCmdCopyBufferToImage (to swapchain)        ✓ GPU-side blit
-  → vkQueuePresent (Android surface)             ✓ displayed
+  → vkCmdCopyBufferToImage (to LINEAR staging)   ✓ GPU-side copy
+  → vkCmdBlitImage (staging → AHB, BGRA→RGBA)   ✓ GPU format conversion
+  → ASurfaceTransaction_setBuffer(ahb)           ✓ direct to SurfaceFlinger
 ```
 
 **Key discovery:** The GL path (EGL, GL_EXT_memory_object_fd) is completely broken
 on Qualcomm Adreno 830. The working path bypasses GLES entirely — compositor uses
-the proprietary Vulkan driver directly for dmabuf import and swapchain presentation.
+the proprietary Vulkan driver for dmabuf import and AHB presentation.
 
 The GLES renderer (smithay GlesRenderer) is still used for wl_shm clients. Both
-renderers coexist: each window has both an EGL surface and a Vulkan swapchain,
-and the compositor picks the right path based on buffer type.
+renderers coexist: each window uses either an AHB surface (dmabuf clients) or an
+EGL surface (wl_shm clients), chosen based on buffer type.
 
 ## All Approaches Tried
 
