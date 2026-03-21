@@ -44,8 +44,11 @@ Example target app: gedit.
 - Forwards Android input events back to the appropriate Wayland client
 
 **Android Activities (one per window)**
-- Each Activity owns an EGL surface backed by Android's stock GLES driver
-- The compositor renders the Wayland client's buffer onto this surface
+- Each Activity has a SurfaceView; the compositor creates an ASurfaceControl
+  child and presents frames via ASurfaceTransaction_setBuffer
+- GPU-rendered clients (dmabuf): Vulkan imports the dmabuf, blits to an
+  AHardwareBuffer target, presents via ASurfaceTransaction (zero CPU copy)
+- Software clients (wl_shm): GLES texture upload to an EGL surface (fallback)
 - Android's window manager handles positioning, resizing, and lifecycle
 - On resize, the compositor sends xdg_toplevel configure events back to the
   client
@@ -81,11 +84,13 @@ provide a standard Linux filesystem layout where `pacman -S gedit` just works.
 **Why not chroot/LXC?**
 Requires root on Android. proot is rootless.
 
-**Why stock Android GLES instead of mesa?**
-Mesa's open-source GPU drivers (iris, freedreno) have limited Android support
-and would restrict us to specific hardware. Android's stock GLES drivers work
-on all ARM devices. The compositor uses EGL/GLES via Android's libEGL.so
-directly.
+**Why proprietary Qualcomm Vulkan + AHB instead of GLES/swapchain?**
+Mesa's GL_EXT_memory_object_fd is broken on Qualcomm Adreno 830. The working
+path uses the proprietary Vulkan driver to import client dmabufs via
+DMA_BUF_BIT_EXT (unadvertised but functional — both Turnip and the proprietary
+driver share the same KGSL kernel driver). Presentation uses AHardwareBuffer +
+ASurfaceTransaction instead of a Vulkan swapchain, enabling hardware overlays
+and explicit vsync control. GLES/EGL is only used as fallback for wl_shm clients.
 
 ## Wayland ↔ Android Feature Mapping
 
@@ -97,7 +102,7 @@ directly.
 | wlr_layer_shell | Each layer surface → own Activity (same as toplevel) | Desktop shell components: panels, app launchers, notification areas (e.g. nwg-panel, waybar). Apps crash without it. | Implemented |
 | **Rendering** | | | |
 | wl_shm buffers | Compositor uploads SHM → GLES texture → Activity EGL surface | Baseline rendering path — all Wayland clients support this | Implemented |
-| dmabuf / AHardwareBuffer | Zero-copy GPU via ASurfaceTransaction | Eliminates CPU copy for GPU-rendered clients (GTK4 GL, games) | Not implemented |
+| dmabuf / AHardwareBuffer | Vulkan import → GPU blit → AHB → ASurfaceTransaction | Zero CPU copy for GPU-rendered clients (GTK4 GL, games) | Implemented |
 | wp_fractional_scale | Activity display density (scale factor from DisplayMetrics) | HiDPI: apps render at native resolution instead of being scaled | Implemented |
 | Surface damage | Full-surface redraw each frame | Partial damage tracking would reduce GPU work | Implemented (no partial) |
 | **Input** | | | |
@@ -125,30 +130,35 @@ directly.
 
 ## Rendering Path
 
-### Phase 1: SHM (CPU copy, initial implementation)
+### wl_shm path (software clients)
 - Wayland clients render into shared memory buffers (wl_shm)
-- Compositor reads the SHM buffer and uploads it as a GLES texture
-- Texture is drawn to the Activity's EGL surface
-- Simple, works everywhere, but involves a CPU copy
+- Compositor uploads SHM buffer as GLES texture via smithay GlesRenderer
+- Texture drawn to the Activity's EGL surface
+- Works everywhere, involves CPU copy
 
-### Phase 2: Zero-copy GPU (optimization)
-- Use AHardwareBuffer as the backing store for Wayland buffers
-- Compositor creates AHardwareBuffers via NDK and shares them with clients
-  as dmabuf file descriptors
-- Client renders directly into the GPU buffer
-- Buffer is presented to the Activity's surface via ASurfaceTransaction
-- Zero CPU copies in the rendering path
-- Requires implementing a custom smithay allocator backed by AHardwareBuffer
-- check also https://github.com/tareksander/hardware-buffer-rs and  https://github.com/Xtr126/wlroots-android-bridge
+### dmabuf path (GPU clients — current)
+- Client renders via Turnip (Mesa Vulkan for Adreno) → exports dmabuf fd
+- Compositor imports dmabuf via proprietary Qualcomm Vulkan (DMA_BUF_BIT_EXT)
+- GPU blit: dmabuf → LINEAR staging image → AHardwareBuffer (BGRA→RGBA)
+- Presents via ASurfaceTransaction_setBuffer — bypasses Vulkan swapchain
+- OnComplete callback for vsync-locked frame pacing
+- Async GPU fence (VK_KHR_external_fence_fd) → sync fd passed to SurfaceFlinger
+- Zero CPU copies; one GPU blit for format conversion
+
+### Phase 3: True zero-copy (in progress)
+- Compositor allocates AHardwareBuffers via custom smithay allocator (AhbAllocator)
+- Exports AHB as dmabuf fd (via AHardwareBuffer_getNativeHandle)
+- Client renders directly into the compositor's AHB
+- Compositor presents the AHB directly — no import, no staging, no GPU blit
+- AhbBufferTracker uses inode matching to recognize compositor-allocated dmabufs
+- Requires wiring server-side allocation into zwp_linux_dmabuf_v1 protocol
 
 ## Input Path
 
-Android Activity receives touch/keyboard/mouse events via winit or raw
-NativeActivity callbacks. The compositor translates these to Wayland input
-events and dispatches them to the focused client via wl_seat.
-
-For multi-window, each Activity forwards its input events to the compositor,
-which knows which Wayland client owns that Activity's surface.
+Each WaylandWindowActivity forwards touch/keyboard/mouse events to the
+compositor thread via JNI callbacks → mpsc channel → eventfd wake.
+The compositor translates these to Wayland input events and dispatches
+them to the focused client via wl_seat.
 
 ## References
 
