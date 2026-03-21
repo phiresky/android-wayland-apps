@@ -13,6 +13,7 @@ use crate::android::compositor::Compositor;
 use crate::android::window_manager::WindowManager;
 
 use std::os::unix::io::RawFd;
+use std::sync::{Arc, Mutex};
 
 pub struct WaylandBackend {
     pub compositor: Compositor,
@@ -25,6 +26,8 @@ pub struct WaylandBackend {
     pub ahb_allocator: Option<ahb_allocator::AhbAllocator>,
     /// Tracks compositor-allocated AHBs so we can recognize them at commit time.
     pub ahb_tracker: ahb_allocator::AhbBufferTracker,
+    /// Shared state from GBM allocator server (has the real tracker).
+    pub gbm_state: Option<Arc<Mutex<gbm_server::GbmServerState>>>,
 }
 
 /// Signal the compositor thread to wake up via eventfd.

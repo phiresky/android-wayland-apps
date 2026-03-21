@@ -1,0 +1,140 @@
+src/vulkan/wsi/wsi_common_drm.c --- 1/2 --- Text (2 C parse errors, exceeded DFT_PARSE_ERROR_LIMIT)
+ 38  38 #include "util/libsync.h"
+ 39  39 
+ 40  40 #include <errno.h>
+ ..  41 #include <sys/socket.h>
+ ..  42 #include <sys/un.h>
+ 41  43 #include <time.h>
+ 42  44 #include <unistd.h>
+ 43  45 #include <stdlib.h>
+
+src/vulkan/wsi/wsi_common_drm.c --- 2/2 --- Text (2 C parse errors, exceeded DFT_PARSE_ERROR_LIMIT)
+739 741                               &image->dma_buf_fd);
+740 742 }
+741 743 
+... 744 /* ── GBM proxy: allocate WSI buffers from compositor's AHB pool ──────── */
+... 745 
+... 746 struct gbm_proxy_req {
+... 747    uint32_t msg_type, width, height, format, flags, _pad;
+... 748 };
+... 749 struct gbm_proxy_resp {
+... 750    uint32_t success, width, height, stride, format, _pad;
+... 751    uint64_t modifier;
+... 752 };
+... 753 
+... 754 static uint32_t
+... 755 vk_format_to_drm_fourcc(VkFormat fmt)
+... 756 {
+... 757    switch (fmt) {
+... 758    case VK_FORMAT_B8G8R8A8_UNORM:
+... 759    case VK_FORMAT_B8G8R8A8_SRGB:   return DRM_FORMAT_ARGB8888;
+... 760    case VK_FORMAT_R8G8B8A8_UNORM:
+... 761    case VK_FORMAT_R8G8B8A8_SRGB:   return DRM_FORMAT_ABGR8888;
+... 762    case VK_FORMAT_A2B10G10R10_UNORM_PACK32: return DRM_FORMAT_ABGR2101010;
+... 763    case VK_FORMAT_R16G16B16A16_SFLOAT:      return DRM_FORMAT_ABGR16161616F;
+... 764    default:                        return DRM_FORMAT_ARGB8888;
+... 765    }
+... 766 }
+... 767 
+742 768 static VkResult
+... 769 wsi_try_proxy_alloc(const struct wsi_swapchain *chain,
+... 770                     const struct wsi_image_info *info,
+... 771                     struct wsi_image *image)
+... 772 {
+... 773    const struct wsi_device *wsi = chain->wsi;
+... 774    const char *path = getenv("WSI_GBM_ALLOC_SOCKET");
+... 775    if (!path) path = "/tmp/gbm-alloc-0";
+... 776    if (access(path, F_OK) != 0) return VK_ERROR_UNKNOWN;
+... 777 
+... 778    int sock = socket(AF_UNIX, SOCK_STREAM, 0);
+... 779    if (sock < 0) return VK_ERROR_UNKNOWN;
+... 780    struct sockaddr_un addr = { .sun_family = AF_UNIX };
+... 781    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+... 782    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+... 783       close(sock); return VK_ERROR_UNKNOWN;
+... 784    }
+... 785 
+... 786    uint32_t w = info->create.extent.width;
+... 787    uint32_t h = info->create.extent.height;
+... 788    struct gbm_proxy_req req = {
+... 789       .msg_type = 1, .width = w, .height = h,
+... 790       .format = vk_format_to_drm_fourcc(info->create.format),
+... 791       .flags = 5, /* SCANOUT | RENDERING */
+... 792    };
+... 793    if (send(sock, &req, sizeof(req), 0) != sizeof(req)) {
+... 794       close(sock); return VK_ERROR_UNKNOWN;
+... 795    }
+... 796 
+... 797    struct gbm_proxy_resp resp;
+... 798    char cmsg_buf[CMSG_SPACE(sizeof(int))];
+... 799    struct iovec iov = { .iov_base = &resp, .iov_len = sizeof(resp) };
+... 800    struct msghdr msg = {
+... 801       .msg_iov = &iov, .msg_iovlen = 1,
+... 802       .msg_control = cmsg_buf, .msg_controllen = sizeof(cmsg_buf),
+... 803    };
+... 804    ssize_t n = recvmsg(sock, &msg, 0);
+... 805    close(sock);
+... 806    if (n < (ssize_t)sizeof(resp) || !resp.success) return VK_ERROR_UNKNOWN;
+... 807 
+... 808    int dmabuf_fd = -1;
+... 809    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+... 810    if (cmsg && cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS)
+... 811       memcpy(&dmabuf_fd, CMSG_DATA(cmsg), sizeof(int));
+... 812    if (dmabuf_fd < 0) return VK_ERROR_UNKNOWN;
+... 813 
+... 814    /* Import compositor's dmabuf as VkDeviceMemory */
+... 815    VkMemoryRequirements reqs;
+... 816    wsi->GetImageMemoryRequirements(chain->device, image->image, &reqs);
+... 817 
+... 818    const VkImportMemoryFdInfoKHR import_fd = {
+... 819       .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,
+... 820       .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+... 821       .fd = dmabuf_fd,
+... 822    };
+... 823    const VkMemoryDedicatedAllocateInfo dedicated = {
+... 824       .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
+... 825       .pNext = &import_fd,
+... 826       .image = image->image,
+... 827    };
+... 828    const VkMemoryAllocateInfo mem_info = {
+... 829       .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+... 830       .pNext = &dedicated,
+... 831       .allocationSize = reqs.size,
+... 832       .memoryTypeIndex =
+... 833          wsi_select_device_memory_type(wsi, reqs.memoryTypeBits),
+... 834    };
+... 835    VkResult result = wsi->AllocateMemory(chain->device, &mem_info,
+... 836                                          &chain->alloc, &image->memory);
+... 837    if (result != VK_SUCCESS) return VK_ERROR_UNKNOWN;
+... 838 
+... 839    /* Re-export fd (we need our own copy for wayland buffer_params) */
+... 840    result = wsi_init_image_dmabuf_fd(chain, image, false);
+... 841    if (result != VK_SUCCESS) return result;
+... 842 
+... 843    image->drm_modifier = DRM_FORMAT_MOD_INVALID;
+... 844    image->num_planes = 1;
+... 845    image->sizes[0] = (uint64_t)resp.stride * h;
+... 846    image->row_pitches[0] = resp.stride;
+... 847    image->offsets[0] = 0;
+... 848 
+... 849    mesa_logi("WSI: compositor GBM proxy buffer %ux%u stride=%u fd=%d",
+... 850              w, h, resp.stride, image->dma_buf_fd);
+... 851    return VK_SUCCESS;
+... 852 }
+... 853 
+... 854 static VkResult
+743 855 wsi_create_native_image_mem(const struct wsi_swapchain *chain,
+744 856                             const struct wsi_image_info *info,
+745 857                             struct wsi_image *image)
+746 858 {
+747 859    const struct wsi_device *wsi = chain->wsi;
+748 860    VkResult result;
+... 861 
+... 862    /* Try compositor GBM proxy first (zero-copy AHB path) */
+... 863    result = wsi_try_proxy_alloc(chain, info, image);
+... 864    if (result == VK_SUCCESS)
+... 865       return VK_SUCCESS;
+749 866 
+750 867    VkMemoryRequirements reqs;
+751 868    wsi->GetImageMemoryRequirements(chain->device, image->image, &reqs);
+

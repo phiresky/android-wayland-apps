@@ -31,6 +31,8 @@ const BTN_RIGHT: u32 = 0x111;
 const ACTION_DOWN: i32 = 0;
 const ACTION_UP: i32 = 1;
 const ACTION_MOVE: i32 = 2;
+const ACTION_HOVER_MOVE: i32 = 7;
+const ACTION_HOVER_ENTER: i32 = 9;
 
 /// Height of the Samsung DeX window title bar in physical pixels.
 /// setLaunchBounds specifies outer window bounds (including chrome),
@@ -244,7 +246,9 @@ fn process_window_events(backend: &mut WaylandBackend) {
                     && let Some(window) = wm.windows.get_mut(&window_id) {
                         if let Some(ref ahb) = window.ahb_surface {
                             if let Some(ref vk) = backend.vk_renderer {
-                                vk.destroy_ahb_target(&ahb.ahb_target);
+                                if let Some(ref target) = ahb.ahb_target {
+                                    vk.destroy_ahb_target(target);
+                                }
                             }
                         }
                         window.ahb_surface = None;
@@ -292,9 +296,9 @@ fn process_window_events(backend: &mut WaylandBackend) {
                 window_id,
                 key_code,
                 action,
-                ..
+                meta_state,
             } => {
-                handle_activity_key(backend, window_id, key_code, action);
+                handle_activity_key(backend, window_id, key_code, action, meta_state);
             }
             WindowEvent::RightClick {
                 window_id,
@@ -444,9 +448,100 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                     let fmt = dmabuf.format();
                     let vk_fmt = crate::android::backend::vulkan_renderer::VulkanRenderer::fourcc_to_vk_format(fmt.code as u32);
 
-                    // === AHB / ASurfaceTransaction path ===
-                    // Create AHB surface for dmabuf clients.
+                    // === Zero-copy direct AHB present ===
+                    // If this dmabuf is a compositor-allocated AHB, skip the
+                    // Vulkan import+blit entirely and present the AHB directly
+                    // via ASurfaceTransaction. This is the optimal zero-GPU-copy path.
                     {
+                        use std::os::unix::io::AsRawFd;
+                        if let Some(fd) = dmabuf.handles().next() {
+                            let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+                            if unsafe { libc::fstat(fd.as_raw_fd(), &mut stat) } == 0 {
+                                tracing::debug!("[zero-copy] committed dmabuf fd={} inode=({}, {}), tracker has {} entries",
+                                    fd.as_raw_fd(), stat.st_dev, stat.st_ino, backend.ahb_tracker.len());
+                            }
+                        }
+                    }
+                    let gbm_lookup = backend.gbm_state.as_ref()
+                        .and_then(|s| s.lock().ok())
+                        .and_then(|g| g.tracker.lookup(&dmabuf).map(|b| b.ahb.clone()));
+                    if let Some(ahb_arc) = gbm_lookup {
+                        // Ensure ASurfaceControl exists for this window.
+                        let has_sc = backend.window_manager.as_ref()
+                            .and_then(|wm| wm.windows.get(&window_id))
+                            .map(|w| w.ahb_surface.is_some())
+                            .unwrap_or(false);
+                        if !has_sc {
+                            if let Some(wm) = backend.window_manager.as_mut() {
+                                if let Some(window) = wm.windows.get_mut(&window_id) {
+                                    if let Some(native_window) = window.native_window {
+                                        if window.egl_surface.is_some() {
+                                            tracing::info!("Destroying EGL for zero-copy AHB window_id={}", window_id);
+                                            window.egl_surface = None;
+                                        }
+                                        let sc = crate::android::backend::surface_transaction::SurfaceControlHandle::from_window(
+                                            native_window, &format!("wl-zc-{window_id}"));
+                                        if let Some(sc) = sc {
+                                            crate::android::backend::surface_transaction::set_visible(&sc);
+                                            // Zero-copy: no AhbTarget needed (no blit).
+                                            window.ahb_surface = Some(crate::android::window_manager::AhbWindowSurface {
+                                                surface_control: sc,
+                                                ahb_target: None,
+                                                frame_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                                            });
+                                            window.needs_redraw = true;
+                                            tracing::info!("Zero-copy AHB surface created for window_id={} at {}x{}", window_id, buf_w, buf_h);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Present the compositor-allocated AHB directly.
+                        if let Some(ref wm) = backend.window_manager {
+                            if let Some(window) = wm.windows.get(&window_id) {
+                                if let Some(ref ahb_surface) = window.ahb_surface {
+                                    if !window.needs_redraw {
+                                        done = true;
+                                    } else if ahb_surface.frame_in_flight.load(std::sync::atomic::Ordering::Acquire) {
+                                        // Previous frame still on screen — wait for vsync.
+                                    } else {
+                                        let win_size = window.size;
+                                        let wake_fd = backend.wake_fd;
+                                        // Present the client's AHB directly — zero GPU copies!
+                                        // Crop source to geometry area (skip CSD shadow borders).
+                                        let src_x = (geo_offset.x as f64 * scale).round() as i32;
+                                        let src_y = (geo_offset.y as f64 * scale).round() as i32;
+                                        crate::android::backend::surface_transaction::present_buffer(
+                                            &ahb_surface.surface_control,
+                                            &ahb_arc,
+                                            -1,
+                                            buf_w,
+                                            buf_h,
+                                            win_size.w,
+                                            win_size.h,
+                                            src_x,
+                                            src_y,
+                                            &ahb_surface.frame_in_flight,
+                                            wake_fd,
+                                        );
+                                        done = true;
+                                        if let Some(wm) = backend.window_manager.as_mut() {
+                                            if let Some(w) = wm.windows.get_mut(&window_id) {
+                                                w.last_render_method = "AHB zero-copy";
+                                                w.last_buffer_size = Some((buf_w, buf_h));
+                                                w.needs_redraw = false;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // === AHB / ASurfaceTransaction path (Vulkan blit fallback) ===
+                    // Create AHB surface for dmabuf clients that use client-allocated buffers.
+                    if !done {
                         let needs_ahb = backend.window_manager.as_ref()
                             .and_then(|wm| wm.windows.get(&window_id))
                             .map(|w| w.ahb_surface.is_none() && w.native_window.is_some())
@@ -468,7 +563,7 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                                                     crate::android::backend::surface_transaction::set_visible(&sc);
                                                     window.ahb_surface = Some(crate::android::window_manager::AhbWindowSurface {
                                                         surface_control: sc,
-                                                        ahb_target,
+                                                        ahb_target: Some(ahb_target),
                                                         frame_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                                                     });
                                                     window.needs_redraw = true;
@@ -486,21 +581,24 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                         let needs_resize = backend.window_manager.as_ref()
                             .and_then(|wm| wm.windows.get(&window_id))
                             .and_then(|w| w.ahb_surface.as_ref())
-                            .map(|ahb| ahb.ahb_target.width != buf_w || ahb.ahb_target.height != buf_h)
+                            .and_then(|ahb| ahb.ahb_target.as_ref())
+                            .map(|target| target.width != buf_w || target.height != buf_h)
                             .unwrap_or(false);
 
                         if needs_resize {
                             if let Some(wm) = backend.window_manager.as_mut() {
                                 if let Some(window) = wm.windows.get_mut(&window_id) {
                                     if let Some(ref old) = window.ahb_surface {
-                                        vk.destroy_ahb_target(&old.ahb_target);
+                                        if let Some(ref target) = old.ahb_target {
+                                            vk.destroy_ahb_target(target);
+                                        }
                                     }
                                     let sc = window.ahb_surface.take().map(|s| s.surface_control);
                                     if let Some(sc) = sc {
                                         match vk.create_ahb_target(buf_w, buf_h) {
                                             Ok(ahb_target) => {
                                                 window.ahb_surface = Some(crate::android::window_manager::AhbWindowSurface {
-                                                    surface_control: sc, ahb_target,
+                                                    surface_control: sc, ahb_target: Some(ahb_target),
                                                     frame_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                                                 });
                                                 window.needs_redraw = true;
@@ -517,6 +615,7 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                         if let Some(ref wm) = backend.window_manager {
                             if let Some(window) = wm.windows.get(&window_id) {
                                 if let Some(ref ahb_surface) = window.ahb_surface {
+                                    if let Some(ref ahb_target) = ahb_surface.ahb_target {
                                     if !window.needs_redraw {
                                         done = true; // no new frame, skip
                                     } else if ahb_surface.frame_in_flight.load(std::sync::atomic::Ordering::Acquire) {
@@ -534,16 +633,20 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                                             let raw_fd = fd.as_raw_fd();
                                             match vk.get_or_import_dmabuf(raw_fd, sz.w as u32, sz.h as u32, stride, vk_fmt) {
                                                 Ok(imported) => {
-                                                    match vk.blit_dmabuf_to_ahb(&imported, &ahb_surface.ahb_target) {
-                                                        Ok(()) => {
+                                                    match vk.blit_dmabuf_to_ahb(&imported, ahb_target) {
+                                                        Ok(fence_fd) => {
+                                                            let src_x = (geo_offset.x as f64 * scale).round() as i32;
+                                                            let src_y = (geo_offset.y as f64 * scale).round() as i32;
                                                             crate::android::backend::surface_transaction::present_buffer(
                                                                 &ahb_surface.surface_control,
-                                                                &ahb_surface.ahb_target.ahb,
-                                                                -1,
-                                                                ahb_surface.ahb_target.width,
-                                                                ahb_surface.ahb_target.height,
+                                                                &ahb_target.ahb,
+                                                                fence_fd,
+                                                                ahb_target.width,
+                                                                ahb_target.height,
                                                                 win_size.w,
                                                                 win_size.h,
+                                                                src_x,
+                                                                src_y,
                                                                 &ahb_surface.frame_in_flight,
                                                                 wake_fd,
                                                             );
@@ -563,6 +666,7 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                                             }
                                         }
                                     }
+                                    } // if let Some(ref ahb_target)
                                 }
                             }
                         }
@@ -1037,7 +1141,7 @@ fn handle_activity_touch(
             );
             pointer.frame(&mut compositor.state);
         }
-        ACTION_MOVE => {
+        ACTION_MOVE | ACTION_HOVER_MOVE | ACTION_HOVER_ENTER => {
             pointer.motion(
                 &mut compositor.state,
                 Some((wl_surface.clone(), (0f64, 0f64).into())),
@@ -1107,6 +1211,7 @@ fn handle_activity_key(
     window_id: u32,
     key_code: i32,
     action: i32,
+    meta_state: i32,
 ) {
     let Some(wm) = backend.window_manager.as_ref() else { return };
     let Some(window) = wm.windows.get(&window_id) else { return };
@@ -1136,6 +1241,34 @@ fn handle_activity_key(
     };
 
     if let Some(kb) = &compositor.keyboard {
+        // Sync modifier state from Android's meta_state to prevent stuck modifiers.
+        // If Android says a modifier isn't held but xkb thinks it is, release it.
+        // This handles cases where modifier UP events are lost (app restart, focus change).
+        const META_CTRL_ON: i32 = 0x1000;
+        const META_SHIFT_ON: i32 = 0x1;
+        const META_ALT_ON: i32 = 0x2;
+        const META_META_ON: i32 = 0x10000;
+        let xkb_mods = kb.modifier_state();
+        let checks: [(i32, bool, u32); 4] = [
+            (META_CTRL_ON, xkb_mods.ctrl, 29 + 8),   // KEY_LEFTCTRL
+            (META_SHIFT_ON, xkb_mods.shift, 42 + 8),  // KEY_LEFTSHIFT
+            (META_ALT_ON, xkb_mods.alt, 56 + 8),      // KEY_LEFTALT
+            (META_META_ON, xkb_mods.logo, 125 + 8),   // KEY_LEFTMETA
+        ];
+        for (android_flag, xkb_active, mod_keycode) in checks {
+            if xkb_active && (meta_state & android_flag == 0) {
+                let serial = SERIAL_COUNTER.next_serial();
+                kb.input::<(), _>(
+                    &mut compositor.state,
+                    mod_keycode.into(),
+                    smithay::backend::input::KeyState::Released,
+                    serial,
+                    time,
+                    |_, _, _| FilterResult::Forward,
+                );
+            }
+        }
+
         kb.input::<(), _>(
             &mut compositor.state,
             linux_keycode.into(),

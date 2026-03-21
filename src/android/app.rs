@@ -148,6 +148,7 @@ pub fn run_compositor_loop(setup_done: Arc<AtomicBool>) {
         scale_factor,
         ahb_allocator,
         ahb_tracker,
+        gbm_state: Some(gbm_state),
     };
 
     // Wait for rootfs setup to complete, then init keyboard and launch proot.
