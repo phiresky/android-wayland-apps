@@ -145,6 +145,27 @@ pub extern "system" fn Java_io_github_phiresky_wayland_1android_DebugActivity_na
     if use_vulkan_rendering() { 1 } else { 0 }
 }
 
+/// JNI callback: toggle PipeWire from DebugActivity.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_phiresky_wayland_1android_DebugActivity_nativeSetPipewireEnabled(
+    _env: JNIEnv,
+    _class: JObject,
+    enabled: jni::sys::jboolean,
+) {
+    let val = enabled != 0;
+    tracing::info!("PipeWire toggled: {}", if val { "enabled" } else { "disabled" });
+    crate::core::config::set_pipewire_enabled(val);
+}
+
+/// JNI callback: get PipeWire enabled state.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_phiresky_wayland_1android_DebugActivity_nativeGetPipewireEnabled(
+    _env: JNIEnv,
+    _class: JObject,
+) -> jni::sys::jboolean {
+    if crate::core::config::pipewire_enabled() { 1 } else { 0 }
+}
+
 /// JNI callback: get debug log buffer for DebugActivity.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_io_github_phiresky_wayland_1android_DebugActivity_nativeGetDebugLog(

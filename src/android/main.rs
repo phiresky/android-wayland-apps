@@ -91,8 +91,9 @@ extern "system" fn Java_io_github_phiresky_wayland_1android_MainActivity_nativeI
         });
     }
 
-    // TODO: re-enable once camera is stable
-    // crate::android::camera::start();
+    if crate::core::config::pipewire_enabled() {
+        crate::android::camera::start();
+    }
 
     // Spawn the compositor on a background thread, independent of Activity lifecycle.
     let compositor_done = setup_done;

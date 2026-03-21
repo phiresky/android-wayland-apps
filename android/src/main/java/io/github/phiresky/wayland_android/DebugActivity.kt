@@ -74,6 +74,18 @@ class DebugActivity : Activity() {
         }
         root.addView(toggle)
 
+        // PipeWire toggle
+        val pipewireToggle = Switch(this).apply {
+            text = "PipeWire (requires restart)"
+            setTextColor(0xFFCCCCCC.toInt())
+            isChecked = nativeGetPipewireEnabled()
+            setPadding(dp(16), dp(4), dp(16), dp(4))
+            setOnCheckedChangeListener { _, isChecked ->
+                nativeSetPipewireEnabled(isChecked)
+            }
+        }
+        root.addView(pipewireToggle)
+
         // Scrollable status content
         val scroll = ScrollView(this)
 
@@ -146,6 +158,8 @@ class DebugActivity : Activity() {
 
     private external fun nativeSetVulkanRendering(enabled: Boolean)
     private external fun nativeGetVulkanRendering(): Boolean
+    private external fun nativeSetPipewireEnabled(enabled: Boolean)
+    private external fun nativeGetPipewireEnabled(): Boolean
     private external fun nativeGetDebugLog(): String
 
     companion object {

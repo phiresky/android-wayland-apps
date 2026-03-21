@@ -9,8 +9,9 @@ use std::thread;
 /// Open the native Android launcher Activity.
 /// Called once after setup completes and the compositor is ready.
 pub fn launch() {
-    // TODO: re-enable once PipeWire camera is stable
-    // start_pipewire();
+    if crate::core::config::pipewire_enabled() {
+        start_pipewire();
+    }
     if let Err(e) = open_launcher_activity() {
         tracing::error!("Failed to open launcher activity: {e}");
     }

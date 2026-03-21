@@ -1,5 +1,17 @@
 // TODO: Make these configurable via the Android UI (Milestone 7).
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static PIPEWIRE_ENABLED: AtomicBool = AtomicBool::new(false);
+
+pub fn pipewire_enabled() -> bool {
+    PIPEWIRE_ENABLED.load(Ordering::Relaxed)
+}
+
+pub fn set_pipewire_enabled(enabled: bool) {
+    PIPEWIRE_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const ARCH_FS_ROOT: &str = "/data/data/io.github.phiresky.wayland_android/files/arch";
 pub const ARCH_FS_ARCHIVE: &str = "https://github.com/termux/proot-distro/releases/download/v4.34.2/archlinux-aarch64-pd-v4.34.2.tar.xz";
@@ -12,8 +24,8 @@ pub const PACKAGES: &[&str] = &[
     "ca-certificates",
     "gedit",
     "mesa-utils",
-    // "pipewire",
-    // "wireplumber",
+    "pipewire",
+    "wireplumber",
     "qt6-wayland",
     "shared-mime-info",
     "gdk-pixbuf2",

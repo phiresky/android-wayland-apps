@@ -12,6 +12,6 @@ fn main() {
         println!("cargo:rustc-link-search=native={}/libs/{}", manifest_dir, abi);
         println!("cargo:rustc-link-lib=camera2ndk");
         println!("cargo:rustc-link-lib=mediandk");
-        // println!("cargo:rustc-link-lib=pipewire-0.3");  // disabled for now
+        println!("cargo:rustc-link-lib=pipewire-0.3");
     }
 }
