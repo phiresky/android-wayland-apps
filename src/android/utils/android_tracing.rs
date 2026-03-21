@@ -1,7 +1,10 @@
 use std::ffi::{CString, c_char, c_int};
 use std::fmt::Write;
 use tracing::field::{Field, Visit};
-use tracing::{span, Event, Metadata, Subscriber};
+use tracing::Subscriber;
+use tracing_subscriber::layer::Context;
+use tracing_subscriber::prelude::*;
+use tracing_subscriber::Layer;
 
 #[link(name = "log")]
 unsafe extern "C" {
@@ -13,13 +16,8 @@ const ANDROID_LOG_INFO: c_int = 4;
 const ANDROID_LOG_WARN: c_int = 5;
 const ANDROID_LOG_ERROR: c_int = 6;
 
-pub struct AndroidLogSubscriber;
-
-impl AndroidLogSubscriber {
-    pub fn init() {
-        tracing::subscriber::set_global_default(Self).ok();
-    }
-}
+#[derive(Debug)]
+struct AndroidLogLayer;
 
 struct MessageVisitor(String);
 
@@ -33,8 +31,12 @@ impl Visit for MessageVisitor {
     }
 }
 
-impl Subscriber for AndroidLogSubscriber {
-    fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+impl<S: Subscriber> Layer<S> for AndroidLogLayer {
+    fn enabled(
+        &self,
+        metadata: &tracing::Metadata<'_>,
+        _ctx: Context<'_, S>,
+    ) -> bool {
         *metadata.level() <= tracing::Level::INFO
     }
 
@@ -42,16 +44,7 @@ impl Subscriber for AndroidLogSubscriber {
         Some(tracing::metadata::LevelFilter::INFO)
     }
 
-    fn new_span(&self, _attrs: &span::Attributes<'_>) -> span::Id {
-        span::Id::from_u64(1)
-    }
-
-    fn record(&self, _span: &span::Id, _values: &span::Record<'_>) {}
-    fn record_follows_from(&self, _span: &span::Id, _follows: &span::Id) {}
-    fn enter(&self, _span: &span::Id) {}
-    fn exit(&self, _span: &span::Id) {}
-
-    fn event(&self, event: &Event<'_>) {
+    fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
         let metadata = event.metadata();
         let level = metadata.level();
         let prio = if *level == tracing::Level::ERROR {
@@ -74,4 +67,12 @@ impl Subscriber for AndroidLogSubscriber {
             __android_log_print(prio, tag.as_ptr(), c"%s".as_ptr(), msg.as_ptr());
         }
     }
+}
+
+pub fn init() {
+    tracing_subscriber::registry()
+        .with(AndroidLogLayer)
+        .with(tracing_android_trace::AndroidTraceLayer::new())
+        .try_init()
+        .ok();
 }

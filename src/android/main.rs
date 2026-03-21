@@ -43,7 +43,7 @@ extern "system" fn Java_io_github_phiresky_wayland_1android_MainActivity_nativeI
     unsafe { std::env::set_var("RUST_BACKTRACE", "full") };
 
     // Initialize tracing subscriber for Android logcat output.
-    crate::android::utils::android_tracing::AndroidLogSubscriber::init();
+    crate::android::utils::android_tracing::init();
 
     // Store global JNI context (VM + Activity).
     jni_context::init(&mut env, &activity);
