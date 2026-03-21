@@ -101,14 +101,44 @@ For wl_shm clients or if Vulkan renderer is unavailable:
 1. Turnip renders scene on GPU via KGSL
 2. Exports frame as dmabuf fd (KGSL GPU memory)
 3. Sends fd to compositor via zwp_linux_dmabuf_v1
-4. Compositor receives fd, looks up in dmabuf cache (by fd)
+4. Compositor receives fd, looks up in dmabuf cache (by fd, validated by size)
 5. If not cached: vkAllocateMemory(DMA_BUF import) + vkCreateBuffer
-6. vkCmdCopyBufferToImage from imported buffer to swapchain image
-7. vkQueuePresent to Android SurfaceView
+6. vkCmdCopyBufferToImage from buffer to LINEAR staging VkImage (BGRA format)
+7. vkCmdBlitImage from staging to swapchain image (BGRA→RGBA conversion)
+8. vkQueuePresent to Android SurfaceView
 ```
 
-Steps 1-7 are all GPU operations — zero CPU copies. The "copy" in step 6 is a
-GPU-side blit between two KGSL memory regions on the same hardware.
+Steps 1-8 are all GPU operations — zero CPU copies. The staging image in step 6-7
+is needed because:
+- Android's Vulkan swapchain only supports R8G8B8A8, but Turnip/Zink dmabufs use
+  DRM_FORMAT_XRGB8888 (B8G8R8A8 memory layout). `vkCmdBlitImage` handles the
+  format conversion.
+- The imported dmabuf VkImage has OPTIMAL tiling, which Qualcomm interprets as UBWC
+  (Universal Bandwidth Compression). Since the dmabuf is LINEAR, reading it via the
+  imported VkImage directly causes horizontal stripes. The LINEAR staging image avoids this.
+- `ANativeWindow_setBuffersGeometry(format=BGRA)` does NOT work — the Qualcomm
+  Vulkan driver always creates R8G8B8A8 swapchains regardless of the ANativeWindow format.
+
+### 6. Key Implementation Details
+
+- **Dmabuf cache validation**: Cached by fd, but validated by width/height on lookup.
+  Kernel fd reuse means the same fd number can point to different GPU memory after
+  resize. Stale cache entries caused a strobe between current and frozen frames.
+- **Lazy EGL surface creation**: EGL surfaces are NOT created in `surfaceCreated`.
+  Creating EGL eagerly locks the ANativeWindow format to RGBA, which the Vulkan
+  swapchain inherits. Deferring to the first GLES render lets the Vulkan path claim
+  the window first (for dmabuf clients). For wl_shm clients, EGL is created lazily
+  when the GLES render path first needs it.
+- **Swapchain resize**: Uses `oldSwapchain` chaining (not destroy+recreate) to avoid
+  `ERROR_NATIVE_WINDOW_IN_USE_KHR` races. Buffer geometry is set via
+  `ANativeWindow_setBuffersGeometry` to match the client's buffer size — Android's
+  SurfaceFlinger upscales to fill the SurfaceView.
+- **Frame callback for unmapped windows**: Frame callbacks are sent for windows without
+  EGL/VK surfaces. Without this, EGL clients (e.g. Factorio via llvmpipe) block
+  forever in `eglSwapBuffers` waiting for a callback that never comes.
+- **needs_redraw guard**: Vulkan blits only run on new commits. Re-blitting without
+  new content causes a race condition — the compositor reads the dmabuf while the
+  client writes the next frame to the same GPU memory (fd reuse in swapchain pool).
 
 ## How to Reproduce (vkcube test)
 
@@ -146,35 +176,35 @@ and `XDG_RUNTIME_DIR=/tmp`. Turnip's ICD is found via the default Vulkan loader 
 
 | Client type | Status | Path |
 |-------------|--------|------|
-| Vulkan (vkcube, games) | **Zero-copy, working** | Turnip → dmabuf → Vulkan import → swapchain |
-| OpenGL (via Zink) | **Working** | Zink → Turnip → Kopper → Vulkan WSI → dmabuf → Vulkan import → swapchain |
-| wl_shm (software) | **Working** | CPU shared memory → GLES renderer |
+| Vulkan (vkcube) | **Working** | Turnip → dmabuf → VkBuffer import → staging blit → swapchain |
+| OpenGL (via Zink) | **Working** | Zink → Turnip → Kopper → dmabuf → same Vulkan path |
+| OpenGL (box64, e.g. Factorio) | **Working** | x86_64 Zink via box64 → dmabuf → Vulkan path |
+| wl_shm (software) | **Working** | CPU shared memory → GLES renderer (lazy EGL surface) |
 
 ### OpenGL via Zink
 
 OpenGL apps use **Zink** (Mesa's OpenGL-over-Vulkan layer) with **Kopper** (Zink's WSI).
 The Vulkan WSI creates `zwp_linux_buffer_params` with dmabuf fds (LINEAR modifier),
-which the compositor imports via the same Vulkan zero-copy path as native Vulkan clients.
+which the compositor imports via the same Vulkan path as native Vulkan clients.
 
-**Benchmarks:** glmark2 scores 1415 on-screen at 60fps via
-`MESA_LOADER_DRIVER_OVERRIDE=zink GALLIUM_DRIVER=zink`.
+**Tested apps:**
+- eglgears_wayland — GPU-accelerated gears via Zink+Turnip
+- Factorio 2.0 via box64 — full GPU rendering, 1102 MB VRAM, OpenGL 4.6
+- glmark2 — 1415 score at 60fps
 
-**Two Mesa patches** fix the EGL → Kopper → Vulkan WSI → dmabuf pipeline:
-1. `mesa-zink-wayland-fallback.patch`: Fall back to kopper/swrast path when DRM/GBM
-   unavailable, and use software EGLDevice when no render node fd exists.
-2. `mesa-adreno830-chipid.patch`: Backport real Adreno 830 GPU config from Mesa main —
-   correct `reg_size_vec4` (96→128), `tile_align_w` (64→96), `a8xx_gen2` properties,
-   and raw magic registers. The stock Mesa 26.0.1 config was "totally fake" and caused
-   GPU faults (KGSL GUILTY reset).
+**Env vars for Zink:** `MESA_LOADER_DRIVER_OVERRIDE=zink GALLIUM_DRIVER=zink`
 
-The compositor destroys the EGL surface before creating the Vulkan swapchain on the
-same ANativeWindow (Android doesn't allow both).
+### Building Mesa from source
 
-### Building Mesa (Turnip) from source
+Mesa main (26.1.0-devel+) has correct Adreno 830 support (`chip_id=0x44050001`,
+KGSL backend). Three small patches are needed:
 
-Mesa main (26.1.0-devel+) has correct Adreno 830 support out of the box
-(`chip_id=0x44050001` with `a8xx_gen1` properties, KGSL backend). No patches needed
-for Vulkan. The Zink/EGL Wayland fallback patches are only needed for OpenGL.
+1. **UBWC 5.0**: Samsung A830 reports UBWC version 5, not handled in Mesa main.
+   Add `KGSL_UBWC_5_0` constant and case (same config as UBWC 4.0).
+2. **KHR_display**: KGSL backend rejects instances with `VK_KHR_display` enabled,
+   but the Vulkan loader enables it. Remove the check.
+3. **EGL Wayland fallback** (for Zink/OpenGL only): Fall back to kopper/swrast path
+   when DRM/GBM unavailable, and use software EGLDevice when no render node fd.
 
 **Build deps** (install as root in proot):
 ```sh
@@ -183,35 +213,40 @@ pacman -S --needed meson ninja gcc cmake python-mako python-packaging python-yam
   lm_sensors libglvnd vulkan-icd-loader glslang bison flex binutils
 ```
 
-**Configure and build** (as alarm user):
+**Configure** (Turnip only — for Vulkan clients):
 ```sh
 cd ~/mesa
 CC=gcc CXX=g++ meson setup builddir \
   -Dgallium-drivers= -Dvulkan-drivers=freedreno -Dplatforms=wayland \
   -Dglx=disabled -Degl=disabled -Dgles1=disabled -Dgles2=disabled \
   -Dopengl=false -Dbuildtype=release -Dfreedreno-kmds=kgsl,msm --prefix=/usr
-ninja -C builddir -j4
 ```
 
-**Important:** `-Dfreedreno-kmds=kgsl,msm` (not just `kgsl`). With only `kgsl`, Mesa
-disables libdrm to avoid the dependency, but the Wayland WSI needs libdrm for
-dmabuf-based swapchains (`WSI_IMAGE_TYPE_DRM`). Adding `msm` keeps libdrm linked.
-
-**Install** (as root):
+**Configure** (full stack — for Zink/OpenGL + Vulkan):
 ```sh
-ninja -C builddir install
+CC=gcc CXX=g++ meson setup builddir \
+  -Dgallium-drivers=zink -Dvulkan-drivers=freedreno -Dplatforms=wayland \
+  -Dglx=disabled -Degl=enabled -Dgles2=enabled -Dgles1=disabled \
+  -Dopengl=true -Dbuildtype=release -Dfreedreno-kmds=kgsl,msm --prefix=/usr
 ```
 
-This installs `libvulkan_freedreno.so` and the Turnip ICD JSON.
+**Build and install:**
+```sh
+ninja -C builddir -j4
+sudo ninja -C builddir install  # or: USER_NAME=root ./adb_runas.sh ...
+```
+
+**Important notes:**
+- `-Dfreedreno-kmds=kgsl,msm` (not just `kgsl`). With only `kgsl`, Mesa disables
+  libdrm, but the Wayland WSI needs it for `WSI_IMAGE_TYPE_DRM` dmabuf swapchains.
+- Must use gcc, not clang (clang produces Turnip that doesn't recognize Adreno 830).
 
 ### Legacy: Mesa 26.0.x patches
 
 Two patches in `patches/` were needed for Mesa 26.0.1 (no longer needed on main):
 
-1. **`mesa-zink-wayland-fallback.patch`**: Fall back to kopper/swrast path when
-   DRM/GBM unavailable, and use software EGLDevice when no render node fd.
-   Only needed for OpenGL via Zink (not Vulkan).
-
+1. **`mesa-zink-wayland-fallback.patch`**: EGL Wayland fallback (still needed on main
+   for Zink, applied directly to source).
 2. **`mesa-adreno830-chipid.patch`**: Backport real Adreno 830 GPU config.
    Mesa main already has the correct config with `chip_id=0x44050001`.
 
