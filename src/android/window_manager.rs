@@ -127,7 +127,7 @@ pub extern "system" fn Java_io_github_phiresky_wayland_1android_DebugActivity_na
     enabled: jni::sys::jboolean,
 ) {
     let val = enabled != 0;
-    log::info!("Render mode toggled: {}", if val { "Vulkan" } else { "GLES" });
+    tracing::info!("Render mode toggled: {}", if val { "Vulkan" } else { "GLES" });
     set_vulkan_rendering(val);
 }
 
@@ -194,7 +194,7 @@ impl WindowManager {
             window.activity_launched = true;
         }
         if let Err(e) = Self::launch_activity_inner(window_id, bounds) {
-            log::error!("Failed to launch Activity for window_id={}: {}", window_id, e);
+            tracing::error!("Failed to launch Activity for window_id={}: {}", window_id, e);
         }
     }
 
@@ -276,7 +276,7 @@ impl WindowManager {
                     "(Landroid/content/Intent;Landroid/os/Bundle;)V",
                     &[JValue::Object(&intent), JValue::Object(&bundle)],
                 )?;
-                log::info!("Launched WaylandWindowActivity for window_id={} with bounds {:?}", window_id, bounds);
+                tracing::info!("Launched WaylandWindowActivity for window_id={} with bounds {:?}", window_id, bounds);
             } else {
                 env.call_method(
                     activity,
@@ -284,7 +284,7 @@ impl WindowManager {
                     "(Landroid/content/Intent;)V",
                     &[JValue::Object(&intent)],
                 )?;
-                log::info!("Launched WaylandWindowActivity for window_id={} (no bounds)", window_id);
+                tracing::info!("Launched WaylandWindowActivity for window_id={} (no bounds)", window_id);
             }
             Ok(())
         })
@@ -301,7 +301,7 @@ impl WindowManager {
             if let Some(native_window) = state.native_window {
                 unsafe { ANativeWindow_release(native_window) };
             }
-            log::info!("Removed window_id={}", window_id);
+            tracing::info!("Removed window_id={}", window_id);
         }
     }
 
@@ -352,7 +352,7 @@ extern "system" fn Java_io_github_phiresky_wayland_1android_WaylandWindowActivit
     };
     if !native_window.is_null() {
         unsafe { ANativeWindow_acquire(native_window) };
-        log::info!("JNI: surfaceCreated window_id={}", window_id);
+        tracing::info!("JNI: surfaceCreated window_id={}", window_id);
         send_event(WindowEvent::SurfaceCreated {
             window_id: window_id as u32,
             native_window,
@@ -368,7 +368,7 @@ extern "system" fn Java_io_github_phiresky_wayland_1android_WaylandWindowActivit
     width: i32,
     height: i32,
 ) {
-    log::info!("JNI: surfaceChanged window_id={} {}x{}", window_id, width, height);
+    tracing::info!("JNI: surfaceChanged window_id={} {}x{}", window_id, width, height);
     send_event(WindowEvent::SurfaceChanged {
         window_id: window_id as u32,
         width,
@@ -382,7 +382,7 @@ extern "system" fn Java_io_github_phiresky_wayland_1android_WaylandWindowActivit
     _class: JObject,
     window_id: i32,
 ) {
-    log::info!("JNI: surfaceDestroyed window_id={}", window_id);
+    tracing::info!("JNI: surfaceDestroyed window_id={}", window_id);
     send_event(WindowEvent::SurfaceDestroyed {
         window_id: window_id as u32,
     });
@@ -395,7 +395,7 @@ extern "system" fn Java_io_github_phiresky_wayland_1android_WaylandWindowActivit
     window_id: i32,
     is_finishing: bool,
 ) {
-    log::info!("JNI: windowClosed window_id={} is_finishing={}", window_id, is_finishing);
+    tracing::info!("JNI: windowClosed window_id={} is_finishing={}", window_id, is_finishing);
     send_event(WindowEvent::WindowClosed {
         window_id: window_id as u32,
         is_finishing,

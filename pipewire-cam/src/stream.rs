@@ -86,7 +86,7 @@ impl PipeWireCamera {
             .name("pw-cam-loop".into())
             .spawn(move || {
                 if let Err(e) = run_pipewire_loop(frame_clone, &socket) {
-                    log::error!("[pw-cam] PipeWire loop error: {e}");
+                    tracing::error!("[pw-cam] PipeWire loop error: {e}");
                 }
             })
             .ok()?;
@@ -102,7 +102,7 @@ impl PipeWireCamera {
         static COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if n % 30 == 0 {
-            log::info!("[pw-cam] push_frame #{n} ({} bytes)", nv12_data.len());
+            tracing::info!("[pw-cam] push_frame #{n} ({} bytes)", nv12_data.len());
         }
         if let Ok(mut frame) = self.frame.lock() {
             *frame = Some(nv12_data.to_vec());
@@ -113,13 +113,13 @@ impl PipeWireCamera {
 fn run_pipewire_loop(frame: FrameBuffer, _socket: &str) -> Result<(), pw::Error> {
     pw::init();
 
-    log::info!("[pw-cam] Creating PipeWire main loop...");
+    tracing::info!("[pw-cam] Creating PipeWire main loop...");
     let mainloop = pw::main_loop::MainLoopRc::new(None)
-        .map_err(|e| { log::error!("[pw-cam] MainLoop::new failed: {e}"); e })?;
-    log::info!("[pw-cam] MainLoop created");
+        .map_err(|e| { tracing::error!("[pw-cam] MainLoop::new failed: {e}"); e })?;
+    tracing::info!("[pw-cam] MainLoop created");
     let context = pw::context::ContextRc::new(&mainloop, None)
-        .map_err(|e| { log::error!("[pw-cam] Context::new failed: {e}"); e })?;
-    log::info!("[pw-cam] Context created");
+        .map_err(|e| { tracing::error!("[pw-cam] Context::new failed: {e}"); e })?;
+    tracing::info!("[pw-cam] Context created");
 
     // remote.name is read from PIPEWIRE_REMOTE env var
     // Retry connection — PipeWire daemon may not be ready yet
@@ -127,12 +127,12 @@ fn run_pipewire_loop(frame: FrameBuffer, _socket: &str) -> Result<(), pw::Error>
         match context.connect_rc(None) {
             Ok(core) => break core,
             Err(_) => {
-                log::info!("[pw-cam] Waiting for PipeWire daemon...");
+                tracing::info!("[pw-cam] Waiting for PipeWire daemon...");
                 std::thread::sleep(std::time::Duration::from_secs(2));
             }
         }
     };
-    log::info!("[pw-cam] Connected to PipeWire daemon");
+    tracing::info!("[pw-cam] Connected to PipeWire daemon");
 
     let stream = pw::stream::StreamBox::new(
         &core,
@@ -149,7 +149,7 @@ fn run_pipewire_loop(frame: FrameBuffer, _socket: &str) -> Result<(), pw::Error>
     let _listener = stream
         .add_local_listener_with_user_data(frame)
         .state_changed(|_, _, old, new| {
-            log::info!("[pw-cam] State: {old:?} -> {new:?}");
+            tracing::info!("[pw-cam] State: {old:?} -> {new:?}");
         })
         .process(|stream, frame_buf| {
             let Some(mut buffer) = stream.dequeue_buffer() else {
@@ -238,7 +238,7 @@ fn run_pipewire_loop(frame: FrameBuffer, _socket: &str) -> Result<(), pw::Error>
 
     let mut params = [Pod::from_bytes(&values).ok_or(pw::Error::CreationFailed)?];
 
-    log::info!("[pw-cam] Connecting stream (format pod {} bytes)...", values.len());
+    tracing::info!("[pw-cam] Connecting stream (format pod {} bytes)...", values.len());
     stream.connect(
         spa::utils::Direction::Output,
         None,
@@ -246,7 +246,7 @@ fn run_pipewire_loop(frame: FrameBuffer, _socket: &str) -> Result<(), pw::Error>
         &mut params,
     )?;
 
-    log::info!("[pw-cam] Stream connected, entering main loop");
+    tracing::info!("[pw-cam] Stream connected, entering main loop");
     mainloop.run();
 
     Ok(())

@@ -191,11 +191,11 @@ static PW_CAMERA: OnceLock<Mutex<Option<PipeWireCamera>>> = OnceLock::new();
 // ---- NDK callbacks ----
 
 unsafe extern "C" fn on_disconnected(_ctx: *mut libc::c_void, _dev: *mut ACameraDevice) {
-    log::warn!("[camera] Camera disconnected");
+    tracing::warn!("[camera] Camera disconnected");
 }
 
 unsafe extern "C" fn on_error(_ctx: *mut libc::c_void, _dev: *mut ACameraDevice, err: i32) {
-    log::error!("[camera] Camera error: {err}");
+    tracing::error!("[camera] Camera error: {err}");
 }
 
 unsafe extern "C" fn on_image_available(_ctx: *mut libc::c_void, reader: *mut AImageReader) {
@@ -339,7 +339,7 @@ fn start_camera() -> Result<(), String> {
                 return Err("No cameras found".into());
             }
         };
-        log::info!("[camera] Opening {:?}", camera_id);
+        tracing::info!("[camera] Opening {:?}", camera_id);
 
         let mut dev_cbs = ACameraDevice_StateCallbacks {
             context: std::ptr::null_mut(),
@@ -422,7 +422,7 @@ fn start_camera() -> Result<(), String> {
 
         let _ = &sess_cbs;
 
-        log::info!("[camera] Streaming {}×{} NV12", CAM_WIDTH, CAM_HEIGHT);
+        tracing::info!("[camera] Streaming {}×{} NV12", CAM_WIDTH, CAM_HEIGHT);
         std::thread::park(); // keep objects alive
 
         // Unreachable cleanup
@@ -447,11 +447,11 @@ fn connect_pipewire() {
     let pw_socket = format!("{}/tmp/pipewire-0", config::ARCH_FS_ROOT);
 
     loop {
-        log::info!("[camera] Connecting to PipeWire at {pw_socket}...");
+        tracing::info!("[camera] Connecting to PipeWire at {pw_socket}...");
 
         match PipeWireCamera::start(&pw_socket, &native_lib_dir, &data_dir) {
             Some(camera) => {
-                log::info!("[camera] PipeWire camera stream connected");
+                tracing::info!("[camera] PipeWire camera stream connected");
                 if let Some(pw) = PW_CAMERA.get() {
                     if let Ok(mut guard) = pw.lock() {
                         *guard = Some(camera);
@@ -460,7 +460,7 @@ fn connect_pipewire() {
                 return;
             }
             None => {
-                log::warn!("[camera] PipeWire not ready, retrying in 2s...");
+                tracing::warn!("[camera] PipeWire not ready, retrying in 2s...");
                 std::thread::sleep(std::time::Duration::from_secs(2));
             }
         }
@@ -471,7 +471,7 @@ fn connect_pipewire() {
 
 pub fn start() {
     if PW_FRAME.set(Arc::new(Mutex::new(None))).is_err() {
-        log::warn!("[camera] Already started");
+        tracing::warn!("[camera] Already started");
         return;
     }
     let _ = PW_CAMERA.set(Mutex::new(None));
@@ -487,7 +487,7 @@ pub fn start() {
         .name("cam-capture".into())
         .spawn(|| {
             if let Err(e) = start_camera() {
-                log::error!("[camera] {e}");
+                tracing::error!("[camera] {e}");
             }
         })
         .ok();

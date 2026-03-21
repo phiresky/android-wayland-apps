@@ -28,7 +28,7 @@ impl ApplicationContext {
                 native_library_dir,
             });
             if let Some(ref ctx) = *context {
-                log::info!("ApplicationContext initialized: {:?}", ctx);
+                tracing::info!("ApplicationContext initialized: {:?}", ctx);
             }
         }
         Ok(())

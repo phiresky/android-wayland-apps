@@ -129,11 +129,11 @@ impl XdgShellHandler for State {
     fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {
         // Send initial configure so the client doesn't block waiting for it.
         if let Err(e) = surface.send_configure() {
-            log::warn!("Failed to send popup configure: {:?}", e);
+            tracing::warn!("Failed to send popup configure: {:?}", e);
         }
         // Register with PopupManager so it's included in rendering and hit-testing.
         if let Err(e) = self.popup_manager.track_popup(PopupKind::Xdg(surface)) {
-            log::warn!("Failed to track popup: {:?}", e);
+            tracing::warn!("Failed to track popup: {:?}", e);
         }
     }
 
@@ -167,7 +167,7 @@ impl WlrLayerShellHandler for State {
         layer: Layer,
         namespace: String,
     ) {
-        log::info!("New layer surface: namespace={namespace}, layer={layer:?}");
+        tracing::info!("New layer surface: namespace={namespace}, layer={layer:?}");
         // Send initial configure with (0,0) — client picks its own size.
         surface.send_configure();
         self.pending_layer_surfaces.push(surface);
@@ -297,7 +297,7 @@ impl ClientData for ClientState {
     fn initialized(&self, _client_id: ClientId) {}
 
     fn disconnected(&self, client_id: ClientId, reason: DisconnectReason) {
-        log::info!("Client disconnected: {client_id:?} reason={reason:?}");
+        tracing::info!("Client disconnected: {client_id:?} reason={reason:?}");
         self.alive.store(false, std::sync::atomic::Ordering::Relaxed);
     }
 }
@@ -312,7 +312,7 @@ impl FractionalScaleHandler for State {
 
 impl XdgDecorationHandler for State {
     fn new_decoration(&mut self, toplevel: ToplevelSurface) {
-        log::info!("new_decoration: telling client to use server-side decorations");
+        tracing::info!("new_decoration: telling client to use server-side decorations");
         toplevel.with_pending_state(|state| {
             state.decoration_mode = Some(DecorationMode::ServerSide);
         });
@@ -320,7 +320,7 @@ impl XdgDecorationHandler for State {
     }
 
     fn request_mode(&mut self, toplevel: ToplevelSurface, mode: DecorationMode) {
-        log::info!("request_mode: client requested {:?}, forcing ServerSide", mode);
+        tracing::info!("request_mode: client requested {:?}, forcing ServerSide", mode);
         toplevel.with_pending_state(|state| {
             state.decoration_mode = Some(DecorationMode::ServerSide);
         });
@@ -330,7 +330,7 @@ impl XdgDecorationHandler for State {
     }
 
     fn unset_mode(&mut self, toplevel: ToplevelSurface) {
-        log::info!("unset_mode: forcing ServerSide");
+        tracing::info!("unset_mode: forcing ServerSide");
         toplevel.with_pending_state(|state| {
             state.decoration_mode = Some(DecorationMode::ServerSide);
         });
@@ -373,7 +373,7 @@ impl Compositor {
 
         let mut dmabuf_state = DmabufState::new();
         let dmabuf_global = dmabuf_state.create_global::<State>(&dh, dmabuf_formats);
-        log::info!("Dmabuf global created");
+        tracing::info!("Dmabuf global created");
 
         let state = State {
             compositor_state: CompositorState::new::<State>(&dh),
@@ -420,12 +420,12 @@ impl Compositor {
         }
         let xkb_path = std::env::var("XKB_CONFIG_ROOT").unwrap_or_default();
         if !std::path::Path::new(&xkb_path).join("rules").exists() {
-            log::warn!("XKB data not found at {xkb_path}, deferring keyboard init");
+            tracing::warn!("XKB data not found at {xkb_path}, deferring keyboard init");
             return;
         }
         match self.seat.add_keyboard(Default::default(), 1000, 200) {
             Ok(kb) => self.keyboard = Some(kb),
-            Err(e) => log::error!("Failed to add keyboard: {e}"),
+            Err(e) => tracing::error!("Failed to add keyboard: {e}"),
         }
     }
 }

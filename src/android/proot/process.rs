@@ -42,7 +42,7 @@ impl ArchProcess {
             .arg("-V")
             .output()
             .map(|o| {
-                log::info!(
+                tracing::info!(
                     "probe_proot(no_seccomp={}) {:?}, stdout: {}, stderr: {}",
                     no_seccomp,
                     o.status.code(),
@@ -52,7 +52,7 @@ impl ArchProcess {
                 o.status.success()
             })
             .unwrap_or_else(|e| {
-                log::info!("probe_proot(no_seccomp={}) error: {}", no_seccomp, e);
+                tracing::info!("probe_proot(no_seccomp={}) error: {}", no_seccomp, e);
                 false
             })
     }
@@ -60,11 +60,11 @@ impl ArchProcess {
     pub fn is_supported() -> bool {
         let supported = if Self::probe_proot(false) {
             USE_NO_SECCOMP.set(false).ok();
-            log::info!("PRoot works with seccomp filter enabled");
+            tracing::info!("PRoot works with seccomp filter enabled");
             true
         } else if Self::probe_proot(true) {
             USE_NO_SECCOMP.set(true).ok();
-            log::info!("PRoot works with PROOT_NO_SECCOMP=1");
+            tracing::info!("PRoot works with PROOT_NO_SECCOMP=1");
             true
         } else {
             USE_NO_SECCOMP.set(false).ok();
@@ -72,7 +72,7 @@ impl ArchProcess {
         };
 
         if !supported {
-            log::error!("Device Unsupported");
+            tracing::error!("Device Unsupported");
         }
         supported
     }
@@ -206,7 +206,7 @@ impl ArchProcess {
             {
                 Ok(c) => c,
                 Err(e) => {
-                    log::error!("Failed to spawn proot command: {}", e);
+                    tracing::error!("Failed to spawn proot command: {}", e);
                     return failed();
                 }
             };
@@ -219,7 +219,7 @@ impl ArchProcess {
                         match line {
                             Ok(l) => stderr_log(format!("[stderr] {}", l)),
                             Err(e) => {
-                                log::error!("Error reading proot stderr: {}", e);
+                                tracing::error!("Error reading proot stderr: {}", e);
                                 break;
                             }
                         }
@@ -233,7 +233,7 @@ impl ArchProcess {
                     match line {
                         Ok(l) => log(l),
                         Err(e) => {
-                            log::error!("Error reading proot stdout: {}", e);
+                            tracing::error!("Error reading proot stdout: {}", e);
                             break;
                         }
                     }
@@ -242,14 +242,14 @@ impl ArchProcess {
 
             if let Some(t) = stderr_thread {
                 if let Err(e) = t.join() {
-                    log::error!("stderr reader thread panicked: {:?}", e);
+                    tracing::error!("stderr reader thread panicked: {:?}", e);
                 }
             }
 
             match child.wait_with_output() {
                 Ok(output) => output,
                 Err(e) => {
-                    log::error!("Failed to wait for proot command: {}", e);
+                    tracing::error!("Failed to wait for proot command: {}", e);
                     failed()
                 }
             }
@@ -257,7 +257,7 @@ impl ArchProcess {
             match process.output() {
                 Ok(output) => output,
                 Err(e) => {
-                    log::error!("Failed to run proot command: {}", e);
+                    tracing::error!("Failed to run proot command: {}", e);
                     failed()
                 }
             }

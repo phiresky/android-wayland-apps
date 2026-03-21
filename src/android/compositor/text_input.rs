@@ -138,7 +138,7 @@ impl Dispatch<ZwpTextInputV3, TextInputData> for State {
             }
             zwp_text_input_v3::Request::Commit => {
                 if let Some(enable) = data.pending_enable.lock().ok().and_then(|mut g| g.take()) {
-                    log::info!(
+                    tracing::info!(
                         "text_input_v3: soft keyboard {}",
                         if enable { "show" } else { "hide" }
                     );

@@ -29,13 +29,13 @@ pub fn init(env: &mut JNIEnv, activity: &JObject) {
             match unsafe { JavaVM::from_raw(vm.get_java_vm_pointer()) } {
                 Ok(vm) => vm,
                 Err(e) => {
-                    log::error!("Failed to recreate JavaVM: {e}");
+                    tracing::error!("Failed to recreate JavaVM: {e}");
                     return;
                 }
             }
         }
         None => {
-            log::error!("JNI context init called before JNI_OnLoad");
+            tracing::error!("JNI context init called before JNI_OnLoad");
             return;
         }
     };
@@ -43,7 +43,7 @@ pub fn init(env: &mut JNIEnv, activity: &JObject) {
     let activity_ref = match env.new_global_ref(activity) {
         Ok(r) => r,
         Err(e) => {
-            log::error!("Failed to create global ref for activity: {e}");
+            tracing::error!("Failed to create global ref for activity: {e}");
             return;
         }
     };

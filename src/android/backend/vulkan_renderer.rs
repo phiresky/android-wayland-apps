@@ -100,7 +100,7 @@ impl VulkanRenderer {
 
         let props = unsafe { instance.get_physical_device_properties(physical_device) };
         let name = unsafe { std::ffi::CStr::from_ptr(props.device_name.as_ptr()) };
-        log::info!("[vk-renderer] GPU: {:?}", name);
+        tracing::info!("[vk-renderer] GPU: {:?}", name);
 
         // Find graphics queue family
         let queue_families = unsafe {
@@ -135,7 +135,7 @@ impl VulkanRenderer {
         let swapchain_fn = khr::swapchain::Device::new(&instance, &device);
         let external_memory_fd_fn = khr::external_memory_fd::Device::new(&instance, &device);
 
-        log::info!("[vk-renderer] Vulkan renderer initialized");
+        tracing::info!("[vk-renderer] Vulkan renderer initialized");
 
         Ok(Self {
             _entry: entry,
@@ -170,13 +170,13 @@ impl VulkanRenderer {
                     }));
                 }
                 // Size mismatch: fd was reused for a different buffer
-                log::info!("[vk-renderer] Evicting stale cache fd={} (was {}x{}, now {}x{})",
+                tracing::info!("[vk-renderer] Evicting stale cache fd={} (was {}x{}, now {}x{})",
                     fd, cached.width, cached.height, width, height);
             }
         }
         // Not cached or evicted — import and store
         let imported = self.import_dmabuf(fd, width, height, stride, format)?;
-        log::info!("[vk-renderer] Cached dmabuf fd={} ({}x{}, cache size={})",
+        tracing::info!("[vk-renderer] Cached dmabuf fd={} ({}x{}, cache size={})",
             fd, width, height, self.dmabuf_cache.borrow().len() + 1);
         self.dmabuf_cache.borrow_mut().insert(fd, imported);
         Ok(std::cell::Ref::map(self.dmabuf_cache.borrow(), |c| {
@@ -280,7 +280,7 @@ impl VulkanRenderer {
             .map_err(|e| format!("vkCreateImageView: {e}"))?;
 
         let stride_pixels = stride / 4; // 4 bytes per pixel for RGBA/BGRA
-        log::debug!("[vk-renderer] Imported dmabuf {}x{} stride={}", width, height, stride);
+        tracing::debug!("[vk-renderer] Imported dmabuf {}x{} stride={}", width, height, stride);
 
         Ok(ImportedDmabuf { image, buffer, memory, view, width, height, stride_pixels })
     }
@@ -406,7 +406,7 @@ impl VulkanRenderer {
         }).collect::<Result<Vec<_>, _>>()
             .map_err(|e| format!("create_image_view: {e}"))?;
 
-        log::info!("[vk-renderer] Swapchain created: {}x{}, {} images",
+        tracing::info!("[vk-renderer] Swapchain created: {}x{}, {} images",
             extent.width, extent.height, images.len());
 
         Ok(VulkanWindowSurface {

@@ -11,7 +11,7 @@ use std::thread;
 pub fn launch() {
     start_pipewire();
     if let Err(e) = open_launcher_activity() {
-        log::error!("Failed to open launcher activity: {e}");
+        tracing::error!("Failed to open launcher activity: {e}");
     }
 }
 
@@ -26,29 +26,29 @@ fn start_pipewire() {
 
     // PipeWire daemon — runs as foreground (blocks the thread)
     thread::spawn(|| {
-        log::info!("Starting PipeWire daemon in proot...");
+        tracing::info!("Starting PipeWire daemon in proot...");
         let output = ArchProcess {
             command: "PIPEWIRE_DEBUG=4 pipewire & sleep infinity".into(),
             user: Some(config::USERNAME.to_string()),
-            log: Some(Arc::new(|line| log::info!("[pipewire] {}", line))),
+            log: Some(Arc::new(|line| tracing::info!("[pipewire] {}", line))),
             kill_on_exit: false, // PipeWire daemonizes (forks); don't kill the child
         }
         .run();
-        log::warn!("PipeWire exited: {:?}", output.status);
+        tracing::warn!("PipeWire exited: {:?}", output.status);
     });
 
     // WirePlumber session manager — start after a short delay
     thread::spawn(|| {
         thread::sleep(std::time::Duration::from_secs(2));
-        log::info!("Starting WirePlumber in proot...");
+        tracing::info!("Starting WirePlumber in proot...");
         let output = ArchProcess {
             command: "wireplumber".into(),
             user: Some(config::USERNAME.to_string()),
-            log: Some(Arc::new(|line| log::info!("[wireplumber] {}", line))),
+            log: Some(Arc::new(|line| tracing::info!("[wireplumber] {}", line))),
             kill_on_exit: false,
         }
         .run();
-        log::warn!("WirePlumber exited: {:?}", output.status);
+        tracing::warn!("WirePlumber exited: {:?}", output.status);
     });
 }
 
@@ -102,7 +102,7 @@ fn open_launcher_activity() -> Result<(), jni::errors::Error> {
             &[JValue::Object(&intent)],
         )?;
 
-        log::info!("Opened LauncherActivity");
+        tracing::info!("Opened LauncherActivity");
         Ok(())
     })
 }
@@ -127,20 +127,20 @@ extern "system" fn Java_io_github_phiresky_wayland_1android_LauncherActivity_nat
     let command: String = match env.get_string(&command) {
         Ok(s) => s.into(),
         Err(e) => {
-            log::error!("Failed to get command string: {e}");
+            tracing::error!("Failed to get command string: {e}");
             return;
         }
     };
 
     thread::spawn(move || {
-        log::info!("Launching app: {}", command);
+        tracing::info!("Launching app: {}", command);
         let output = ArchProcess {
             command,
             user: Some(config::USERNAME.to_string()),
-            log: Some(Arc::new(|it| log::info!("{}", it))),
+            log: Some(Arc::new(|it| tracing::info!("{}", it))),
             kill_on_exit: true,
         }
         .run();
-        log::info!("App exited: {:?}", output.status);
+        tracing::info!("App exited: {:?}", output.status);
     });
 }

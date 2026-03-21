@@ -121,7 +121,7 @@ pub fn init_egl_headless() -> Result<CompositorRenderer, Box<dyn std::error::Err
     let renderer = unsafe { GlesRenderer::new(context) }
         .map_err(|e| format!("Failed to create GLES Renderer: {e}"))?;
 
-    log::info!("Headless EGL initialized successfully");
+    tracing::info!("Headless EGL initialized successfully");
     Ok(CompositorRenderer { renderer, display, pixel_format, config_id })
 }
 
