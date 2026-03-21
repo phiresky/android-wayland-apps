@@ -26,9 +26,9 @@ fn fourcc_to_ahb_format(fourcc: Fourcc) -> Option<u32> {
     match fourcc {
         // ABGR8888 / XBGR8888 = memory [R,G,B,A] = AHB R8G8B8A8
         Fourcc::Abgr8888 | Fourcc::Xbgr8888 => Some(AHB_FORMAT_R8G8B8A8_UNORM),
-        // ARGB8888 / XRGB8888 = memory [B,G,R,A] — no native AHB BGRA format,
-        // allocate as R8G8B8A8 (same size/stride, channels reinterpreted).
-        // The compositor's blit handles the channel swap if needed.
+        // ARGB8888 / XRGB8888 = memory [B,G,R,A]. Allocate as R8G8B8A8 —
+        // the GBM proxy response tells Mesa it's R8G8B8A8, so Turnip renders
+        // with swapped channels. SurfaceFlinger displays R8G8B8A8 correctly.
         Fourcc::Argb8888 | Fourcc::Xrgb8888 => Some(AHB_FORMAT_R8G8B8A8_UNORM),
         _ => None,
     }
