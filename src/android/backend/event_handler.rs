@@ -287,13 +287,14 @@ fn process_window_events(backend: &mut WaylandBackend) {
             } => {
                 handle_activity_right_click(backend, window_id, x, y);
             }
-            WindowEvent::ImeText {
-                window_id,
-                delete_before,
-                delete_after,
-                text,
-            } => {
-                handle_ime_text(backend, window_id, delete_before, delete_after, &text);
+            WindowEvent::ImeComposing { window_id, text } => {
+                handle_ime_composing(backend, window_id, text);
+            }
+            WindowEvent::ImeCommit { window_id, text } => {
+                handle_ime_commit(backend, window_id, text);
+            }
+            WindowEvent::ImeDelete { window_id, before, after } => {
+                handle_ime_delete(backend, window_id, before, after);
             }
         }
     }
@@ -433,9 +434,15 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                             if w.vk_surface.is_none() && w.native_window.is_some() {
                                 return true;
                             }
-                            // Recreate if buffer size changed
+                            // Recreate if buffer size changed significantly.
+                            // Small changes (< 5%) are ignored to avoid rapid
+                            // recreations during window settling at startup.
                             if let Some(ref vks) = w.vk_surface {
-                                if vks.extent.width != buf_w || vks.extent.height != buf_h {
+                                let dw = (vks.extent.width as i32 - buf_w as i32).unsigned_abs();
+                                let dh = (vks.extent.height as i32 - buf_h as i32).unsigned_abs();
+                                let threshold_w = vks.extent.width / 20; // 5%
+                                let threshold_h = vks.extent.height / 20;
+                                if dw > threshold_w.max(10) || dh > threshold_h.max(10) {
                                     return true;
                                 }
                             }
@@ -1077,86 +1084,149 @@ fn handle_activity_key(
     }
 }
 
-/// Handle IME text input from Android soft keyboard.
-/// Converts delete counts and committed text into synthetic wl_keyboard events.
-fn handle_ime_text(
-    backend: &mut WaylandBackend,
-    window_id: u32,
-    delete_before: i32,
-    delete_after: i32,
-    text: &str,
-) {
+// ============================================================
+// IME text input handlers (composing / commit / delete)
+// ============================================================
+
+/// Ensure the keyboard is focused on the given window's surface.
+fn ensure_ime_focus(backend: &mut WaylandBackend, window_id: u32) {
     let Some(wm) = backend.window_manager.as_ref() else { return };
     let Some(window) = wm.windows.get(&window_id) else { return };
     let wl_surface = window.surface_kind.wl_surface().clone();
-
     let compositor = &mut backend.compositor;
-    let time = compositor.start_time.elapsed().as_millis() as u32;
-
     if let Some(kb) = &compositor.keyboard {
-        // Ensure focus
         if kb.current_focus().as_ref() != Some(&wl_surface) {
             let serial = SERIAL_COUNTER.next_serial();
             kb.set_focus(&mut compositor.state, Some(wl_surface), serial);
         }
+    }
+}
 
-        // Send backspace key events for delete_before
-        const BACKSPACE: u32 = 14 + 8;
-        for _ in 0..delete_before {
-            let serial = SERIAL_COUNTER.next_serial();
-            kb.input::<(), _>(&mut compositor.state, BACKSPACE.into(),
-                smithay::backend::input::KeyState::Pressed, serial, time,
-                |_, _, _| FilterResult::Forward);
-            let serial = SERIAL_COUNTER.next_serial();
-            kb.input::<(), _>(&mut compositor.state, BACKSPACE.into(),
-                smithay::backend::input::KeyState::Released, serial, time,
-                |_, _, _| FilterResult::Forward);
-        }
+/// Handle composing (preedit) text from Android IME.
+fn handle_ime_composing(backend: &mut WaylandBackend, window_id: u32, text: String) {
+    ensure_ime_focus(backend, window_id);
 
-        // Send delete key events for delete_after
-        const DELETE: u32 = 111 + 8;
-        for _ in 0..delete_after {
-            let serial = SERIAL_COUNTER.next_serial();
-            kb.input::<(), _>(&mut compositor.state, DELETE.into(),
-                smithay::backend::input::KeyState::Pressed, serial, time,
-                |_, _, _| FilterResult::Forward);
-            let serial = SERIAL_COUNTER.next_serial();
-            kb.input::<(), _>(&mut compositor.state, DELETE.into(),
-                smithay::backend::input::KeyState::Released, serial, time,
-                |_, _, _| FilterResult::Forward);
-        }
+    if backend.compositor.state.text_input_state.is_active() {
+        // text_input_v3 path: send preedit_string + done
+        backend.compositor.state.text_input_state.send_preedit(&text);
+        backend.compositor.state.text_input_state.composing_text = text;
+    } else {
+        // Key-event fallback: diff against previous composing text
+        let old = std::mem::replace(
+            &mut backend.compositor.state.text_input_state.composing_text,
+            text.clone(),
+        );
+        let common = common_prefix_byte_len(&old, &text);
+        let del = old[common..].chars().count();
+        let ins = &text[common..];
+        send_ime_key_events(backend, del, 0, ins);
+    }
+}
 
-        // Send character key events
-        const SHIFT: u32 = 42 + 8; // KEY_LEFTSHIFT
-        for ch in text.chars() {
-            if let Some((evdev, shift)) = super::keymap::char_to_evdev_key(ch) {
-                let code = evdev + 8;
+/// Handle committed text from Android IME.
+fn handle_ime_commit(backend: &mut WaylandBackend, window_id: u32, text: String) {
+    ensure_ime_focus(backend, window_id);
 
-                if shift {
-                    let serial = SERIAL_COUNTER.next_serial();
-                    kb.input::<(), _>(&mut compositor.state, SHIFT.into(),
-                        smithay::backend::input::KeyState::Pressed, serial, time,
-                        |_, _, _| FilterResult::Forward);
-                }
+    if backend.compositor.state.text_input_state.is_active() {
+        // text_input_v3 path: send commit_string + done
+        backend.compositor.state.text_input_state.send_commit(&text);
+        backend.compositor.state.text_input_state.composing_text.clear();
+    } else {
+        // Key-event fallback: diff against composing text, then clear
+        let old = std::mem::take(&mut backend.compositor.state.text_input_state.composing_text);
+        let common = common_prefix_byte_len(&old, &text);
+        let del = old[common..].chars().count();
+        let ins = &text[common..];
+        send_ime_key_events(backend, del, 0, ins);
+    }
+}
 
+/// Handle delete surrounding text from Android IME (e.g. backspace).
+fn handle_ime_delete(backend: &mut WaylandBackend, window_id: u32, before: i32, after: i32) {
+    ensure_ime_focus(backend, window_id);
+
+    if backend.compositor.state.text_input_state.is_active() {
+        // text_input_v3 path: send delete_surrounding_text + done
+        // Assume 1 byte per char (correct for ASCII/Latin-1)
+        backend.compositor.state.text_input_state.send_delete(before as u32, after as u32);
+    } else {
+        // Key-event fallback: send backspace/delete key events
+        send_ime_key_events(backend, before as usize, after as usize, "");
+    }
+}
+
+/// Find the byte length of the common character prefix between two strings.
+fn common_prefix_byte_len(a: &str, b: &str) -> usize {
+    a.chars()
+        .zip(b.chars())
+        .take_while(|(ca, cb)| ca == cb)
+        .map(|(c, _)| c.len_utf8())
+        .sum()
+}
+
+/// Send synthetic wl_keyboard events: backspaces, forward deletes, then characters.
+/// Used as fallback when text_input_v3 is not active.
+fn send_ime_key_events(
+    backend: &mut WaylandBackend,
+    delete_before: usize,
+    delete_after: usize,
+    text: &str,
+) {
+    let compositor = &mut backend.compositor;
+    let time = compositor.start_time.elapsed().as_millis() as u32;
+
+    let Some(kb) = &compositor.keyboard else { return };
+
+    const BACKSPACE: u32 = 14 + 8;
+    for _ in 0..delete_before {
+        let serial = SERIAL_COUNTER.next_serial();
+        kb.input::<(), _>(&mut compositor.state, BACKSPACE.into(),
+            smithay::backend::input::KeyState::Pressed, serial, time,
+            |_, _, _| FilterResult::Forward);
+        let serial = SERIAL_COUNTER.next_serial();
+        kb.input::<(), _>(&mut compositor.state, BACKSPACE.into(),
+            smithay::backend::input::KeyState::Released, serial, time,
+            |_, _, _| FilterResult::Forward);
+    }
+
+    const DELETE: u32 = 111 + 8;
+    for _ in 0..delete_after {
+        let serial = SERIAL_COUNTER.next_serial();
+        kb.input::<(), _>(&mut compositor.state, DELETE.into(),
+            smithay::backend::input::KeyState::Pressed, serial, time,
+            |_, _, _| FilterResult::Forward);
+        let serial = SERIAL_COUNTER.next_serial();
+        kb.input::<(), _>(&mut compositor.state, DELETE.into(),
+            smithay::backend::input::KeyState::Released, serial, time,
+            |_, _, _| FilterResult::Forward);
+    }
+
+    const SHIFT: u32 = 42 + 8;
+    for ch in text.chars() {
+        if let Some((evdev, shift)) = super::keymap::char_to_evdev_key(ch) {
+            let code = evdev + 8;
+            if shift {
                 let serial = SERIAL_COUNTER.next_serial();
-                kb.input::<(), _>(&mut compositor.state, code.into(),
+                kb.input::<(), _>(&mut compositor.state, SHIFT.into(),
                     smithay::backend::input::KeyState::Pressed, serial, time,
                     |_, _, _| FilterResult::Forward);
+            }
+            let serial = SERIAL_COUNTER.next_serial();
+            kb.input::<(), _>(&mut compositor.state, code.into(),
+                smithay::backend::input::KeyState::Pressed, serial, time,
+                |_, _, _| FilterResult::Forward);
+            let serial = SERIAL_COUNTER.next_serial();
+            kb.input::<(), _>(&mut compositor.state, code.into(),
+                smithay::backend::input::KeyState::Released, serial, time,
+                |_, _, _| FilterResult::Forward);
+            if shift {
                 let serial = SERIAL_COUNTER.next_serial();
-                kb.input::<(), _>(&mut compositor.state, code.into(),
+                kb.input::<(), _>(&mut compositor.state, SHIFT.into(),
                     smithay::backend::input::KeyState::Released, serial, time,
                     |_, _, _| FilterResult::Forward);
-
-                if shift {
-                    let serial = SERIAL_COUNTER.next_serial();
-                    kb.input::<(), _>(&mut compositor.state, SHIFT.into(),
-                        smithay::backend::input::KeyState::Released, serial, time,
-                        |_, _, _| FilterResult::Forward);
-                }
-            } else {
-                tracing::debug!("IME: unmapped char {:?} (U+{:04X})", ch, ch as u32);
             }
+        } else {
+            tracing::debug!("IME: unmapped char {:?} (U+{:04X})", ch, ch as u32);
         }
     }
 }

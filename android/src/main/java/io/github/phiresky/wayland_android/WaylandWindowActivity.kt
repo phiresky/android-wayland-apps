@@ -173,9 +173,11 @@ class WaylandWindowActivity : Activity(), SurfaceHolder.Callback {
     }
 
     /**
-     * Custom InputConnection that intercepts IME text operations and forwards them
-     * to the native compositor as synthetic key events. Maintains an internal Editable
-     * (fullEditor=true) so autocorrect/prediction have text context to work with.
+     * Custom InputConnection that forwards IME operations to the native compositor.
+     * Sends full text with semantic type (composing/commit/delete) so the Rust side
+     * can use text_input_v3 protocol when available, or fall back to key events.
+     * Maintains an internal Editable (fullEditor=true) so autocorrect/prediction
+     * have text context to work with.
      */
     private class WaylandInputConnection(
         targetView: View,
@@ -184,46 +186,60 @@ class WaylandWindowActivity : Activity(), SurfaceHolder.Callback {
 
         private var composingText = ""
 
-        override fun commitText(text: CharSequence, newCursorPosition: Int): Boolean {
-            val newText = text.toString()
-            val common = composingText.commonPrefixWith(newText).length
-            val deleteBefore = composingText.length - common
-            val insertText = newText.substring(common)
-            composingText = ""
-            if (deleteBefore > 0 || insertText.isNotEmpty()) {
-                nativeOnImeText(windowId, deleteBefore, 0, insertText)
-            }
-            return super.commitText(text, newCursorPosition)
+        override fun setComposingText(text: CharSequence, newCursorPosition: Int): Boolean {
+            composingText = text.toString()
+            nativeOnImeText(windowId, IME_COMPOSING, composingText, 0, 0)
+            return super.setComposingText(text, newCursorPosition)
         }
 
-        override fun setComposingText(text: CharSequence, newCursorPosition: Int): Boolean {
-            val newText = text.toString()
-            val common = composingText.commonPrefixWith(newText).length
-            val deleteBefore = composingText.length - common
-            val insertText = newText.substring(common)
-            composingText = newText
-            if (deleteBefore > 0 || insertText.isNotEmpty()) {
-                nativeOnImeText(windowId, deleteBefore, 0, insertText)
-            }
-            return super.setComposingText(text, newCursorPosition)
+        override fun commitText(text: CharSequence, newCursorPosition: Int): Boolean {
+            composingText = ""
+            nativeOnImeText(windowId, IME_COMMIT, text.toString(), 0, 0)
+            return super.commitText(text, newCursorPosition)
         }
 
         override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
             if (beforeLength > 0 || afterLength > 0) {
-                nativeOnImeText(windowId, beforeLength, afterLength, "")
+                nativeOnImeText(windowId, IME_DELETE, "", beforeLength, afterLength)
             }
             return super.deleteSurroundingText(beforeLength, afterLength)
         }
 
         override fun finishComposingText(): Boolean {
+            if (composingText.isNotEmpty()) {
+                nativeOnImeText(windowId, IME_COMMIT, composingText, 0, 0)
+            }
             composingText = ""
             return super.finishComposingText()
         }
 
+        override fun setSelection(start: Int, end: Int): Boolean {
+            val editable = editable ?: return super.setSelection(start, end)
+            val oldStart = android.text.Selection.getSelectionStart(editable)
+            val result = super.setSelection(start, end)
+            if (result && start == end && oldStart >= 0) {
+                val delta = start - oldStart
+                if (delta != 0) {
+                    val keyCode = if (delta > 0)
+                        KeyEvent.KEYCODE_DPAD_RIGHT else KeyEvent.KEYCODE_DPAD_LEFT
+                    for (i in 0 until kotlin.math.abs(delta)) {
+                        nativeOnKeyEvent(windowId, keyCode, KeyEvent.ACTION_DOWN, 0)
+                        nativeOnKeyEvent(windowId, keyCode, KeyEvent.ACTION_UP, 0)
+                    }
+                }
+            }
+            return result
+        }
+
         override fun sendKeyEvent(event: KeyEvent): Boolean {
-            // Hardware-style key events from the IME go through the existing path.
             nativeOnKeyEvent(windowId, event.keyCode, event.action, event.metaState)
             return true
+        }
+
+        companion object {
+            const val IME_COMPOSING = 0
+            const val IME_COMMIT = 1
+            const val IME_DELETE = 2
         }
     }
 
@@ -291,7 +307,7 @@ class WaylandWindowActivity : Activity(), SurfaceHolder.Callback {
         private external fun nativeOnKeyEvent(windowId: Int, keyCode: Int, action: Int, metaState: Int): Boolean
 
         @JvmStatic
-        private external fun nativeOnImeText(windowId: Int, deleteBefore: Int, deleteAfter: Int, text: String)
+        private external fun nativeOnImeText(windowId: Int, imeType: Int, text: String, deleteBefore: Int, deleteAfter: Int)
 
         @JvmStatic
         private external fun nativeRightClick(windowId: Int, x: Float, y: Float)

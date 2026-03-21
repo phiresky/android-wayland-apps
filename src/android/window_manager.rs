@@ -35,7 +35,9 @@ pub enum WindowEvent {
     Touch { window_id: u32, action: i32, x: f32, y: f32 },
     Key { window_id: u32, key_code: i32, action: i32, meta_state: i32 },
     RightClick { window_id: u32, x: f32, y: f32 },
-    ImeText { window_id: u32, delete_before: i32, delete_after: i32, text: String },
+    ImeComposing { window_id: u32, text: String },
+    ImeCommit { window_id: u32, text: String },
+    ImeDelete { window_id: u32, before: i32, after: i32 },
 }
 
 unsafe impl Send for WindowEvent {}
@@ -444,19 +446,21 @@ extern "system" fn Java_io_github_phiresky_wayland_1android_WaylandWindowActivit
     mut env: JNIEnv,
     _class: JObject,
     window_id: i32,
+    ime_type: i32,
+    text: jni::objects::JString,
     delete_before: i32,
     delete_after: i32,
-    text: jni::objects::JString,
 ) {
     let text: String = env.get_string(&text)
         .map(|s| s.into())
         .unwrap_or_default();
-    send_event(WindowEvent::ImeText {
-        window_id: window_id as u32,
-        delete_before,
-        delete_after,
-        text,
-    });
+    let event = match ime_type {
+        0 => WindowEvent::ImeComposing { window_id: window_id as u32, text },
+        1 => WindowEvent::ImeCommit { window_id: window_id as u32, text },
+        2 => WindowEvent::ImeDelete { window_id: window_id as u32, before: delete_before, after: delete_after },
+        _ => return,
+    };
+    send_event(event);
 }
 
 #[unsafe(no_mangle)]

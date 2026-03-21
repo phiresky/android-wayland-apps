@@ -1,9 +1,9 @@
-//! Minimal zwp_text_input_v3 handler for Android soft keyboard integration.
+//! zwp_text_input_v3 handler for Android soft keyboard integration.
 //!
-//! Tracks enable/disable signals from Wayland clients to show/hide the
-//! Android soft keyboard. Full text composition (surrounding text, content
-//! hints, pre-edit) is not implemented — Android's InputMethodManager handles
-//! those natively, and key events arrive via the existing onKeyDown/onKeyUp path.
+//! When a Wayland client enables text_input_v3, IME input is forwarded via
+//! the protocol (preedit_string, commit_string, delete_surrounding_text).
+//! When text_input_v3 is not active, IME input falls back to synthetic
+//! wl_keyboard key events.
 
 use smithay::reexports::{
     wayland_protocols::wp::text_input::zv3::server::{
@@ -24,11 +24,21 @@ pub struct TextInputData {
     pending_enable: std::sync::Mutex<Option<bool>>,
 }
 
+/// Active text_input_v3 session for protocol-based IME forwarding.
+pub struct ActiveTextInput {
+    pub instance: ZwpTextInputV3,
+    pub done_serial: u32,
+}
+
 /// Tracks text_input_v3 instances and focus for soft keyboard control.
 #[derive(Default)]
 pub struct TextInputState {
     instances: Vec<ZwpTextInputV3>,
     focus: Option<WlSurface>,
+    /// Currently active (enabled) text_input instance.
+    pub active: Option<ActiveTextInput>,
+    /// Composing text tracked for key-event fallback path.
+    pub composing_text: String,
 }
 
 impl TextInputState {
@@ -64,6 +74,45 @@ impl TextInputState {
                     }
                 }
             }
+        }
+    }
+
+    /// Whether a text_input_v3 session is active (client enabled it).
+    pub fn is_active(&self) -> bool {
+        self.active.is_some()
+    }
+
+    /// Send preedit_string + done for composing text updates.
+    pub fn send_preedit(&mut self, text: &str) {
+        if let Some(active) = &mut self.active {
+            if text.is_empty() {
+                active.instance.preedit_string(None, 0, 0);
+            } else {
+                let cursor = text.len() as i32;
+                active.instance.preedit_string(Some(text.to_string()), cursor, cursor);
+            }
+            active.done_serial += 1;
+            active.instance.done(active.done_serial);
+        }
+    }
+
+    /// Send commit_string + clear preedit + done for committed text.
+    pub fn send_commit(&mut self, text: &str) {
+        if let Some(active) = &mut self.active {
+            active.instance.preedit_string(None, 0, 0);
+            active.instance.commit_string(Some(text.to_string()));
+            active.done_serial += 1;
+            active.instance.done(active.done_serial);
+        }
+    }
+
+    /// Send delete_surrounding_text + done.
+    /// Counts are in bytes (callers should provide byte counts).
+    pub fn send_delete(&mut self, before_bytes: u32, after_bytes: u32) {
+        if let Some(active) = &mut self.active {
+            active.instance.delete_surrounding_text(before_bytes, after_bytes);
+            active.done_serial += 1;
+            active.instance.done(active.done_serial);
         }
     }
 }
@@ -119,7 +168,7 @@ impl Dispatch<ZwpTextInputV3, TextInputData> for State {
     fn request(
         state: &mut State,
         _client: &Client,
-        _resource: &ZwpTextInputV3,
+        resource: &ZwpTextInputV3,
         request: zwp_text_input_v3::Request,
         data: &TextInputData,
         _dh: &DisplayHandle,
@@ -136,16 +185,40 @@ impl Dispatch<ZwpTextInputV3, TextInputData> for State {
                     *guard = Some(false);
                 }
             }
+            zwp_text_input_v3::Request::SetSurroundingText { text, cursor, anchor } => {
+                tracing::debug!(
+                    "text_input_v3: surrounding_text len={} cursor={} anchor={}",
+                    text.len(), cursor, anchor
+                );
+            }
+            zwp_text_input_v3::Request::SetTextChangeCause { .. } => {}
+            zwp_text_input_v3::Request::SetContentType { hint, purpose } => {
+                tracing::debug!("text_input_v3: content_type hint={:?} purpose={:?}", hint, purpose);
+            }
+            zwp_text_input_v3::Request::SetCursorRectangle { x, y, width, height } => {
+                tracing::debug!(
+                    "text_input_v3: cursor_rectangle {}x{} at ({},{})",
+                    width, height, x, y
+                );
+            }
             zwp_text_input_v3::Request::Commit => {
                 if let Some(enable) = data.pending_enable.lock().ok().and_then(|mut g| g.take()) {
                     tracing::info!(
                         "text_input_v3: soft keyboard {}",
                         if enable { "show" } else { "hide" }
                     );
+                    if enable {
+                        state.text_input_state.active = Some(ActiveTextInput {
+                            instance: resource.clone(),
+                            done_serial: 0,
+                        });
+                    } else {
+                        state.text_input_state.active = None;
+                        state.text_input_state.composing_text.clear();
+                    }
                     state.soft_keyboard_request = Some(enable);
                 }
             }
-            // Ignore surrounding text, content type, cursor rect — Android handles these
             _ => {}
         }
     }
@@ -157,6 +230,11 @@ impl Dispatch<ZwpTextInputV3, TextInputData> for State {
         _data: &TextInputData,
     ) {
         let dead_id = resource.id();
+        // Clear active if this instance was active
+        if state.text_input_state.active.as_ref().is_some_and(|a| a.instance.id() == dead_id) {
+            state.text_input_state.active = None;
+            state.text_input_state.composing_text.clear();
+        }
         state
             .text_input_state
             .instances
