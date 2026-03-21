@@ -21,6 +21,7 @@
     "$ROOTFS/sys/.empty:/sys/fs/selinux",
     "$LIBDIR:$LIBDIR",
     "/system:/system",
+    "/vendor:/vendor",
     "/apex:/apex"
   ],
   "binds_if_exists": [
