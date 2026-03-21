@@ -130,11 +130,15 @@ pub enum RenderMode {
 /// Toggled from DebugActivity via JNI.
 static USE_VULKAN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
-/// Global toggle: true = zero-copy AHB present (default), false = blit path.
-static USE_ZERO_COPY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+/// Global toggle: zero-copy AHB present. Default OFF (blit path is correct).
+#[cfg(feature = "zero-copy")]
+static USE_ZERO_COPY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub fn zero_copy_enabled() -> bool {
-    USE_ZERO_COPY.load(std::sync::atomic::Ordering::Relaxed)
+    #[cfg(feature = "zero-copy")]
+    { USE_ZERO_COPY.load(std::sync::atomic::Ordering::Relaxed) }
+    #[cfg(not(feature = "zero-copy"))]
+    { false }
 }
 
 pub fn use_vulkan_rendering() -> bool {
@@ -175,6 +179,7 @@ pub extern "system" fn Java_io_github_phiresky_wayland_1android_DebugActivity_na
 ) {
     let val = enabled != 0;
     tracing::info!("Zero-copy toggled: {}", if val { "ON" } else { "OFF" });
+    #[cfg(feature = "zero-copy")]
     USE_ZERO_COPY.store(val, std::sync::atomic::Ordering::Relaxed);
 }
 

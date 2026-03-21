@@ -1,5 +1,7 @@
+#[cfg(feature = "zero-copy")]
 pub mod ahb_allocator;
 pub mod egl;
+#[cfg(feature = "zero-copy")]
 pub mod gbm_server;
 pub mod vulkan_renderer;
 pub mod surface_transaction;
@@ -22,11 +24,8 @@ pub struct WaylandBackend {
     pub window_manager: Option<WindowManager>,
     pub wake_fd: RawFd,
     pub scale_factor: f64,
-    /// AHB allocator for server-side buffer allocation (zero-copy path).
-    pub ahb_allocator: Option<ahb_allocator::AhbAllocator>,
-    /// Tracks compositor-allocated AHBs so we can recognize them at commit time.
-    pub ahb_tracker: ahb_allocator::AhbBufferTracker,
-    /// Shared state from GBM allocator server (has the real tracker).
+    /// Shared state from GBM allocator server (zero-copy path).
+    #[cfg(feature = "zero-copy")]
     pub gbm_state: Option<Arc<Mutex<gbm_server::GbmServerState>>>,
 }
 

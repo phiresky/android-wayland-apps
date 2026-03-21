@@ -100,44 +100,13 @@ pub fn run_compositor_loop(setup_done: Arc<AtomicBool>) {
         }
     };
 
-    // Init AHB allocator for server-side buffer allocation (zero-copy path).
-    let mut ahb_allocator = crate::android::backend::ahb_allocator::AhbAllocator::new();
-    let mut ahb_tracker = crate::android::backend::ahb_allocator::AhbBufferTracker::new();
-
-    // Integration test: allocate AHB → export dmabuf → track → verify inode lookup
-    {
-        use smithay::backend::allocator::{Allocator, Fourcc, Modifier};
-        use smithay::backend::allocator::dmabuf::AsDmabuf;
-
-        match ahb_allocator.create_buffer(128, 128, Fourcc::Abgr8888, &[Modifier::Invalid]) {
-            Ok(buf) => {
-                tracing::info!("[ahb-test] Allocated 128x128 AHB, stride={}B", buf.stride);
-                match ahb_tracker.track(buf) {
-                    Ok(dmabuf) => {
-                        // Verify the tracker can find this buffer by its dmabuf inode
-                        if ahb_tracker.lookup(&dmabuf).is_some() {
-                            tracing::info!("[ahb-test] PASS: tracker found buffer by inode");
-                        } else {
-                            tracing::error!("[ahb-test] FAIL: tracker lookup returned None");
-                        }
-                        // Clean up test buffer
-                        ahb_tracker.untrack(&dmabuf);
-                    }
-                    Err(e) => tracing::error!("[ahb-test] FAIL: dmabuf export failed: {e}"),
-                }
-            }
-            Err(e) => tracing::error!("[ahb-test] FAIL: AHB allocation failed: {e}"),
-        }
-    }
-
-    let ahb_allocator = Some(ahb_allocator);
-
-    // Start GBM allocator server for proot clients.
-    // Clients connect to {ARCH_FS_ROOT}/tmp/gbm-alloc-0 and get dmabuf fds
-    // backed by AHardwareBuffers. The server's tracker is shared with the
-    // compositor so it can recognize these buffers at commit time.
-    let gbm_state = crate::android::backend::gbm_server::start_server(crate::core::config::ARCH_FS_ROOT);
-    tracing::info!("GBM allocator server started");
+    // Start GBM allocator server for zero-copy path (if feature enabled).
+    #[cfg(feature = "zero-copy")]
+    let gbm_state = {
+        let state = crate::android::backend::gbm_server::start_server(crate::core::config::ARCH_FS_ROOT);
+        tracing::info!("GBM allocator server started (zero-copy enabled)");
+        Some(state)
+    };
 
     let mut backend = WaylandBackend {
         compositor,
@@ -146,9 +115,8 @@ pub fn run_compositor_loop(setup_done: Arc<AtomicBool>) {
         window_manager: Some(window_manager),
         wake_fd,
         scale_factor,
-        ahb_allocator,
-        ahb_tracker,
-        gbm_state: Some(gbm_state),
+        #[cfg(feature = "zero-copy")]
+        gbm_state,
     };
 
     // Wait for rootfs setup to complete, then init keyboard and launch proot.

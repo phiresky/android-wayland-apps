@@ -452,31 +452,24 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                     // If this dmabuf is a compositor-allocated AHB, skip the
                     // Vulkan import+blit entirely and present the AHB directly
                     // via ASurfaceTransaction. This is the optimal zero-GPU-copy path.
-                    {
-                        use std::os::unix::io::AsRawFd;
-                        if let Some(fd) = dmabuf.handles().next() {
-                            let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-                            if unsafe { libc::fstat(fd.as_raw_fd(), &mut stat) } == 0 {
-                                tracing::debug!("[zero-copy] committed dmabuf fd={} inode=({}, {}), tracker has {} entries",
-                                    fd.as_raw_fd(), stat.st_dev, stat.st_ino, backend.ahb_tracker.len());
-                            }
-                        }
-                    }
-                    // Only try zero-copy when buffer size is stable (not during resize).
-                    // During resize, stale AHBs in the tracker cause artifacts.
-                    let size_stable = backend.window_manager.as_ref()
-                        .and_then(|wm| wm.windows.get(&window_id))
-                        .and_then(|w| w.last_buffer_size)
-                        .map(|(lw, lh)| lw == buf_w && lh == buf_h)
-                        .unwrap_or(false);
+                    #[cfg(feature = "zero-copy")]
+                    let gbm_lookup = {
+                        let size_stable = backend.window_manager.as_ref()
+                            .and_then(|wm| wm.windows.get(&window_id))
+                            .and_then(|w| w.last_buffer_size)
+                            .map(|(lw, lh)| lw == buf_w && lh == buf_h)
+                            .unwrap_or(false);
 
-                    let gbm_lookup = if size_stable && crate::android::window_manager::zero_copy_enabled() {
-                        backend.gbm_state.as_ref()
-                            .and_then(|s| s.lock().ok())
-                            .and_then(|g| g.tracker.lookup(&dmabuf).map(|b| b.ahb.clone()))
-                    } else {
-                        None
+                        if size_stable && crate::android::window_manager::zero_copy_enabled() {
+                            backend.gbm_state.as_ref()
+                                .and_then(|s| s.lock().ok())
+                                .and_then(|g| g.tracker.lookup(&dmabuf).map(|b| b.ahb.clone()))
+                        } else {
+                            None
+                        }
                     };
+                    #[cfg(not(feature = "zero-copy"))]
+                    let gbm_lookup: Option<std::sync::Arc<crate::android::backend::surface_transaction::HardwareBuffer>> = None;
                     if let Some(ahb_arc) = gbm_lookup {
                         // Ensure ASurfaceControl exists for this window.
                         let has_sc = backend.window_manager.as_ref()

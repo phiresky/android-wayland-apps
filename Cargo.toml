@@ -37,6 +37,11 @@ tar = "0.4"
 xz2 = "0.1"
 pathdiff = "0.2"
 ndk-sys = "0.6.0"
+minigbm = { path = "minigbm", optional = true }
+
+[features]
+default = ["zero-copy"]
+zero-copy = ["minigbm"]
 
 [patch.crates-io]
 smithay = { path = "patches/smithay" }

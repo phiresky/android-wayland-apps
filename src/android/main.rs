@@ -45,6 +45,13 @@ extern "system" fn Java_io_github_phiresky_wayland_1android_MainActivity_nativeI
     // Initialize tracing subscriber for Android logcat output.
     crate::android::utils::android_tracing::init();
 
+    // Smoke-test minigbm (AHardwareBuffer-backed GBM API).
+    #[cfg(feature = "zero-copy")]
+    match minigbm::smoke_test() {
+        Ok(msg) => tracing::info!("[minigbm] {msg}"),
+        Err(e) => tracing::error!("[minigbm] smoke test FAILED: {e}"),
+    }
+
     // Store global JNI context (VM + Activity).
     jni_context::init(&mut env, &activity);
 
