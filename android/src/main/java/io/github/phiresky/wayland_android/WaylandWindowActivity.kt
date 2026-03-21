@@ -134,12 +134,13 @@ class WaylandWindowActivity : Activity(), SurfaceHolder.Callback {
                     true
                 }
                 2 -> {
-                    if (imm != null) {
+                    surfaceView.requestFocus()
+                    val insetsController = surfaceView.windowInsetsController
+                    if (insetsController != null) {
                         if (keyboardVisible) {
-                            imm.hideSoftInputFromWindow(surfaceView.windowToken, 0)
+                            insetsController.hide(android.view.WindowInsets.Type.ime())
                         } else {
-                            surfaceView.requestFocus()
-                            imm.showSoftInput(surfaceView, InputMethodManager.SHOW_IMPLICIT)
+                            insetsController.show(android.view.WindowInsets.Type.ime())
                         }
                     }
                     true
