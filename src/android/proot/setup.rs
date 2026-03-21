@@ -1033,8 +1033,8 @@ pub fn setup_portal() {
     // Re-generate if script doesn't exist or uses the old backend interface
     if backend_script.exists() {
         if let Ok(content) = fs::read_to_string(&backend_script) {
-            if content.contains("org.freedesktop.portal.Desktop") {
-                return; // Already has the standalone frontend version
+            if content.contains("org.freedesktop.portal.Settings") {
+                return; // Already has the latest version with Settings support
             }
         }
     }
@@ -1209,7 +1209,61 @@ class PortalService(dbus.service.Object):
         threading.Thread(target=do_request, daemon=True).start()
         return dbus.ObjectPath(req_path)
 
-    # Properties interface — apps query the portal version
+    # Settings interface — exposes Android's color scheme to Linux apps
+
+    def _get_color_scheme(self):
+        """Query Android's color scheme via the compositor bridge."""
+        result = send_portal_request({"type": "get_color_scheme"})
+        return int(result.get("color_scheme", 0))
+
+    @dbus.service.method(
+        "org.freedesktop.portal.Settings",
+        in_signature="ss",
+        out_signature="v",
+    )
+    def ReadOne(self, namespace, key):
+        if namespace == "org.freedesktop.appearance" and key == "color-scheme":
+            return dbus.UInt32(self._get_color_scheme())
+        raise dbus.exceptions.DBusException(
+            f"Unknown setting: {namespace}.{key}",
+            name="org.freedesktop.portal.Error.NotFound",
+        )
+
+    @dbus.service.method(
+        "org.freedesktop.portal.Settings",
+        in_signature="ss",
+        out_signature="v",
+    )
+    def Read(self, namespace, key):
+        # Deprecated method — wraps value in extra variant layer
+        val = self.ReadOne(namespace, key)
+        return dbus.types.Variant(val)
+
+    @dbus.service.method(
+        "org.freedesktop.portal.Settings",
+        in_signature="as",
+        out_signature="a{sa{sv}}",
+    )
+    def ReadAll(self, namespaces):
+        result = {}
+        # If no filter or matching filter, include appearance settings
+        if not namespaces or any(
+            ns in ("org.freedesktop.appearance", "org.freedesktop.*", "*")
+            for ns in namespaces
+        ):
+            result["org.freedesktop.appearance"] = {
+                "color-scheme": dbus.UInt32(self._get_color_scheme()),
+            }
+        return result
+
+    @dbus.service.signal(
+        "org.freedesktop.portal.Settings",
+        signature="ssv",
+    )
+    def SettingChanged(self, namespace, key, value):
+        pass
+
+    # Properties interface — apps query portal versions
     @dbus.service.method(
         dbus.PROPERTIES_IFACE,
         in_signature="ss",
@@ -1217,6 +1271,8 @@ class PortalService(dbus.service.Object):
     )
     def Get(self, interface, prop):
         if prop == "version":
+            if interface == "org.freedesktop.portal.Settings":
+                return dbus.UInt32(2)
             return dbus.UInt32(4)
         raise dbus.exceptions.DBusException(
             f"Unknown property: {interface}.{prop}",
@@ -1229,7 +1285,30 @@ class PortalService(dbus.service.Object):
         out_signature="a{sv}",
     )
     def GetAll(self, interface):
+        if interface == "org.freedesktop.portal.Settings":
+            return {"version": dbus.UInt32(2)}
         return {"version": dbus.UInt32(4)}
+
+
+def poll_color_scheme(portal):
+    """Poll Android color scheme and emit SettingChanged on transitions."""
+    last_scheme = portal._get_color_scheme()
+    while True:
+        import time
+        time.sleep(5)
+        try:
+            scheme = portal._get_color_scheme()
+            if scheme != last_scheme:
+                last_scheme = scheme
+                print(f"Color scheme changed to {scheme}", flush=True)
+                GLib.idle_add(
+                    portal.SettingChanged,
+                    "org.freedesktop.appearance",
+                    "color-scheme",
+                    dbus.UInt32(scheme),
+                )
+        except Exception as e:
+            print(f"Poll error: {e}", file=sys.stderr)
 
 
 def main():
@@ -1237,7 +1316,9 @@ def main():
     bus = dbus.SessionBus()
     bus_name = dbus.service.BusName(BUS_NAME, bus, replace_existing=True, allow_replacement=True)
     portal = PortalService(bus, OBJECT_PATH)
-    print(f"Android file chooser portal running on {BUS_NAME}", flush=True)
+    # Poll for color scheme changes in background
+    threading.Thread(target=poll_color_scheme, args=(portal,), daemon=True).start()
+    print(f"Android portal running on {BUS_NAME}", flush=True)
     GLib.MainLoop().run()
 
 

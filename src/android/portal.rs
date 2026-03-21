@@ -126,6 +126,16 @@ fn handle_client(stream: UnixStream) -> std::io::Result<()> {
         };
 
         let id = req["id"].as_str().unwrap_or("0").to_string();
+
+        // Handle settings queries synchronously (no compositor round-trip needed).
+        if req["type"].as_str() == Some("get_color_scheme") {
+            let scheme = get_android_color_scheme();
+            let resp = serde_json::json!({"color_scheme": scheme});
+            writeln!(writer, "{resp}")?;
+            writer.flush()?;
+            continue;
+        }
+
         let request_type = match req["type"].as_str().unwrap_or("") {
             "open_file" => PortalRequestType::OpenFile,
             "save_file" => PortalRequestType::SaveFile,
@@ -200,6 +210,31 @@ fn handle_client(stream: UnixStream) -> std::io::Result<()> {
     }
 
     Ok(())
+}
+
+/// Read Android's current color scheme via JNI.
+/// Returns: 0 = no preference, 1 = prefer dark, 2 = prefer light.
+fn get_android_color_scheme() -> u32 {
+    jni_context::with_jni(|env, activity| {
+        let resources = env
+            .call_method(activity, "getResources", "()Landroid/content/res/Resources;", &[])?
+            .l()?;
+        let config = env
+            .call_method(&resources, "getConfiguration", "()Landroid/content/res/Configuration;", &[])?
+            .l()?;
+        let ui_mode = env.get_field(&config, "uiMode", "I")?.i()?;
+
+        // UI_MODE_NIGHT_MASK = 0x30, UI_MODE_NIGHT_YES = 0x20, UI_MODE_NIGHT_NO = 0x10
+        let night = ui_mode & 0x30;
+        let scheme = match night {
+            0x20 => 1u32, // dark
+            0x10 => 2u32, // light
+            _ => 0u32,    // no preference
+        };
+        tracing::debug!("Android color scheme: uiMode=0x{ui_mode:x} → {scheme}");
+        Ok(scheme)
+    })
+    .unwrap_or(0)
 }
 
 /// Called from the compositor event handler when a PortalRequest arrives.
