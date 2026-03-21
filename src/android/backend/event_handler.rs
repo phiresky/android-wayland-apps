@@ -462,9 +462,21 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                             }
                         }
                     }
-                    let gbm_lookup = backend.gbm_state.as_ref()
-                        .and_then(|s| s.lock().ok())
-                        .and_then(|g| g.tracker.lookup(&dmabuf).map(|b| b.ahb.clone()));
+                    // Only try zero-copy when buffer size is stable (not during resize).
+                    // During resize, stale AHBs in the tracker cause artifacts.
+                    let size_stable = backend.window_manager.as_ref()
+                        .and_then(|wm| wm.windows.get(&window_id))
+                        .and_then(|w| w.last_buffer_size)
+                        .map(|(lw, lh)| lw == buf_w && lh == buf_h)
+                        .unwrap_or(false);
+
+                    let gbm_lookup = if size_stable {
+                        backend.gbm_state.as_ref()
+                            .and_then(|s| s.lock().ok())
+                            .and_then(|g| g.tracker.lookup(&dmabuf).map(|b| b.ahb.clone()))
+                    } else {
+                        None
+                    };
                     if let Some(ahb_arc) = gbm_lookup {
                         // Ensure ASurfaceControl exists for this window.
                         let has_sc = backend.window_manager.as_ref()

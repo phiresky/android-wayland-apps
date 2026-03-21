@@ -154,6 +154,45 @@ explicit vsync via `ASurfaceTransaction_setOnComplete` callback.
   new content causes a race condition — the compositor reads the dmabuf while the
   client writes the next frame to the same GPU memory.
 
+### 5b. Zero-copy path (experimental — Mesa WSI patch)
+
+```
+1. Compositor starts GBM socket server at /tmp/gbm-alloc-0
+2. Turnip WSI calls wsi_create_native_image_mem → patched to connect to socket
+3. Compositor allocates AHardwareBuffer, exports dmabuf fd via SCM_RIGHTS
+4. Turnip imports fd as VkDeviceMemory, renders directly into it
+5. Client commits → compositor matches dmabuf inode via AhbBufferTracker
+6. ASurfaceTransaction_setBuffer(ahb) — zero GPU copies
+```
+
+**Advantages:**
+- Zero GPU blits — client renders directly into the presentation buffer
+- No staging image, no format conversion, no vkCmdCopyBufferToImage
+- Lower latency (one fewer GPU pass per frame)
+- Potential for hardware overlay / direct scanout
+
+**Disadvantages / Known issues:**
+- **BGRA↔RGBA color swap**: Turnip requests B8G8R8A8 but AHBs are R8G8B8A8.
+  HAL_PIXEL_FORMAT_BGRA_8888 crashes SurfaceFlinger on Samsung. Fix needs to
+  intercept format earlier in Mesa WSI (before VkImage creation).
+- **Resize artifacts**: During window resize, old-sized AHBs may be matched
+  before the new-sized ones are allocated.
+- **Mesa patch required**: `patches/mesa-wsi-gbm-proxy.patch` modifies
+  `wsi_common_drm.c` to intercept buffer allocation. Must rebuild Mesa in proot.
+- **Format limited**: Only R8G8B8A8 AHBs supported (no BGRA, no 10-bit).
+- **Samsung-specific**: `AHardwareBuffer_getNativeHandle` is a private API
+  used to extract dmabuf fds from AHBs. Works on all Android 8+ devices but
+  not in the public NDK.
+
+**Components:**
+- `src/android/backend/gbm_server.rs` — Unix socket server, allocates AHBs
+- `src/android/backend/ahb_allocator.rs` — AhbAllocator (smithay Allocator trait),
+  AhbBufferTracker (inode-based dmabuf matching)
+- `gbm-shim/gbm_proxy.c` — C shim for proot (replaces libgbm.so, unused by
+  Vulkan WSI but useful for GBM-based clients)
+- `patches/mesa-wsi-gbm-proxy.patch` — Mesa WSI intercept
+- `minigbm/` — AHB-backed GBM library (Rust + C)
+
 ## How to Reproduce (vkcube test)
 
 ### Prerequisites (one-time, inside proot)
