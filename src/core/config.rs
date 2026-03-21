@@ -37,7 +37,6 @@ pub const PACKAGES: &[&str] = &[
     "kitty",
     "dbus-python",
     "python-gobject",
-    "xdg-desktop-portal",
 ];
 
 pub fn check_cmd() -> String {

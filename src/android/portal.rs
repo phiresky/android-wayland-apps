@@ -214,7 +214,7 @@ fn handle_client(stream: UnixStream) -> std::io::Result<()> {
 
 /// Read Android's current color scheme via JNI.
 /// Returns: 0 = no preference, 1 = prefer dark, 2 = prefer light.
-fn get_android_color_scheme() -> u32 {
+pub fn get_android_color_scheme() -> u32 {
     jni_context::with_jni(|env, activity| {
         let resources = env
             .call_method(activity, "getResources", "()Landroid/content/res/Resources;", &[])?

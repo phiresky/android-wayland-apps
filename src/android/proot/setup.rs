@@ -1033,29 +1033,20 @@ pub fn setup_portal() {
     // Re-generate if script doesn't exist or uses the old backend interface
     if backend_script.exists() {
         if let Ok(content) = fs::read_to_string(&backend_script) {
-            if content.contains("org.freedesktop.portal.Settings") {
-                return; // Already has the latest version with Settings support
+            if content.contains("apply_color_scheme") {
+                return; // Already has the latest version with gsettings support
             }
         }
     }
 
     setup_log("[setup] Installing XDG Desktop Portal Android daemon...");
 
-    // D-Bus service file — allows auto-activation by the session bus
-    let _ = fs::create_dir_all(fs_root.join("usr/share/dbus-1/services"));
-    let service = "\
-[D-BUS Service]
-Name=org.freedesktop.portal.Desktop
-Exec=/usr/local/libexec/xdg-desktop-portal-android
-";
-    fs::write(
-        fs_root.join("usr/share/dbus-1/services/org.freedesktop.portal.Desktop.service"),
-        service,
-    )
-    .unwrap_or_else(|e| tracing::error!("[setup] Failed to write dbus service file: {e}"));
+    // Remove conflicting service file if xdg-desktop-portal package left one behind
+    let conflict = fs_root.join("usr/share/dbus-1/services/org.freedesktop.portal.Desktop.service");
+    let _ = fs::remove_file(&conflict);
 
     // Standalone portal daemon — implements the frontend D-Bus interface directly
-    // (no xdg-desktop-portal needed, avoids /proc access issues in proot)
+    // (started explicitly from launch.rs, no D-Bus auto-activation needed)
     let _ = fs::create_dir_all(fs_root.join("usr/local/libexec"));
     let script = r##"#!/usr/bin/env python3
 """
@@ -1290,9 +1281,30 @@ class PortalService(dbus.service.Object):
         return {"version": dbus.UInt32(4)}
 
 
+def apply_color_scheme(scheme):
+    """Apply color scheme to gsettings so GTK3/GTK4 apps update instantly."""
+    import subprocess
+    try:
+        # GTK4 / GNOME 42+
+        cs = {1: "prefer-dark", 2: "prefer-light"}.get(scheme, "default")
+        subprocess.run(
+            ["gsettings", "set", "org.gnome.desktop.interface", "color-scheme", cs],
+            timeout=5, capture_output=True,
+        )
+        # GTK3 — theme name variant
+        theme = "Adwaita-dark" if scheme == 1 else "Adwaita"
+        subprocess.run(
+            ["gsettings", "set", "org.gnome.desktop.interface", "gtk-theme", theme],
+            timeout=5, capture_output=True,
+        )
+    except Exception as e:
+        print(f"gsettings error: {e}", file=sys.stderr)
+
+
 def poll_color_scheme(portal):
-    """Poll Android color scheme and emit SettingChanged on transitions."""
+    """Poll Android color scheme and emit SettingChanged + update gsettings."""
     last_scheme = portal._get_color_scheme()
+    apply_color_scheme(last_scheme)
     while True:
         import time
         time.sleep(5)
@@ -1301,6 +1313,7 @@ def poll_color_scheme(portal):
             if scheme != last_scheme:
                 last_scheme = scheme
                 print(f"Color scheme changed to {scheme}", flush=True)
+                apply_color_scheme(scheme)
                 GLib.idle_add(
                     portal.SettingChanged,
                     "org.freedesktop.appearance",
