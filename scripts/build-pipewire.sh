@@ -54,6 +54,12 @@ if ! grep -q '__ANDROID__' "$SRC_DIR/src/pipewire/data-loop.c"; then
     echo "Patched pthread_cancel for Android"
 fi
 
+# Patch rindex -> strrchr (rindex is not declared on Android/bionic)
+if grep -q 'rindex(path' "$SRC_DIR/test/test-config.c"; then
+    sed -i 's/rindex(path/strrchr(path/' "$SRC_DIR/test/test-config.c"
+    echo "Patched rindex -> strrchr for Android"
+fi
+
 cd "$SRC_DIR"
 
 # Configure: disable everything via auto_features, then disable remaining explicit options
@@ -72,13 +78,21 @@ meson setup "$BUILD_DIR/builddir" \
     -Djack-devel=false \
     -Drlimits-install=false \
     -Dpam-defaults-install=false \
+    -Dtests=disabled \
+    -Dexamples=disabled \
+    -Daudioconvert=enabled \
     2>&1
 
 echo "Building..."
 ninja -C "$BUILD_DIR/builddir" 2>&1
 
-echo "Copying library..."
+echo "Copying libraries..."
 find "$BUILD_DIR/builddir" -name "libpipewire-0.3.so" -type f | head -1 | while read f; do
+    cp -v "$f" "$PROJECT_DIR/libs/arm64-v8a/"
+done
+
+# Copy SPA audioconvert plugin (needed for audio sink format negotiation)
+find "$BUILD_DIR/builddir" -name "libspa-audioconvert.so" -type f | head -1 | while read f; do
     cp -v "$f" "$PROJECT_DIR/libs/arm64-v8a/"
 done
 

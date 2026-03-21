@@ -13,5 +13,6 @@ fn main() {
         println!("cargo:rustc-link-lib=camera2ndk");
         println!("cargo:rustc-link-lib=mediandk");
         println!("cargo:rustc-link-lib=pipewire-0.3");
+        println!("cargo:rustc-link-lib=aaudio");
     }
 }
