@@ -38,6 +38,7 @@ pub enum WindowEvent {
     ImeComposing { window_id: u32, text: String },
     ImeCommit { window_id: u32, text: String },
     ImeDelete { window_id: u32, before: i32, after: i32 },
+    ImeRecompose { window_id: u32, text: String },
 }
 
 unsafe impl Send for WindowEvent {}
@@ -141,6 +142,17 @@ pub extern "system" fn Java_io_github_phiresky_wayland_1android_DebugActivity_na
     _class: JObject,
 ) -> jni::sys::jboolean {
     if use_vulkan_rendering() { 1 } else { 0 }
+}
+
+/// JNI callback: get debug log buffer for DebugActivity.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_phiresky_wayland_1android_DebugActivity_nativeGetDebugLog(
+    mut env: JNIEnv,
+    _class: JObject,
+) -> jni::sys::jstring {
+    let log = crate::android::utils::android_tracing::get_debug_log();
+    let output = env.new_string(&log).unwrap_or_else(|_| env.new_string("").unwrap_or_else(|e| panic!("JNI new_string failed: {e}")));
+    output.into_raw()
 }
 
 /// Manages the mapping between XDG toplevels and Android Activities.
@@ -458,6 +470,7 @@ extern "system" fn Java_io_github_phiresky_wayland_1android_WaylandWindowActivit
         0 => WindowEvent::ImeComposing { window_id: window_id as u32, text },
         1 => WindowEvent::ImeCommit { window_id: window_id as u32, text },
         2 => WindowEvent::ImeDelete { window_id: window_id as u32, before: delete_before, after: delete_after },
+        3 => WindowEvent::ImeRecompose { window_id: window_id as u32, text },
         _ => return,
     };
     send_event(event);

@@ -370,8 +370,9 @@ impl VulkanRenderer {
             .or(formats.first())
             .ok_or("No surface formats")?;
 
-        // Use minimum images to avoid stale frame issues with multi-buffering
-        let image_count = caps.min_image_count.max(2).min(
+        // Use exactly 1 image to prevent strobe from stale frames in the buffer queue.
+        // Android requires min_image_count ≥ 2, but we try 1 first.
+        let image_count = 1u32.max(caps.min_image_count).min(
             if caps.max_image_count == 0 { u32::MAX } else { caps.max_image_count }
         );
 
@@ -533,12 +534,28 @@ impl VulkanRenderer {
         dmabuf: &ImportedDmabuf,
         window: &VulkanWindowSurface,
     ) -> Result<(), String> {
+        // Use a fence to ensure the image is actually available before writing.
+        // Without proper synchronization, Android's buffer queue can show stale frames.
+        let fence_info = vk::FenceCreateInfo::default();
+        let acquire_fence = unsafe { self.device.create_fence(&fence_info, None) }
+            .map_err(|e| format!("create_fence: {e}"))?;
+
         let (image_index, _) = unsafe {
             self.swapchain_fn.acquire_next_image(
                 window.swapchain, u64::MAX,
-                vk::Semaphore::null(), vk::Fence::null(),
+                vk::Semaphore::null(), acquire_fence,
             )
         }.map_err(|e| format!("acquire_next_image: {e}"))?;
+
+        unsafe {
+            self.device.wait_for_fences(&[acquire_fence], true, u64::MAX)
+                .map_err(|e| format!("wait_fence: {e}"))?;
+            self.device.destroy_fence(acquire_fence, None);
+        }
+
+        tracing::info!("[vk-blit] img={} sc={}x{} buf={}x{} stride={}",
+            image_index, window.extent.width, window.extent.height,
+            dmabuf.width, dmabuf.height, dmabuf.stride_pixels);
 
         // Command pool + buffer (TODO: cache)
         let pool_info = vk::CommandPoolCreateInfo::default()
@@ -597,9 +614,8 @@ impl VulkanRenderer {
         // Can't blit directly from the imported VkImage because Qualcomm
         // interprets OPTIMAL tiling as UBWC (compressed), causing stripes.
         let staging = self.get_or_create_staging(dmabuf.width, dmabuf.height,
-            Self::fourcc_to_vk_format(0x34325258))?; // default BGRA for staging
+            Self::fourcc_to_vk_format(0x34325258))?;
 
-        // buffer → staging
         let staging_to_dst = vk::ImageMemoryBarrier::default()
             .image(staging.0)
             .old_layout(vk::ImageLayout::UNDEFINED)
@@ -624,7 +640,6 @@ impl VulkanRenderer {
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[copy_region]);
         }
 
-        // staging → swapchain (format conversion via blit)
         let staging_to_src = vk::ImageMemoryBarrier::default()
             .image(staging.0)
             .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
@@ -701,6 +716,74 @@ impl VulkanRenderer {
         Ok(())
     }
 
+    /// Present a black frame to flush stale buffers from Android's display queue.
+    pub fn present_black(&self, window: &VulkanWindowSurface) -> Result<(), String> {
+        let (image_index, _) = unsafe {
+            self.swapchain_fn.acquire_next_image(window.swapchain, u64::MAX,
+                vk::Semaphore::null(), vk::Fence::null())
+        }.map_err(|e| format!("acquire: {e}"))?;
+
+        let pool_info = vk::CommandPoolCreateInfo::default()
+            .queue_family_index(self.queue_family_index)
+            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
+        let pool = unsafe { self.device.create_command_pool(&pool_info, None) }
+            .map_err(|e| format!("pool: {e}"))?;
+        let alloc = vk::CommandBufferAllocateInfo::default()
+            .command_pool(pool).level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1);
+        let cmd = unsafe { self.device.allocate_command_buffers(&alloc) }
+            .map_err(|e| format!("cmd: {e}"))?[0];
+
+        let begin = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        unsafe { self.device.begin_command_buffer(cmd, &begin) }.map_err(|e| format!("{e}"))?;
+
+        let range = vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1,
+        };
+        let to_dst = vk::ImageMemoryBarrier::default()
+            .image(window.images[image_index as usize])
+            .old_layout(vk::ImageLayout::UNDEFINED)
+            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .subresource_range(range);
+        unsafe { self.device.cmd_pipeline_barrier(cmd,
+            vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::TRANSFER,
+            vk::DependencyFlags::empty(), &[], &[], &[to_dst]); }
+
+        let black = vk::ClearColorValue { float32: [0.0, 0.0, 0.0, 1.0] };
+        unsafe { self.device.cmd_clear_color_image(cmd,
+            window.images[image_index as usize],
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL, &black, &[range]); }
+
+        let to_present = vk::ImageMemoryBarrier::default()
+            .image(window.images[image_index as usize])
+            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .subresource_range(range);
+        unsafe { self.device.cmd_pipeline_barrier(cmd,
+            vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+            vk::DependencyFlags::empty(), &[], &[], &[to_present]); }
+
+        unsafe { self.device.end_command_buffer(cmd) }.map_err(|e| format!("{e}"))?;
+        let submit = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&cmd));
+        unsafe {
+            self.device.queue_submit(self.queue, &[submit], vk::Fence::null()).map_err(|e| format!("{e}"))?;
+            self.device.queue_wait_idle(self.queue).map_err(|e| format!("{e}"))?;
+        }
+        let present = vk::PresentInfoKHR::default()
+            .swapchains(std::slice::from_ref(&window.swapchain))
+            .image_indices(std::slice::from_ref(&image_index));
+        unsafe { self.swapchain_fn.queue_present(self.queue, &present) }
+            .map_err(|e| format!("{e}"))?;
+        unsafe {
+            self.device.free_command_buffers(pool, &[cmd]);
+            self.device.destroy_command_pool(pool, None);
+        }
+        Ok(())
+    }
+
     /// Get or create a shared LINEAR staging image for format conversion.
     /// Reuses the existing one if size matches, otherwise recreates.
     fn get_or_create_staging(&self, width: u32, height: u32, format: vk::Format)
@@ -744,6 +827,17 @@ impl VulkanRenderer {
             }
         }
         Err("No suitable memory type".into())
+    }
+
+    /// Clear the dmabuf cache. Must be called when a client disconnects
+    /// or its window is destroyed — otherwise stale fd→GPU memory mappings
+    /// persist and cause strobing when fd numbers are recycled by the kernel.
+    pub fn clear_dmabuf_cache(&self) {
+        let old = self.dmabuf_cache.borrow_mut().drain().collect::<Vec<_>>();
+        for (fd, imported) in &old {
+            tracing::info!("[vk-renderer] Clearing cached dmabuf fd={} ({}x{})", fd, imported.width, imported.height);
+            self.destroy_imported(imported);
+        }
     }
 
     /// Map DRM fourcc to VkFormat.

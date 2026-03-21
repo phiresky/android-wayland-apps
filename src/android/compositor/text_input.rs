@@ -115,6 +115,18 @@ impl TextInputState {
             active.instance.done(active.done_serial);
         }
     }
+
+    /// Turn already-committed text back into preedit (for retroactive corrections).
+    /// Sends delete_surrounding_text + preedit_string + done as one atomic group.
+    pub fn send_recompose(&mut self, text: &str) {
+        if let Some(active) = &mut self.active {
+            active.instance.delete_surrounding_text(text.len() as u32, 0);
+            let cursor = text.len() as i32;
+            active.instance.preedit_string(Some(text.to_string()), cursor, cursor);
+            active.done_serial += 1;
+            active.instance.done(active.done_serial);
+        }
+    }
 }
 
 // --- Protocol dispatch implementations ---

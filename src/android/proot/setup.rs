@@ -84,7 +84,7 @@ pub fn run_setup() {
     fix_xkb_symlink();
     fix_ttyname();
     setup_storage_mountpoints();
-    setup_pipewire_config();
+    // setup_pipewire_config();  // disabled for now
     setup_flatpak_dbus();
     setup_flatpak_system_repo();
     setup_log("=== Proot setup complete ===");

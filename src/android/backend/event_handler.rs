@@ -85,6 +85,11 @@ pub fn dispatch_wayland(backend: &mut WaylandBackend) {
                         tracing::error!("Failed to finish Activity for window_id={window_id}: {e}");
                     }
                     wm.remove_window(window_id);
+                    // Clear dmabuf cache — stale fd→GPU memory mappings cause
+                    // strobing when the kernel recycles fd numbers for new clients.
+                    if let Some(ref vk) = backend.vk_renderer {
+                        vk.clear_dmabuf_cache();
+                    }
                 }
             }
         }
@@ -165,14 +170,6 @@ fn process_window_events(backend: &mut WaylandBackend) {
                 window_id,
                 native_window,
             } => {
-                // Set BGRA format on the fresh ANativeWindow BEFORE anything else.
-                // Turnip/Zink dmabufs use DRM_FORMAT_XRGB8888 (BGRA memory layout).
-                // Must be done before any EGL surface or Vulkan swapchain creation
-                // touches the surface, otherwise Android locks in RGBA.
-                // For wl_shm clients, the lazy EGL surface creation overrides this.
-                unsafe extern "C" { fn ANativeWindow_setBuffersGeometry(w: *mut std::ffi::c_void, width: i32, height: i32, format: i32) -> i32; }
-                unsafe { ANativeWindow_setBuffersGeometry(native_window, 0, 0, 5 /* HAL_PIXEL_FORMAT_BGRA_8888 */); }
-
                 // Store the native window pointer
                 if let Some(wm) = backend.window_manager.as_mut()
                     && let Some(window) = wm.windows.get_mut(&window_id) {
@@ -295,6 +292,9 @@ fn process_window_events(backend: &mut WaylandBackend) {
             }
             WindowEvent::ImeDelete { window_id, before, after } => {
                 handle_ime_delete(backend, window_id, before, after);
+            }
+            WindowEvent::ImeRecompose { window_id, text } => {
+                handle_ime_recompose(backend, window_id, text);
             }
         }
     }
@@ -434,15 +434,9 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                             if w.vk_surface.is_none() && w.native_window.is_some() {
                                 return true;
                             }
-                            // Recreate if buffer size changed significantly.
-                            // Small changes (< 5%) are ignored to avoid rapid
-                            // recreations during window settling at startup.
+                            // Recreate if buffer size changed
                             if let Some(ref vks) = w.vk_surface {
-                                let dw = (vks.extent.width as i32 - buf_w as i32).unsigned_abs();
-                                let dh = (vks.extent.height as i32 - buf_h as i32).unsigned_abs();
-                                let threshold_w = vks.extent.width / 20; // 5%
-                                let threshold_h = vks.extent.height / 20;
-                                if dw > threshold_w.max(10) || dh > threshold_h.max(10) {
+                                if vks.extent.width != buf_w || vks.extent.height != buf_h {
                                     return true;
                                 }
                             }
@@ -470,6 +464,13 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                                     match result {
                                         Ok(vk_surface) => {
                                             tracing::info!("Vulkan surface for window_id={} at {}x{}", window_id, buf_w, buf_h);
+                                            // Flush SurfaceFlinger's initial buffer by presenting
+                                            // black frames to all swapchain images. Without this,
+                                            // the SurfaceView's initial buffer stays in the
+                                            // consumer queue and strobes against Vulkan frames.
+                                            for _ in 0..vk_surface.images.len() {
+                                                let _ = vk.present_black(&vk_surface);
+                                            }
                                             window.vk_surface = Some(vk_surface);
                                         }
                                         Err(e) => {
@@ -492,9 +493,11 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                                 if let Some(fd) = fd {
                                     use std::os::unix::io::AsRawFd;
                                     let raw_fd = fd.as_raw_fd();
+                                    tracing::info!("[vk-render] fd={} needs_redraw={}", raw_fd, window.needs_redraw);
                                     if !window.needs_redraw {
                                         done = true;
                                     } else {
+                                    tracing::debug!("[vk-render] blit fd={} needs_redraw=true", raw_fd);
                                     match vk.get_or_import_dmabuf(raw_fd, sz.w as u32, sz.h as u32, stride, vk_fmt) {
                                         Ok(imported) => {
                                             match vk.blit_dmabuf_to_swapchain(&imported, vk_surface) {
@@ -538,11 +541,13 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
             let Some(window) = wm.windows.get_mut(&window_id) else {
                 continue;
             };
-            // Lazy EGL surface creation: only create AFTER the Vulkan path has run
-            // and decided not to handle this window (no dmabuf). Creating EGL eagerly
-            // would set the ANativeWindow format to RGBA, preventing the Vulkan
-            // swapchain from using BGRA for dmabuf clients.
-            if window.egl_surface.is_none() && window.native_window.is_some() && window.needs_redraw {
+            // Lazy EGL surface creation: only create when:
+            // 1. No VK surface exists (client doesn't use dmabuf)
+            // 2. Window has had a commit (needs_redraw) — so we know it's wl_shm
+            // Creating EGL on a window that will later use Vulkan causes a stale
+            // EGL frame to persist in SurfaceFlinger's queue, causing strobe.
+            if window.egl_surface.is_none() && window.vk_surface.is_none()
+                && window.native_window.is_some() && window.needs_redraw {
                 if let Some(handle) = wm.get_native_handle(window_id) {
                     if let Some(surface) = backend.renderer.as_ref()
                         .and_then(|r| r.create_surface_for_native_window(handle).ok()) {
@@ -1153,6 +1158,20 @@ fn handle_ime_delete(backend: &mut WaylandBackend, window_id: u32, before: i32, 
         // Key-event fallback: send backspace/delete key events
         send_ime_key_events(backend, before as usize, after as usize, "");
     }
+}
+
+/// Handle setComposingRegion: already-committed text is being turned back into composing.
+/// For text_input_v3: delete the committed text and re-show as preedit.
+/// For key-event fallback: just update tracking (text is already on screen).
+fn handle_ime_recompose(backend: &mut WaylandBackend, window_id: u32, text: String) {
+    ensure_ime_focus(backend, window_id);
+
+    if backend.compositor.state.text_input_state.is_active() {
+        // text_input_v3: atomically delete committed text and show as preedit
+        backend.compositor.state.text_input_state.send_recompose(&text);
+    }
+    // Both paths: update composing text tracking (no key events needed)
+    backend.compositor.state.text_input_state.composing_text = text;
 }
 
 /// Find the byte length of the common character prefix between two strings.
