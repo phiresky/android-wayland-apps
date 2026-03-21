@@ -242,6 +242,12 @@ fn process_window_events(backend: &mut WaylandBackend) {
             WindowEvent::SurfaceDestroyed { window_id } => {
                 if let Some(wm) = backend.window_manager.as_mut()
                     && let Some(window) = wm.windows.get_mut(&window_id) {
+                        if let Some(ref ahb) = window.ahb_surface {
+                            if let Some(ref vk) = backend.vk_renderer {
+                                vk.destroy_ahb_target(&ahb.ahb_target);
+                            }
+                        }
+                        window.ahb_surface = None;
                         window.egl_surface = None;
                         window.native_window = None;
                         tracing::info!("Surface destroyed for window_id={}", window_id);
