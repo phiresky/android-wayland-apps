@@ -165,38 +165,20 @@ fn process_window_events(backend: &mut WaylandBackend) {
                 window_id,
                 native_window,
             } => {
-                // Store the native window pointer first
+                // Set BGRA format on the fresh ANativeWindow BEFORE anything else.
+                // Turnip/Zink dmabufs use DRM_FORMAT_XRGB8888 (BGRA memory layout).
+                // Must be done before any EGL surface or Vulkan swapchain creation
+                // touches the surface, otherwise Android locks in RGBA.
+                // For wl_shm clients, the lazy EGL surface creation overrides this.
+                unsafe extern "C" { fn ANativeWindow_setBuffersGeometry(w: *mut std::ffi::c_void, width: i32, height: i32, format: i32) -> i32; }
+                unsafe { ANativeWindow_setBuffersGeometry(native_window, 0, 0, 5 /* HAL_PIXEL_FORMAT_BGRA_8888 */); }
+
+                // Store the native window pointer
                 if let Some(wm) = backend.window_manager.as_mut()
                     && let Some(window) = wm.windows.get_mut(&window_id) {
                         window.native_window = Some(native_window);
                     }
-                // Now create EGL surface (needs both renderer and wm)
-                let handle = backend
-                    .window_manager
-                    .as_ref()
-                    .and_then(|wm| wm.get_native_handle(window_id));
-
-                if let Some(handle) = handle {
-                    // Vulkan swapchain is created lazily on first dmabuf commit
-                    // (not here — creating both VK swapchain and EGL surface on the
-                    // same ANativeWindow causes conflicts)
-
-                    // Create EGL surface (for wl_shm clients and GLES fallback)
-                    let surface = backend
-                        .renderer
-                        .as_ref()
-                        .and_then(|r| r.create_surface_for_native_window(handle).ok());
-
-                    if let Some(surface) = surface {
-                        tracing::info!("Created EGL surface for window_id={}", window_id);
-                        if let Some(wm) = backend.window_manager.as_mut()
-                            && let Some(window) = wm.windows.get_mut(&window_id) {
-                                window.egl_surface = Some(surface);
-                            }
-                    } else {
-                        tracing::error!("Failed to create EGL surface for window_id={}", window_id);
-                    }
-                }
+                // EGL surface is created lazily on first GLES render (not here).
             }
             WindowEvent::SurfaceChanged {
                 window_id,
@@ -350,7 +332,7 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
         .map(|wm| {
             wm.windows
                 .iter()
-                .filter(|(_, w)| (w.egl_surface.is_some() || w.vk_surface.is_some()) && w.size.w > 0 && w.size.h > 0)
+                .filter(|(_, w)| (w.egl_surface.is_some() || w.vk_surface.is_some() || w.native_window.is_some()) && w.size.w > 0 && w.size.h > 0)
                 .map(|(id, _)| *id)
                 .collect()
         })
@@ -546,6 +528,24 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
             let Some(wm) = backend.window_manager.as_mut() else {
                 continue;
             };
+            let Some(window) = wm.windows.get_mut(&window_id) else {
+                continue;
+            };
+            // Lazy EGL surface creation: only create AFTER the Vulkan path has run
+            // and decided not to handle this window (no dmabuf). Creating EGL eagerly
+            // would set the ANativeWindow format to RGBA, preventing the Vulkan
+            // swapchain from using BGRA for dmabuf clients.
+            if window.egl_surface.is_none() && window.native_window.is_some() && window.needs_redraw {
+                if let Some(handle) = wm.get_native_handle(window_id) {
+                    if let Some(surface) = backend.renderer.as_ref()
+                        .and_then(|r| r.create_surface_for_native_window(handle).ok()) {
+                        tracing::info!("Lazy-created EGL surface for window_id={}", window_id);
+                        if let Some(w) = wm.windows.get_mut(&window_id) {
+                            w.egl_surface = Some(surface);
+                        }
+                    }
+                }
+            }
             let Some(window) = wm.windows.get_mut(&window_id) else {
                 continue;
             };
@@ -1155,7 +1155,7 @@ fn handle_ime_text(
                         |_, _, _| FilterResult::Forward);
                 }
             } else {
-                log::debug!("IME: unmapped char {:?} (U+{:04X})", ch, ch as u32);
+                tracing::debug!("IME: unmapped char {:?} (U+{:04X})", ch, ch as u32);
             }
         }
     }

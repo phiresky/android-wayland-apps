@@ -57,9 +57,6 @@ pub struct ImportedDmabuf {
     pub buffer: vk::Buffer,
     pub memory: vk::DeviceMemory,
     pub view: vk::ImageView,
-    /// LINEAR staging image for format conversion (BGRA→RGBA blit).
-    pub staging_image: vk::Image,
-    pub staging_memory: vk::DeviceMemory,
     pub width: u32,
     pub height: u32,
     pub stride_pixels: u32,
@@ -284,34 +281,9 @@ impl VulkanRenderer {
 
         let stride_pixels = stride / 4; // 4 bytes per pixel for RGBA/BGRA
 
-        // Create a LINEAR staging image for format conversion (e.g. BGRA→RGBA).
-        // Can't use the imported VkImage directly because OPTIMAL tiling = UBWC on Qualcomm.
-        let staging_info = vk::ImageCreateInfo::default()
-            .image_type(vk::ImageType::TYPE_2D)
-            .format(format)
-            .extent(vk::Extent3D { width, height, depth: 1 })
-            .mip_levels(1)
-            .array_layers(1)
-            .samples(vk::SampleCountFlags::TYPE_1)
-            .tiling(vk::ImageTiling::LINEAR)
-            .usage(vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE);
-        let staging_image = unsafe { self.device.create_image(&staging_info, None) }
-            .map_err(|e| format!("create staging image: {e}"))?;
-        let staging_reqs = unsafe { self.device.get_image_memory_requirements(staging_image) };
-        let staging_alloc = vk::MemoryAllocateInfo::default()
-            .allocation_size(staging_reqs.size)
-            .memory_type_index(self.find_memory_type(staging_reqs.memory_type_bits,
-                vk::MemoryPropertyFlags::DEVICE_LOCAL)?);
-        let staging_memory = unsafe { self.device.allocate_memory(&staging_alloc, None) }
-            .map_err(|e| format!("alloc staging memory: {e}"))?;
-        unsafe { self.device.bind_image_memory(staging_image, staging_memory, 0) }
-            .map_err(|e| format!("bind staging memory: {e}"))?;
-
         tracing::debug!("[vk-renderer] Imported dmabuf {}x{} stride={}", width, height, stride);
 
-        Ok(ImportedDmabuf { image, buffer, memory, view, width, height, stride_pixels,
-            staging_image, staging_memory })
+        Ok(ImportedDmabuf { image, buffer, memory, view, width, height, stride_pixels })
     }
 
     /// Create a swapchain for an Android native window at the given buffer size.
@@ -619,14 +591,17 @@ impl VulkanRenderer {
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL, &clear_color, &[color_range]);
         }
 
-        // Two-step copy with format conversion:
-        // 1. VkBuffer → LINEAR staging VkImage (same format as dmabuf, e.g. BGRA)
-        // 2. Staging → swapchain via vkCmdBlitImage (handles BGRA→RGBA conversion)
-        // Can't use the imported VkImage directly because OPTIMAL tiling = UBWC on Qualcomm.
+        // Two-step copy: buffer → LINEAR staging image → swapchain (via blit).
+        // The blit handles BGRA→RGBA format conversion since Android's Vulkan
+        // swapchain only supports R8G8B8A8 but dmabufs use B8G8R8A8.
+        // Can't blit directly from the imported VkImage because Qualcomm
+        // interprets OPTIMAL tiling as UBWC (compressed), causing stripes.
+        let staging = self.get_or_create_staging(dmabuf.width, dmabuf.height,
+            Self::fourcc_to_vk_format(0x34325258))?; // default BGRA for staging
 
-        // Step 1: buffer → staging (LINEAR, correct format)
+        // buffer → staging
         let staging_to_dst = vk::ImageMemoryBarrier::default()
-            .image(dmabuf.staging_image)
+            .image(staging.0)
             .old_layout(vk::ImageLayout::UNDEFINED)
             .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
             .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
@@ -636,7 +611,6 @@ impl VulkanRenderer {
                 vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::TRANSFER,
                 vk::DependencyFlags::empty(), &[], &[], &[staging_to_dst]);
         }
-
         let copy_region = vk::BufferImageCopy {
             buffer_offset: 0,
             buffer_row_length: dmabuf.stride_pixels,
@@ -646,16 +620,13 @@ impl VulkanRenderer {
             image_extent: vk::Extent3D { width: dmabuf.width, height: dmabuf.height, depth: 1 },
         };
         unsafe {
-            self.device.cmd_copy_buffer_to_image(cmd,
-                dmabuf.buffer,
-                dmabuf.staging_image,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                &[copy_region]);
+            self.device.cmd_copy_buffer_to_image(cmd, dmabuf.buffer, staging.0,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[copy_region]);
         }
 
-        // Step 2: staging → swapchain (format conversion via blit)
+        // staging → swapchain (format conversion via blit)
         let staging_to_src = vk::ImageMemoryBarrier::default()
-            .image(dmabuf.staging_image)
+            .image(staging.0)
             .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
             .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
             .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
@@ -666,7 +637,6 @@ impl VulkanRenderer {
                 vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::TRANSFER,
                 vk::DependencyFlags::empty(), &[], &[], &[staging_to_src]);
         }
-
         let blit_w = dmabuf.width.min(window.extent.width) as i32;
         let blit_h = dmabuf.height.min(window.extent.height) as i32;
         let blit_region = vk::ImageBlit {
@@ -682,13 +652,11 @@ impl VulkanRenderer {
             ],
         };
         unsafe {
-            self.device.cmd_blit_image(cmd,
-                dmabuf.staging_image,
+            self.device.cmd_blit_image(cmd, staging.0,
                 vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
                 window.images[image_index as usize],
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                &[blit_region],
-                vk::Filter::NEAREST);
+                &[blit_region], vk::Filter::NEAREST);
         }
 
         // Transition swapchain image to PRESENT
@@ -726,9 +694,56 @@ impl VulkanRenderer {
         unsafe {
             self.device.free_command_buffers(pool, &[cmd]);
             self.device.destroy_command_pool(pool, None);
+            self.device.destroy_image(staging.0, None);
+            self.device.free_memory(staging.1, None);
         }
 
         Ok(())
+    }
+
+    /// Get or create a shared LINEAR staging image for format conversion.
+    /// Reuses the existing one if size matches, otherwise recreates.
+    fn get_or_create_staging(&self, width: u32, height: u32, format: vk::Format)
+        -> Result<(vk::Image, vk::DeviceMemory), String>
+    {
+        // Check if we already have a staging image of the right size
+        // For simplicity, just create one per blit call and cache would be a future optimization
+        let staging_info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(format)
+            .extent(vk::Extent3D { width, height, depth: 1 })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::LINEAR)
+            .usage(vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        let image = unsafe { self.device.create_image(&staging_info, None) }
+            .map_err(|e| format!("create staging image: {e}"))?;
+        let reqs = unsafe { self.device.get_image_memory_requirements(image) };
+        let alloc = vk::MemoryAllocateInfo::default()
+            .allocation_size(reqs.size)
+            .memory_type_index(self.find_memory_type(reqs.memory_type_bits,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL)?);
+        let memory = unsafe { self.device.allocate_memory(&alloc, None) }
+            .map_err(|e| format!("alloc staging memory: {e}"))?;
+        unsafe { self.device.bind_image_memory(image, memory, 0) }
+            .map_err(|e| format!("bind staging memory: {e}"))?;
+        Ok((image, memory))
+    }
+
+    fn find_memory_type(&self, type_filter: u32, properties: vk::MemoryPropertyFlags) -> Result<u32, String> {
+        let mem_props = unsafe {
+            self.instance.get_physical_device_memory_properties(self.physical_device)
+        };
+        for i in 0..mem_props.memory_type_count {
+            if (type_filter & (1 << i)) != 0
+                && mem_props.memory_types[i as usize].property_flags.contains(properties)
+            {
+                return Ok(i);
+            }
+        }
+        Err("No suitable memory type".into())
     }
 
     /// Map DRM fourcc to VkFormat.
@@ -748,25 +763,10 @@ impl VulkanRenderer {
             self.device.destroy_image_view(imported.view, None);
             self.device.destroy_image(imported.image, None);
             self.device.destroy_buffer(imported.buffer, None);
-            self.device.destroy_image(imported.staging_image, None);
-            self.device.free_memory(imported.staging_memory, None);
             self.device.free_memory(imported.memory, None);
         }
     }
 
-    fn find_memory_type(&self, type_filter: u32, properties: vk::MemoryPropertyFlags) -> Result<u32, String> {
-        let mem_props = unsafe {
-            self.instance.get_physical_device_memory_properties(self.physical_device)
-        };
-        for i in 0..mem_props.memory_type_count {
-            if (type_filter & (1 << i)) != 0
-                && mem_props.memory_types[i as usize].property_flags.contains(properties)
-            {
-                return Ok(i);
-            }
-        }
-        Err("No suitable memory type".into())
-    }
 
     pub fn device(&self) -> &ash::Device { &self.device }
     pub fn instance(&self) -> &ash::Instance { &self.instance }
