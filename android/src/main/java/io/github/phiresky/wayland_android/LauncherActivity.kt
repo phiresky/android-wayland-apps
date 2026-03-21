@@ -50,11 +50,14 @@ class LauncherActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        window.setDecorFitsSystemWindows(true)
         rootfs = applicationInfo.dataDir + "/files/arch"
 
-        // Read launcher config from intent extras (set by native code in launch.rs)
-        intent.getStringArrayExtra("ignore")?.let { ignoreList = it }
+        // Read launcher config from intent extras (set by native code in launch.rs).
+        // Save to companion object so config survives Activity recreation.
+        intent.getStringArrayExtra("ignore")?.let {
+            ignoreList = it
+            savedIgnoreList = it
+        } ?: savedIgnoreList?.let { ignoreList = it }
 
         val extraNames = intent.getStringArrayExtra("extra_names")
         val extraExecs = intent.getStringArrayExtra("extra_execs")
@@ -65,6 +68,9 @@ class LauncherActivity : Activity() {
                 val icon = if (extraIcons != null && i < extraIcons.size) extraIcons[i] else null
                 DesktopEntry(extraNames[i], extraExecs[i], icon)
             }
+            savedExtraApps = extraApps
+        } else {
+            savedExtraApps?.let { extraApps = it }
         }
 
         swipeRefresh = SwipeRefreshLayout(this).apply {
@@ -84,6 +90,14 @@ class LauncherActivity : Activity() {
         swipeRefresh.addView(scroll)
         swipeRefresh.setOnRefreshListener(::refreshApps)
         setContentView(swipeRefresh)
+
+        // SDK 35 ignores setDecorFitsSystemWindows(true) and enforces edge-to-edge.
+        // Apply system bar insets as padding so content doesn't overlap status/nav bars.
+        swipeRefresh.setOnApplyWindowInsetsListener { v, insets ->
+            val bars = insets.getInsets(android.view.WindowInsets.Type.systemBars())
+            v.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+            insets
+        }
 
         swipeRefresh.addOnLayoutChangeListener { _, left, _, right, _, _, _, _, _ ->
             val newWidth = right - left
@@ -389,6 +403,10 @@ class LauncherActivity : Activity() {
     }
 
     companion object {
+        // Persist launcher config across Activity recreation (process stays alive via foreground service)
+        private var savedIgnoreList: Array<String>? = null
+        private var savedExtraApps: Array<DesktopEntry>? = null
+
         private val ICON_COLORS = intArrayOf(
             0xFF4285F4.toInt(), 0xFFEA4335.toInt(), 0xFFFBBC05.toInt(), 0xFF34A853.toInt(),
             0xFF9C27B0.toInt(), 0xFFFF5722.toInt(), 0xFF00BCD4.toInt(), 0xFF607D8B.toInt(),

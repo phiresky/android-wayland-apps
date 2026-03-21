@@ -4,6 +4,7 @@ import android.app.Activity
 import android.os.Bundle
 import android.text.InputType
 import android.view.GestureDetector
+import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.Surface
@@ -30,6 +31,9 @@ class WaylandWindowActivity : Activity(), SurfaceHolder.Callback {
     private lateinit var surfaceView: SurfaceView
     private lateinit var menuAnchor: View
     private var longPressActive = false
+    /** Android InputType flags from Wayland content_type, used by onCreateInputConnection. */
+    @Volatile var currentInputType = InputType.TYPE_CLASS_TEXT or
+        InputType.TYPE_TEXT_FLAG_AUTO_CORRECT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
     // Shared Editable across InputConnection instances so text context survives
     // IME restarts (Gboard restarts the connection before doing corrections).
     private val sharedEditable: android.text.Editable = android.text.SpannableStringBuilder().also {
@@ -47,18 +51,29 @@ class WaylandWindowActivity : Activity(), SurfaceHolder.Callback {
             return
         }
 
-        // SDK 35 forces edge-to-edge; opt out so content doesn't render behind system bars
-        window.setDecorFitsSystemWindows(true)
-
         // Custom SurfaceView that presents itself as a text editor so the
         // Android soft keyboard can attach to it when requested.
         surfaceView = object : SurfaceView(this) {
             override fun onCheckIsTextEditor(): Boolean = true
 
+            // Intercept physical keyboard events BEFORE the IME framework sees them.
+            // Without this, Gboard processes physical keys into commitText/setComposingText
+            // AND the keys also arrive as wl_keyboard events, causing double input.
+            override fun onKeyPreIme(keyCode: Int, event: KeyEvent): Boolean {
+                val device = event.device
+                if (device != null && !device.isVirtual
+                    && device.keyboardType == InputDevice.KEYBOARD_TYPE_ALPHABETIC
+                    && !event.isSystem) {
+                    if (nativeOnKeyEvent(this@WaylandWindowActivity.windowId,
+                            event.keyCode, event.action, event.metaState)) {
+                        return true
+                    }
+                }
+                return super.onKeyPreIme(keyCode, event)
+            }
+
             override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
-                outAttrs.inputType = InputType.TYPE_CLASS_TEXT or
-                    InputType.TYPE_TEXT_FLAG_AUTO_CORRECT or
-                    InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                outAttrs.inputType = this@WaylandWindowActivity.currentInputType
                 outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN or
                     EditorInfo.IME_ACTION_NONE
                 val ed = this@WaylandWindowActivity.sharedEditable
@@ -76,6 +91,15 @@ class WaylandWindowActivity : Activity(), SurfaceHolder.Callback {
         menuAnchor = View(this)
         menuAnchor.layoutParams = FrameLayout.LayoutParams(1, 1)
         container.addView(menuAnchor)
+
+        // SDK 35 ignores setDecorFitsSystemWindows(true) and enforces edge-to-edge.
+        // Apply system bar insets as padding so the SurfaceView doesn't overlap them.
+        container.setOnApplyWindowInsetsListener { v, insets ->
+            val bars = insets.getInsets(android.view.WindowInsets.Type.systemBars())
+            v.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+            insets
+        }
+
         setContentView(container)
 
         surfaceView.holder.addCallback(this)
@@ -99,6 +123,14 @@ class WaylandWindowActivity : Activity(), SurfaceHolder.Callback {
         // to the rendering surface, not the Activity window (which includes
         // DeX title bar / window chrome).
         surfaceView.setOnTouchListener { _, event ->
+            // Physical mouse right-click: route to nativeRightClick instead of touch.
+            if (event.buttonState and MotionEvent.BUTTON_SECONDARY != 0) {
+                if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                    nativeRightClick(windowId, event.x, event.y)
+                }
+                return@setOnTouchListener true
+            }
+
             gestureDetector.onTouchEvent(event)
 
             if (longPressActive) {
@@ -111,6 +143,12 @@ class WaylandWindowActivity : Activity(), SurfaceHolder.Callback {
                 return@setOnTouchListener true
             }
 
+            nativeOnTouchEvent(windowId, event.action, event.x, event.y)
+        }
+
+        // Mouse hover events (movement without button pressed) come through
+        // onHoverEvent, not onTouchEvent. Forward them for pointer tracking.
+        surfaceView.setOnHoverListener { _, event ->
             nativeOnTouchEvent(windowId, event.action, event.x, event.y)
         }
     }
@@ -418,13 +456,18 @@ class WaylandWindowActivity : Activity(), SurfaceHolder.Callback {
          * Called from native code when a Wayland client enables/disables text_input_v3.
          */
         @JvmStatic
-        fun setSoftKeyboardVisible(windowId: Int, visible: Boolean) {
+        fun setSoftKeyboardVisible(windowId: Int, visible: Boolean, androidInputType: Int) {
             val activity = getByWindowId(windowId) ?: return
             activity.runOnUiThread {
                 val imm = activity.getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager
                     ?: return@runOnUiThread
                 if (visible) {
+                    val changed = activity.currentInputType != androidInputType
+                    activity.currentInputType = androidInputType
                     activity.surfaceView.requestFocus()
+                    if (changed) {
+                        imm.restartInput(activity.surfaceView)
+                    }
                     imm.showSoftInput(activity.surfaceView, InputMethodManager.SHOW_IMPLICIT)
                 } else {
                     imm.hideSoftInputFromWindow(activity.surfaceView.windowToken, 0)

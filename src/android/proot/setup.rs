@@ -81,6 +81,7 @@ pub fn run_setup() {
     disable_flatpak_spawn();
     fix_bsdtar();
     setup_firefox_config();
+    setup_electron_config();
     fix_xkb_symlink();
     fix_ttyname();
     setup_storage_mountpoints();
@@ -326,6 +327,22 @@ pub fn setup_firefox_config() {
     fs::write(&cfg_file, cfg)
         .unwrap_or_else(|e| tracing::error!("[setup] Failed to write Firefox config: {}", e));
 
+}
+
+/// Configure Electron apps (VSCode etc.) to run without sandbox.
+/// Electron's Chromium sandbox uses seccomp/namespaces that don't work in proot.
+fn setup_electron_config() {
+    let config_dir = Path::new(config::ARCH_FS_ROOT)
+        .join("home")
+        .join(config::USERNAME)
+        .join(".config");
+    let _ = fs::create_dir_all(&config_dir);
+
+    let flags = "--no-sandbox\n";
+    for name in ["code-flags.conf", "electron-flags.conf"] {
+        fs::write(config_dir.join(name), flags)
+            .unwrap_or_else(|e| tracing::error!("[setup] Failed to write {}: {}", name, e));
+    }
 }
 
 /// Ensure resolv.conf exists with a working nameserver.

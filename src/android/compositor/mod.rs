@@ -98,8 +98,8 @@ pub struct State {
     pub committed_surfaces: Vec<WlSurface>,
     /// Text input state for soft keyboard integration.
     pub text_input_state: TextInputState,
-    /// Pending soft keyboard show/hide request from text_input_v3.
-    pub soft_keyboard_request: Option<bool>,
+    /// Pending soft keyboard show/hide request from text_input_v3: (visible, android_input_type).
+    pub soft_keyboard_request: Option<(bool, i32)>,
     /// Toplevels destroyed by the client, queued for Activity cleanup.
     pub destroyed_toplevels: Vec<ToplevelSurface>,
     /// Layer surfaces destroyed by the client, queued for Activity cleanup.

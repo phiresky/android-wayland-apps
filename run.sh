@@ -11,11 +11,7 @@ adb shell am force-stop "$PKG" 2>/dev/null || true
 adb logcat -c
 adb shell am start -n "$ACTIVITY"
 
-# Stream logs: app native (android_logger uses crate name as tag, truncated),
-# smithay, stdout/stderr, plus crashes.
+# Stream logs: tracing uses module path as tag (e.g. android_wayland_launcher::android::compositor),
+# plus stdout/stderr and crashes.
 exec adb logcat -v time \
-    AndroidRuntime:E \
-    ActivityManager:W \
-    RustStdoutStderr:V \
-    'android_wayland_launc..:V' \
-    '*:S'
+    -e 'android_wayland_launcher|RustStdoutStderr|AndroidRuntime|ActivityManager'

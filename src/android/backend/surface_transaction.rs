@@ -141,10 +141,18 @@ pub fn present_buffer(
     buf_h: u32,
     dest_w: i32,
     dest_h: i32,
+    src_x: i32,
+    src_y: i32,
     frame_in_flight: &Arc<AtomicBool>,
     wake_fd: RawFd,
 ) {
-    let source = ARect { left: 0, top: 0, right: buf_w as i32, bottom: buf_h as i32 };
+    // Crop source to geometry area (excludes CSD shadow borders).
+    let source = ARect {
+        left: src_x,
+        top: src_y,
+        right: (src_x + dest_w).min(buf_w as i32),
+        bottom: (src_y + dest_h).min(buf_h as i32),
+    };
     let destination = ARect { left: 0, top: 0, right: dest_w, bottom: dest_h };
 
     let cb_data = Box::new(OnCompleteData {

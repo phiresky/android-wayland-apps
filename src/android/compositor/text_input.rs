@@ -8,7 +8,7 @@
 use smithay::reexports::{
     wayland_protocols::wp::text_input::zv3::server::{
         zwp_text_input_manager_v3::{self, ZwpTextInputManagerV3},
-        zwp_text_input_v3::{self, ZwpTextInputV3},
+        zwp_text_input_v3::{self, ContentHint, ContentPurpose, ZwpTextInputV3},
     },
     wayland_server::{
         backend::{ClientId, GlobalId},
@@ -22,6 +22,7 @@ use super::State;
 /// Per-resource data for each ZwpTextInputV3 instance.
 pub struct TextInputData {
     pending_enable: std::sync::Mutex<Option<bool>>,
+    pending_content_type: std::sync::Mutex<Option<(ContentHint, ContentPurpose)>>,
 }
 
 /// Active text_input_v3 session for protocol-based IME forwarding.
@@ -129,6 +130,90 @@ impl TextInputState {
     }
 }
 
+// --- Android InputType translation ---
+
+// android.text.InputType constants
+const TYPE_CLASS_TEXT: i32 = 0x1;
+const TYPE_CLASS_NUMBER: i32 = 0x2;
+const TYPE_CLASS_PHONE: i32 = 0x3;
+const TYPE_CLASS_DATETIME: i32 = 0x4;
+
+const TYPE_TEXT_FLAG_CAP_CHARACTERS: i32 = 0x1000;
+const TYPE_TEXT_FLAG_CAP_WORDS: i32 = 0x2000;
+const TYPE_TEXT_FLAG_CAP_SENTENCES: i32 = 0x4000;
+const TYPE_TEXT_FLAG_AUTO_CORRECT: i32 = 0x8000;
+const TYPE_TEXT_FLAG_AUTO_COMPLETE: i32 = 0x10000;
+const TYPE_TEXT_FLAG_MULTI_LINE: i32 = 0x20000;
+const TYPE_TEXT_FLAG_NO_SUGGESTIONS: i32 = 0x80000;
+
+const TYPE_TEXT_VARIATION_URI: i32 = 0x10;
+const TYPE_TEXT_VARIATION_EMAIL_ADDRESS: i32 = 0x20;
+const TYPE_TEXT_VARIATION_PERSON_NAME: i32 = 0x60;
+const TYPE_TEXT_VARIATION_PASSWORD: i32 = 0x80;
+
+const TYPE_NUMBER_FLAG_SIGNED: i32 = 0x1000;
+const TYPE_NUMBER_FLAG_DECIMAL: i32 = 0x2000;
+
+const TYPE_DATETIME_VARIATION_DATE: i32 = 0x10;
+const TYPE_DATETIME_VARIATION_TIME: i32 = 0x20;
+
+/// Default Android InputType when no content type is set by the client.
+pub const DEFAULT_ANDROID_INPUT_TYPE: i32 =
+    TYPE_CLASS_TEXT | TYPE_TEXT_FLAG_AUTO_CORRECT | TYPE_TEXT_FLAG_MULTI_LINE;
+
+/// Translate Wayland zwp_text_input_v3 content hint/purpose to Android InputType flags.
+fn translate_content_type(hint: ContentHint, purpose: ContentPurpose) -> i32 {
+    // Map purpose to base InputType class + variation
+    let mut input_type = match purpose {
+        ContentPurpose::Normal => TYPE_CLASS_TEXT,
+        ContentPurpose::Alpha => TYPE_CLASS_TEXT,
+        ContentPurpose::Digits => TYPE_CLASS_NUMBER,
+        ContentPurpose::Number => TYPE_CLASS_NUMBER | TYPE_NUMBER_FLAG_SIGNED | TYPE_NUMBER_FLAG_DECIMAL,
+        ContentPurpose::Phone => TYPE_CLASS_PHONE,
+        ContentPurpose::Url => TYPE_CLASS_TEXT | TYPE_TEXT_VARIATION_URI,
+        ContentPurpose::Email => TYPE_CLASS_TEXT | TYPE_TEXT_VARIATION_EMAIL_ADDRESS,
+        ContentPurpose::Name => TYPE_CLASS_TEXT | TYPE_TEXT_VARIATION_PERSON_NAME,
+        ContentPurpose::Password => TYPE_CLASS_TEXT | TYPE_TEXT_VARIATION_PASSWORD,
+        ContentPurpose::Pin => TYPE_CLASS_NUMBER,
+        ContentPurpose::Date => TYPE_CLASS_DATETIME | TYPE_DATETIME_VARIATION_DATE,
+        ContentPurpose::Time => TYPE_CLASS_DATETIME | TYPE_DATETIME_VARIATION_TIME,
+        ContentPurpose::Datetime => TYPE_CLASS_DATETIME,
+        ContentPurpose::Terminal => TYPE_CLASS_TEXT | TYPE_TEXT_FLAG_NO_SUGGESTIONS,
+        _ => TYPE_CLASS_TEXT,
+    };
+
+    // Apply hint flags (only meaningful for text class)
+    if input_type & 0xF == TYPE_CLASS_TEXT {
+        if hint.contains(ContentHint::Completion) {
+            input_type |= TYPE_TEXT_FLAG_AUTO_COMPLETE;
+        }
+        if hint.contains(ContentHint::Spellcheck) {
+            input_type |= TYPE_TEXT_FLAG_AUTO_CORRECT;
+        }
+        if hint.contains(ContentHint::AutoCapitalization) {
+            input_type |= TYPE_TEXT_FLAG_CAP_SENTENCES;
+        }
+        if hint.contains(ContentHint::Uppercase) {
+            input_type |= TYPE_TEXT_FLAG_CAP_CHARACTERS;
+        }
+        if hint.contains(ContentHint::Titlecase) {
+            input_type |= TYPE_TEXT_FLAG_CAP_WORDS;
+        }
+        if hint.contains(ContentHint::Multiline) {
+            input_type |= TYPE_TEXT_FLAG_MULTI_LINE;
+        }
+        if hint.contains(ContentHint::HiddenText) || hint.contains(ContentHint::SensitiveData) {
+            input_type |= TYPE_TEXT_FLAG_NO_SUGGESTIONS;
+        }
+    }
+
+    tracing::debug!(
+        "text_input_v3: translated content type -> Android InputType 0x{:x}",
+        input_type
+    );
+    input_type
+}
+
 // --- Protocol dispatch implementations ---
 
 impl GlobalDispatch<ZwpTextInputManagerV3, ()> for State {
@@ -160,6 +245,7 @@ impl Dispatch<ZwpTextInputManagerV3, ()> for State {
                     id,
                     TextInputData {
                         pending_enable: std::sync::Mutex::new(None),
+                        pending_content_type: std::sync::Mutex::new(None),
                     },
                 );
                 // Send enter if this client already has keyboard focus
@@ -206,6 +292,11 @@ impl Dispatch<ZwpTextInputV3, TextInputData> for State {
             zwp_text_input_v3::Request::SetTextChangeCause { .. } => {}
             zwp_text_input_v3::Request::SetContentType { hint, purpose } => {
                 tracing::debug!("text_input_v3: content_type hint={:?} purpose={:?}", hint, purpose);
+                if let (Ok(h), Ok(p)) = (hint.into_result(), purpose.into_result()) {
+                    if let Ok(mut guard) = data.pending_content_type.lock() {
+                        *guard = Some((h, p));
+                    }
+                }
             }
             zwp_text_input_v3::Request::SetCursorRectangle { x, y, width, height } => {
                 tracing::debug!(
@@ -214,11 +305,15 @@ impl Dispatch<ZwpTextInputV3, TextInputData> for State {
                 );
             }
             zwp_text_input_v3::Request::Commit => {
+                let content_type = data.pending_content_type.lock().ok().and_then(|mut g| g.take());
                 if let Some(enable) = data.pending_enable.lock().ok().and_then(|mut g| g.take()) {
                     tracing::info!(
                         "text_input_v3: soft keyboard {}",
                         if enable { "show" } else { "hide" }
                     );
+                    let android_input_type = content_type
+                        .map(|(h, p)| translate_content_type(h, p))
+                        .unwrap_or(DEFAULT_ANDROID_INPUT_TYPE);
                     if enable {
                         state.text_input_state.active = Some(ActiveTextInput {
                             instance: resource.clone(),
@@ -228,7 +323,13 @@ impl Dispatch<ZwpTextInputV3, TextInputData> for State {
                         state.text_input_state.active = None;
                         state.text_input_state.composing_text.clear();
                     }
-                    state.soft_keyboard_request = Some(enable);
+                    state.soft_keyboard_request = Some((enable, android_input_type));
+                } else if let Some((h, p)) = content_type {
+                    // Content type changed while already active — trigger restart.
+                    if state.text_input_state.is_active() {
+                        let android_input_type = translate_content_type(h, p);
+                        state.soft_keyboard_request = Some((true, android_input_type));
+                    }
                 }
             }
             _ => {}
