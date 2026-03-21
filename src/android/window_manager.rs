@@ -101,6 +101,9 @@ pub struct WindowState {
     /// Render mode for this window's client, detected from client env vars.
     /// `None` means not yet checked.
     pub render_mode: Option<RenderMode>,
+    /// When a close was requested but the Activity was already destroyed.
+    /// Used to delay relaunching until the client has had time to respond.
+    pub close_pending_since: Option<Instant>,
 }
 
 /// How the compositor should render a client's buffers.
@@ -219,6 +222,7 @@ impl WindowManager {
             last_render_method: "none",
             last_buffer_size: None,
             render_mode: None,
+            close_pending_since: None,
         });
 
         window_id

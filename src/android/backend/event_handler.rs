@@ -251,9 +251,16 @@ fn process_window_events(backend: &mut WaylandBackend) {
                 // User requested close (back button, DeX X). Send XDG close to client.
                 // The client may refuse (e.g. "save changes?" dialog).
                 // The Activity only finishes when the client destroys its surface.
-                if let Some(wm) = backend.window_manager.as_ref()
-                    && let Some(window) = wm.windows.get(&window_id) {
+                if let Some(wm) = backend.window_manager.as_mut()
+                    && let Some(window) = wm.windows.get_mut(&window_id) {
                         window.surface_kind.send_close();
+                        // If the Activity was already destroyed (DeX X bypasses finish()),
+                        // mark for delayed relaunch — the client may refuse to close.
+                        if window.native_window.is_none() {
+                            tracing::info!("Window {} Activity gone, will relaunch if client refuses close", window_id);
+                            window.close_pending_since = Some(Instant::now());
+                            window.activity_launched = false;
+                        }
                     }
             }
             WindowEvent::WindowClosed { window_id, is_finishing } => {
@@ -786,6 +793,10 @@ fn launch_pending_activities(backend: &mut WaylandBackend) {
         .map(|wm| {
             wm.windows.iter()
                 .filter(|(_, w)| !w.activity_launched)
+                // Don't relaunch while a close request is pending — give the
+                // client time to process it. Relaunch after 500ms (client refused).
+                .filter(|(_, w)| w.close_pending_since.map_or(true,
+                    |t| t.elapsed() > std::time::Duration::from_millis(500)))
                 .filter_map(|(&id, w)| {
                     // Read the client's committed geometry, or fall back to buffer size.
                     // Many simple apps (vkcube, eglgears) don't set XDG geometry.

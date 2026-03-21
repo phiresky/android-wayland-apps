@@ -180,9 +180,19 @@ class WaylandWindowActivity : Activity(), SurfaceHolder.Callback {
     override fun onDestroy() {
         super.onDestroy()
         instances.remove(windowId)
-        // isFinishing = true when user closed the window (back, X button, finish())
-        // isFinishing = false when Android is destroying for config change / memory
-        nativeWindowClosed(windowId, isFinishing)
+        if (closingByCompositor) {
+            // Compositor told us to close (client destroyed its surface) — clean up.
+            nativeWindowClosed(windowId, true)
+        } else if (isFinishing) {
+            // User/system closed us (DeX X button, back, etc.) but we haven't asked
+            // the client yet. Send a close request instead of killing the window.
+            // If the client refuses (e.g. save dialog), the compositor will relaunch
+            // a new Activity for this window.
+            nativeRequestClose(windowId)
+        } else {
+            // Config change / memory pressure — keep toplevel alive.
+            nativeWindowClosed(windowId, false)
+        }
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
