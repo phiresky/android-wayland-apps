@@ -1,5 +1,6 @@
 pub mod egl;
 pub mod vulkan_renderer;
+pub mod surface_transaction;
 mod event_handler;
 pub(crate) mod keymap;
 

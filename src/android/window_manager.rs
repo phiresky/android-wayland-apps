@@ -17,6 +17,8 @@ use raw_window_handle::AndroidNdkWindowHandle;
 
 use std::os::unix::io::RawFd;
 use crate::android::backend::signal_wake;
+use crate::android::backend::surface_transaction::SurfaceControl;
+use crate::android::backend::vulkan_renderer::AhbTarget;
 
 // FFI for ANativeWindow (in libandroid.so)
 #[link(name = "android")]
@@ -94,6 +96,8 @@ pub struct WindowState {
     pub preferred_size: Option<Size<i32, Logical>>,
     /// Vulkan swapchain for zero-copy dmabuf compositing (bypasses GLES).
     pub vk_surface: Option<crate::android::backend::vulkan_renderer::VulkanWindowSurface>,
+    /// AHB + ASurfaceTransaction path (replaces swapchain when active).
+    pub ahb_surface: Option<AhbWindowSurface>,
     /// Last render method used for this window (for debug overlay).
     pub last_render_method: &'static str,
     /// Last buffer size committed by the client.
@@ -104,6 +108,15 @@ pub struct WindowState {
     /// When a close was requested but the Activity was already destroyed.
     /// Used to delay relaunching until the client has had time to respond.
     pub close_pending_since: Option<Instant>,
+}
+
+/// Per-window ASurfaceTransaction state.
+pub struct AhbWindowSurface {
+    pub surface_control: SurfaceControl,
+    pub ahb_target: AhbTarget,
+    /// True while SurfaceFlinger is displaying the previous frame.
+    /// Cleared by OnComplete callback — prevents rendering faster than vsync.
+    pub frame_in_flight: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// How the compositor should render a client's buffers.
@@ -219,6 +232,7 @@ impl WindowManager {
             created_time: Instant::now(),
             preferred_size: None,
             vk_surface: None,
+            ahb_surface: None,
             last_render_method: "none",
             last_buffer_size: None,
             render_mode: None,

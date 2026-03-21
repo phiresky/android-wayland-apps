@@ -10,6 +10,11 @@ use std::collections::HashMap;
 use std::ffi::{c_char, c_void, CString};
 use std::os::unix::io::RawFd;
 
+use super::surface_transaction::{
+    HardwareBuffer, AHB_FORMAT_R8G8B8A8_UNORM,
+    AHB_USAGE_GPU_FRAMEBUFFER, AHB_USAGE_GPU_SAMPLED_IMAGE, AHB_USAGE_COMPOSER_OVERLAY,
+};
+
 /// Vulkan renderer state for compositing client surfaces onto Android windows.
 pub struct VulkanRenderer {
     _entry: ash::Entry,
@@ -20,9 +25,19 @@ pub struct VulkanRenderer {
     queue_family_index: u32,
     swapchain_fn: khr::swapchain::Device,
     external_memory_fd_fn: khr::external_memory_fd::Device,
+    ahb_fn: ash::android::external_memory_android_hardware_buffer::Device,
     /// Cache imported dmabufs by fd to avoid re-importing every frame.
     /// Clients reuse a small pool of ~3 swapchain buffers.
     dmabuf_cache: std::cell::RefCell<HashMap<RawFd, ImportedDmabuf>>,
+}
+
+/// AHardwareBuffer-backed VkImage for ASurfaceTransaction presentation.
+pub struct AhbTarget {
+    pub ahb: HardwareBuffer,
+    pub vk_image: vk::Image,
+    pub vk_memory: vk::DeviceMemory,
+    pub width: u32,
+    pub height: u32,
 }
 
 /// Per-window swapchain state.
@@ -115,6 +130,7 @@ impl VulkanRenderer {
             cstr("VK_KHR_swapchain"),
             cstr("VK_KHR_external_memory"),
             cstr("VK_KHR_external_memory_fd"),
+            cstr("VK_ANDROID_external_memory_android_hardware_buffer"),
         ];
         let dev_ext_ptrs: Vec<*const c_char> = dev_ext_names.iter().map(|s| s.as_ptr()).collect();
 
@@ -134,8 +150,9 @@ impl VulkanRenderer {
 
         let swapchain_fn = khr::swapchain::Device::new(&instance, &device);
         let external_memory_fd_fn = khr::external_memory_fd::Device::new(&instance, &device);
+        let ahb_fn = ash::android::external_memory_android_hardware_buffer::Device::new(&instance, &device);
 
-        tracing::info!("[vk-renderer] Vulkan renderer initialized");
+        tracing::info!("[vk-renderer] Vulkan renderer initialized (with AHB support)");
 
         Ok(Self {
             _entry: entry,
@@ -146,6 +163,7 @@ impl VulkanRenderer {
             queue_family_index,
             swapchain_fn,
             external_memory_fd_fn,
+            ahb_fn,
             dmabuf_cache: std::cell::RefCell::new(HashMap::new()),
         })
     }
@@ -864,4 +882,235 @@ impl VulkanRenderer {
 
     pub fn device(&self) -> &ash::Device { &self.device }
     pub fn instance(&self) -> &ash::Instance { &self.instance }
+
+    // ── AHardwareBuffer / ASurfaceTransaction path ─────────────────────────
+
+    /// Allocate an AHardwareBuffer and import it into Vulkan as a TRANSFER_DST image.
+    pub fn create_ahb_target(&self, width: u32, height: u32) -> Result<AhbTarget, String> {
+        let ahb = HardwareBuffer::allocate(
+            width, height,
+            AHB_FORMAT_R8G8B8A8_UNORM,
+            AHB_USAGE_GPU_FRAMEBUFFER | AHB_USAGE_GPU_SAMPLED_IMAGE | AHB_USAGE_COMPOSER_OVERLAY,
+        ).ok_or("AHardwareBuffer_allocate failed")?;
+
+        // Query Vulkan memory requirements for this AHB
+        let mut ahb_props = vk::AndroidHardwareBufferPropertiesANDROID::default();
+        unsafe {
+            self.ahb_fn.get_android_hardware_buffer_properties(ahb.as_ptr(), &mut ahb_props)
+        }.map_err(|e| format!("get_android_hardware_buffer_properties: {e}"))?;
+
+        let mem_type_index = ahb_props.memory_type_bits.trailing_zeros();
+        tracing::info!("[vk-ahb] AHB props: alloc_size={}, mem_type_bits=0x{:x}",
+            ahb_props.allocation_size, ahb_props.memory_type_bits);
+
+        // Create VkImage backed by the AHB
+        let mut external_info = vk::ExternalMemoryImageCreateInfo::default()
+            .handle_types(vk::ExternalMemoryHandleTypeFlags::ANDROID_HARDWARE_BUFFER_ANDROID);
+
+        let image_info = vk::ImageCreateInfo::default()
+            .push_next(&mut external_info)
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(vk::Format::R8G8B8A8_UNORM)
+            .extent(vk::Extent3D { width, height, depth: 1 })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(vk::ImageUsageFlags::TRANSFER_DST)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+
+        let vk_image = unsafe { self.device.create_image(&image_info, None) }
+            .map_err(|e| format!("create_image(ahb): {e}"))?;
+
+        // Import AHB memory
+        let mut import_ahb = vk::ImportAndroidHardwareBufferInfoANDROID::default()
+            .buffer(ahb.as_ptr());
+
+        let alloc_info = vk::MemoryAllocateInfo::default()
+            .push_next(&mut import_ahb)
+            .allocation_size(ahb_props.allocation_size)
+            .memory_type_index(mem_type_index);
+
+        let vk_memory = unsafe { self.device.allocate_memory(&alloc_info, None) }
+            .map_err(|e| format!("allocate_memory(ahb): {e}"))?;
+
+        unsafe { self.device.bind_image_memory(vk_image, vk_memory, 0) }
+            .map_err(|e| format!("bind_image_memory(ahb): {e}"))?;
+
+        tracing::info!("[vk-ahb] Created AHB target {}x{}", width, height);
+
+        Ok(AhbTarget { ahb, vk_image, vk_memory, width, height })
+    }
+
+    /// Blit an imported dmabuf onto an AHB-backed VkImage for ASurfaceTransaction.
+    /// Same staging blit as swapchain path, but targets AHB instead.
+    pub fn blit_dmabuf_to_ahb(
+        &self,
+        dmabuf: &ImportedDmabuf,
+        target: &AhbTarget,
+    ) -> Result<(), String> {
+        // Command pool + buffer
+        let pool_info = vk::CommandPoolCreateInfo::default()
+            .queue_family_index(self.queue_family_index)
+            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
+        let pool = unsafe { self.device.create_command_pool(&pool_info, None) }
+            .map_err(|e| format!("create_cmd_pool: {e}"))?;
+
+        let alloc_info = vk::CommandBufferAllocateInfo::default()
+            .command_pool(pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(1);
+        let cmd = unsafe { self.device.allocate_command_buffers(&alloc_info) }
+            .map_err(|e| format!("alloc_cmd_buf: {e}"))?[0];
+
+        let begin_info = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        unsafe { self.device.begin_command_buffer(cmd, &begin_info) }
+            .map_err(|e| format!("begin_cmd_buf: {e}"))?;
+
+        let color_range = vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            base_mip_level: 0, level_count: 1,
+            base_array_layer: 0, layer_count: 1,
+        };
+        let color_layers = vk::ImageSubresourceLayers {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            mip_level: 0, base_array_layer: 0, layer_count: 1,
+        };
+
+        // Transition AHB image to TRANSFER_DST
+        let dst_barrier = vk::ImageMemoryBarrier::default()
+            .image(target.vk_image)
+            .old_layout(vk::ImageLayout::UNDEFINED)
+            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .subresource_range(color_range);
+        unsafe {
+            self.device.cmd_pipeline_barrier(cmd,
+                vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(), &[], &[], &[dst_barrier]);
+        }
+
+        // Clear to black (client may be smaller than AHB)
+        let clear_color = vk::ClearColorValue { float32: [0.0, 0.0, 0.0, 1.0] };
+        unsafe {
+            self.device.cmd_clear_color_image(cmd,
+                target.vk_image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL, &clear_color, &[color_range]);
+        }
+
+        // Two-step: dmabuf buffer → LINEAR staging → AHB image (BGRA→RGBA blit)
+        let staging = self.get_or_create_staging(dmabuf.width, dmabuf.height,
+            Self::fourcc_to_vk_format(0x34325258))?;
+
+        // Transition staging to TRANSFER_DST
+        let staging_to_dst = vk::ImageMemoryBarrier::default()
+            .image(staging.0)
+            .old_layout(vk::ImageLayout::UNDEFINED)
+            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .subresource_range(color_range);
+        unsafe {
+            self.device.cmd_pipeline_barrier(cmd,
+                vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(), &[], &[], &[staging_to_dst]);
+        }
+
+        // Copy dmabuf buffer → staging image (stride-aware)
+        let copy_region = vk::BufferImageCopy {
+            buffer_offset: 0,
+            buffer_row_length: dmabuf.stride_pixels,
+            buffer_image_height: dmabuf.height,
+            image_subresource: color_layers,
+            image_offset: vk::Offset3D { x: 0, y: 0, z: 0 },
+            image_extent: vk::Extent3D { width: dmabuf.width, height: dmabuf.height, depth: 1 },
+        };
+        unsafe {
+            self.device.cmd_copy_buffer_to_image(cmd, dmabuf.buffer, staging.0,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[copy_region]);
+        }
+
+        // Transition staging to TRANSFER_SRC
+        let staging_to_src = vk::ImageMemoryBarrier::default()
+            .image(staging.0)
+            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+            .subresource_range(color_range);
+        unsafe {
+            self.device.cmd_pipeline_barrier(cmd,
+                vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(), &[], &[], &[staging_to_src]);
+        }
+
+        // Blit staging (BGRA, LINEAR) → AHB (RGBA, OPTIMAL) with format conversion
+        let blit_w = dmabuf.width.min(target.width) as i32;
+        let blit_h = dmabuf.height.min(target.height) as i32;
+        let blit_region = vk::ImageBlit {
+            src_subresource: color_layers,
+            src_offsets: [
+                vk::Offset3D { x: 0, y: 0, z: 0 },
+                vk::Offset3D { x: blit_w, y: blit_h, z: 1 },
+            ],
+            dst_subresource: color_layers,
+            dst_offsets: [
+                vk::Offset3D { x: 0, y: 0, z: 0 },
+                vk::Offset3D { x: blit_w, y: blit_h, z: 1 },
+            ],
+        };
+        unsafe {
+            self.device.cmd_blit_image(cmd, staging.0,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                target.vk_image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &[blit_region], vk::Filter::NEAREST);
+        }
+
+        // Transition AHB image to GENERAL (ready for SurfaceFlinger)
+        let final_barrier = vk::ImageMemoryBarrier::default()
+            .image(target.vk_image)
+            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .new_layout(vk::ImageLayout::GENERAL)
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .subresource_range(color_range);
+        unsafe {
+            self.device.cmd_pipeline_barrier(cmd,
+                vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                vk::DependencyFlags::empty(), &[], &[], &[final_barrier]);
+        }
+
+        unsafe { self.device.end_command_buffer(cmd) }
+            .map_err(|e| format!("end_cmd_buf: {e}"))?;
+
+        // Submit and wait (synchronous for MVP)
+        let submit_info = vk::SubmitInfo::default()
+            .command_buffers(std::slice::from_ref(&cmd));
+        unsafe {
+            self.device.queue_submit(self.queue, &[submit_info], vk::Fence::null())
+                .map_err(|e| format!("queue_submit: {e}"))?;
+            self.device.queue_wait_idle(self.queue)
+                .map_err(|e| format!("queue_wait_idle: {e}"))?;
+        }
+
+        // Cleanup
+        unsafe {
+            self.device.free_command_buffers(pool, &[cmd]);
+            self.device.destroy_command_pool(pool, None);
+            self.device.destroy_image(staging.0, None);
+            self.device.free_memory(staging.1, None);
+        }
+
+        Ok(())
+    }
+
+    /// Destroy an AHB target's Vulkan resources. The AHB itself is released by Drop.
+    pub fn destroy_ahb_target(&self, target: &AhbTarget) {
+        let _ = unsafe { self.device.device_wait_idle() };
+        unsafe {
+            self.device.destroy_image(target.vk_image, None);
+            self.device.free_memory(target.vk_memory, None);
+        }
+    }
 }

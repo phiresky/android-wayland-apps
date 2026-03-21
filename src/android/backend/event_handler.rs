@@ -322,7 +322,7 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
     // eglSwapBuffers waiting for a frame callback that never comes.
     if let Some(wm) = backend.window_manager.as_ref() {
         for (_, window) in &wm.windows {
-            if window.egl_surface.is_none() && window.vk_surface.is_none() {
+            if window.egl_surface.is_none() && window.vk_surface.is_none() && window.ahb_surface.is_none() {
                 send_frames_surface_tree(window.surface_kind.wl_surface(), time);
             }
         }
@@ -438,13 +438,138 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                     let fmt = dmabuf.format();
                     let vk_fmt = crate::android::backend::vulkan_renderer::VulkanRenderer::fourcc_to_vk_format(fmt.code as u32);
 
+                    // === AHB / ASurfaceTransaction path ===
+                    // Try this first; falls back to swapchain if creation fails.
+                    {
+                        let needs_ahb = backend.window_manager.as_ref()
+                            .and_then(|wm| wm.windows.get(&window_id))
+                            .map(|w| w.ahb_surface.is_none() && w.native_window.is_some())
+                            .unwrap_or(false);
+
+                        if needs_ahb {
+                            if let Some(wm) = backend.window_manager.as_mut() {
+                                if let Some(window) = wm.windows.get_mut(&window_id) {
+                                    if let Some(native_window) = window.native_window {
+                                        if window.egl_surface.is_some() {
+                                            tracing::info!("Destroying EGL for AHB takeover window_id={}", window_id);
+                                            window.egl_surface = None;
+                                        }
+                                        let sc = crate::android::backend::surface_transaction::SurfaceControl::from_window(
+                                            native_window, &format!("wl-{window_id}"));
+                                        if let Some(sc) = sc {
+                                            match vk.create_ahb_target(buf_w, buf_h) {
+                                                Ok(ahb_target) => {
+                                                    crate::android::backend::surface_transaction::set_visible(&sc);
+                                                    window.ahb_surface = Some(crate::android::window_manager::AhbWindowSurface {
+                                                        surface_control: sc,
+                                                        ahb_target,
+                                                        frame_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                                                    });
+                                                    window.needs_redraw = true;
+                                                    tracing::info!("AHB surface created for window_id={} at {}x{}", window_id, buf_w, buf_h);
+                                                }
+                                                Err(e) => tracing::error!("AHB target creation failed: {e}"),
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Resize AHB if buffer dimensions changed
+                        let needs_resize = backend.window_manager.as_ref()
+                            .and_then(|wm| wm.windows.get(&window_id))
+                            .and_then(|w| w.ahb_surface.as_ref())
+                            .map(|ahb| ahb.ahb_target.width != buf_w || ahb.ahb_target.height != buf_h)
+                            .unwrap_or(false);
+
+                        if needs_resize {
+                            if let Some(wm) = backend.window_manager.as_mut() {
+                                if let Some(window) = wm.windows.get_mut(&window_id) {
+                                    if let Some(ref old) = window.ahb_surface {
+                                        vk.destroy_ahb_target(&old.ahb_target);
+                                    }
+                                    let sc = window.ahb_surface.take().map(|s| s.surface_control);
+                                    if let Some(sc) = sc {
+                                        match vk.create_ahb_target(buf_w, buf_h) {
+                                            Ok(ahb_target) => {
+                                                window.ahb_surface = Some(crate::android::window_manager::AhbWindowSurface {
+                                                    surface_control: sc, ahb_target,
+                                                    frame_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                                                });
+                                                window.needs_redraw = true;
+                                                tracing::info!("AHB resized for window_id={} to {}x{}", window_id, buf_w, buf_h);
+                                            }
+                                            Err(e) => tracing::error!("AHB resize failed: {e}"),
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Blit to AHB + present via ASurfaceTransaction
+                        if let Some(ref wm) = backend.window_manager {
+                            if let Some(window) = wm.windows.get(&window_id) {
+                                if let Some(ref ahb_surface) = window.ahb_surface {
+                                    if !window.needs_redraw {
+                                        done = true; // no new frame, skip
+                                    } else if ahb_surface.frame_in_flight.load(std::sync::atomic::Ordering::Acquire) {
+                                        // Previous frame still on screen — don't blit, don't
+                                        // send frame callbacks (done stays false → loop skips
+                                        // naturally, suppressing client rendering until vsync).
+                                    } else {
+                                        let sz = dmabuf.size();
+                                        let fd = dmabuf.handles().next();
+                                        let stride = dmabuf.strides().next().unwrap_or(sz.w as u32 * 4);
+                                        let win_size = window.size;
+                                        let wake_fd = backend.wake_fd;
+                                        if let Some(fd) = fd {
+                                            use std::os::unix::io::AsRawFd;
+                                            let raw_fd = fd.as_raw_fd();
+                                            match vk.get_or_import_dmabuf(raw_fd, sz.w as u32, sz.h as u32, stride, vk_fmt) {
+                                                Ok(imported) => {
+                                                    match vk.blit_dmabuf_to_ahb(&imported, &ahb_surface.ahb_target) {
+                                                        Ok(()) => {
+                                                            crate::android::backend::surface_transaction::present_buffer(
+                                                                &ahb_surface.surface_control,
+                                                                &ahb_surface.ahb_target.ahb,
+                                                                -1,
+                                                                ahb_surface.ahb_target.width,
+                                                                ahb_surface.ahb_target.height,
+                                                                win_size.w,
+                                                                win_size.h,
+                                                                &ahb_surface.frame_in_flight,
+                                                                wake_fd,
+                                                            );
+                                                            done = true;
+                                                            if let Some(wm) = backend.window_manager.as_mut() {
+                                                                if let Some(w) = wm.windows.get_mut(&window_id) {
+                                                                    w.last_render_method = "AHB txn";
+                                                                    w.last_buffer_size = Some((sz.w as u32, sz.h as u32));
+                                                                    w.needs_redraw = false;
+                                                                }
+                                                            }
+                                                        }
+                                                        Err(e) => tracing::warn!("AHB blit failed: {e}"),
+                                                    }
+                                                }
+                                                Err(e) => tracing::warn!("dmabuf import for AHB failed: {e}"),
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // === Swapchain fallback (when AHB path not active) ===
                     // Check if we need to (re)create the Vulkan swapchain:
                     // - No surface yet, or
                     // - Client buffer size changed (resize)
-                    let needs_vk_surface = backend.window_manager.as_ref()
+                    let needs_vk_surface = !done && backend.window_manager.as_ref()
                         .and_then(|wm| wm.windows.get(&window_id))
                         .map(|w| {
-                            if w.vk_surface.is_none() && w.native_window.is_some() {
+                            if w.vk_surface.is_none() && w.ahb_surface.is_none() && w.native_window.is_some() {
                                 return true;
                             }
                             // Recreate if buffer size changed
@@ -559,7 +684,7 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
             // 2. Window has had a commit (needs_redraw) — so we know it's wl_shm
             // Creating EGL on a window that will later use Vulkan causes a stale
             // EGL frame to persist in SurfaceFlinger's queue, causing strobe.
-            if window.egl_surface.is_none() && window.vk_surface.is_none()
+            if window.egl_surface.is_none() && window.vk_surface.is_none() && window.ahb_surface.is_none()
                 && window.native_window.is_some() && window.needs_redraw {
                 if let Some(handle) = wm.get_native_handle(window_id) {
                     if let Some(surface) = backend.renderer.as_ref()
@@ -798,31 +923,38 @@ fn launch_pending_activities(backend: &mut WaylandBackend) {
                 .filter(|(_, w)| w.close_pending_since.map_or(true,
                     |t| t.elapsed() > std::time::Duration::from_millis(500)))
                 .filter_map(|(&id, w)| {
-                    // Read the client's committed geometry, or fall back to buffer size.
-                    // Many simple apps (vkcube, eglgears) don't set XDG geometry.
-                    let geo_size = match &w.surface_kind {
+                    // Read the client's committed geometry (logical, needs scaling)
+                    // or fall back to buffer pixel dimensions (physical, no scaling).
+                    let (geo_size, bounds) = match &w.surface_kind {
                         SurfaceKind::Toplevel(_) => {
                             wl_compositor::with_states(w.surface_kind.wl_surface(), |states| {
+                                // Try XDG geometry first (logical coordinates)
                                 let geo = states.cached_state.get::<SurfaceCachedState>()
                                     .current()
                                     .geometry
                                     .map(|g| g.size);
-                                if geo.is_some() {
-                                    return geo;
+                                if let Some(g) = geo {
+                                    let bounds = (
+                                        (g.w as f64 * scale).round() as i32,
+                                        (g.h as f64 * scale).round() as i32 + DEX_TITLE_BAR_HEIGHT,
+                                    );
+                                    return (Some(g), Some(bounds));
                                 }
-                                // No geometry set — use buffer size as fallback
+                                // No geometry — use buffer pixel size directly as bounds.
+                                // Don't scale: the buffer IS the physical size the client chose.
                                 type RssType = std::sync::Mutex<smithay::backend::renderer::utils::RendererSurfaceState>;
-                                states.data_map.get::<RssType>()
+                                let buf = states.data_map.get::<RssType>()
                                     .and_then(|rss| rss.lock().ok())
-                                    .and_then(|guard| guard.buffer_size())
+                                    .and_then(|guard| guard.buffer_size());
+                                match buf {
+                                    Some(b) => (Some(b), Some((b.w, b.h + DEX_TITLE_BAR_HEIGHT))),
+                                    None => (None, None),
+                                }
                             })
                         }
-                        SurfaceKind::Layer(_) => None,
+                        SurfaceKind::Layer(_) => (None, None),
                     };
-                    let bounds = geo_size.map(|s| {
-                        ((s.w as f64 * scale).round() as i32,
-                         (s.h as f64 * scale).round() as i32 + DEX_TITLE_BAR_HEIGHT)
-                    }).filter(|&(w, h)| w > 0 && h > 0);
+                    let bounds = bounds.filter(|&(w, h)| w > 0 && h > 0);
 
                     tracing::info!("launch_pending: window_id={id} geo_size={geo_size:?} bounds={bounds:?} elapsed={}ms",
                         w.created_time.elapsed().as_millis());
