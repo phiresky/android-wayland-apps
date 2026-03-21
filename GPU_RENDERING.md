@@ -165,33 +165,42 @@ explicit vsync via `ASurfaceTransaction_setOnComplete` callback.
 6. ASurfaceTransaction_setBuffer(ahb) — zero GPU copies
 ```
 
+**Measured performance** (vkcube, 304×286, Adreno 830):
+- Blit path (5a): ~280µs per frame
+- Zero-copy (5b): ~140µs per frame
+- Speedup: ~2x compositor-side, but the GPU blit was already cheap
+
+**Assessment: marginal gain, high maintenance cost.**
+The 140µs saving is <1% of a 16ms frame budget (60fps). Real-world apps are
+bottlenecked by client rendering, not compositor blitting. The blit path is
+already zero-CPU-copy — it's one GPU staging blit that takes microseconds.
+
 **Advantages:**
+- 2x faster compositor-side frame processing
 - Zero GPU blits — client renders directly into the presentation buffer
-- No staging image, no format conversion, no vkCmdCopyBufferToImage
-- Lower latency (one fewer GPU pass per frame)
 - Potential for hardware overlay / direct scanout
 
 **Disadvantages / Known issues:**
 - **BGRA↔RGBA color swap**: Turnip requests B8G8R8A8 but AHBs are R8G8B8A8.
   HAL_PIXEL_FORMAT_BGRA_8888 crashes SurfaceFlinger on Samsung. Fix needs to
-  intercept format earlier in Mesa WSI (before VkImage creation).
-- **Resize artifacts**: During window resize, old-sized AHBs may be matched
-  before the new-sized ones are allocated.
-- **Mesa patch required**: `patches/mesa-wsi-gbm-proxy.patch` modifies
-  `wsi_common_drm.c` to intercept buffer allocation. Must rebuild Mesa in proot.
-- **Format limited**: Only R8G8B8A8 AHBs supported (no BGRA, no 10-bit).
-- **Samsung-specific**: `AHardwareBuffer_getNativeHandle` is a private API
-  used to extract dmabuf fds from AHBs. Works on all Android 8+ devices but
-  not in the public NDK.
+  intercept format earlier in Mesa WSI (before VkImage creation). **Blocking.**
+- **Resize artifacts**: Falls back to blit during resize (size_stable guard).
+- **~2500 lines of extra code** to maintain across 6 files + Mesa patch:
+  - `src/android/backend/gbm_server.rs` (323 lines) — Unix socket server
+  - `src/android/backend/ahb_allocator.rs` (536 lines) — allocator + tracker
+  - `gbm-shim/gbm_proxy.c` (430 lines) — C shim for proot
+  - `minigbm/csrc/gbm_ahb.c` (564 lines) — AHB-backed GBM C library
+  - `minigbm/src/lib.rs` (486 lines) — Rust FFI bindings
+  - `patches/mesa-wsi-gbm-proxy.patch` (140 lines) — Mesa WSI intercept
+- **Mesa patch required**: Must rebuild Mesa in proot whenever updated.
+- **Private API**: `AHardwareBuffer_getNativeHandle` is not in the public NDK.
+- **No GPU fence**: Zero-copy path passes `-1` as acquire_fence_fd (no sync).
+- **Samsung-only tested**: BGRA crash may be Samsung-specific.
 
-**Components:**
-- `src/android/backend/gbm_server.rs` — Unix socket server, allocates AHBs
-- `src/android/backend/ahb_allocator.rs` — AhbAllocator (smithay Allocator trait),
-  AhbBufferTracker (inode-based dmabuf matching)
-- `gbm-shim/gbm_proxy.c` — C shim for proot (replaces libgbm.so, unused by
-  Vulkan WSI but useful for GBM-based clients)
-- `patches/mesa-wsi-gbm-proxy.patch` — Mesa WSI intercept
-- `minigbm/` — AHB-backed GBM library (Rust + C)
+**Verdict**: Keep the zero-copy infrastructure for future use (e.g. if Mesa
+upstream adds a proper server-side allocation protocol), but default to the
+blit path which is correct, portable, and fast enough. Toggle available in
+DebugActivity for A/B testing.
 
 ## How to Reproduce (vkcube test)
 
