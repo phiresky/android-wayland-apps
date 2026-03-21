@@ -1,4 +1,6 @@
+pub mod ahb_allocator;
 pub mod egl;
+pub mod gbm_server;
 pub mod vulkan_renderer;
 pub mod surface_transaction;
 mod event_handler;
@@ -19,6 +21,10 @@ pub struct WaylandBackend {
     pub window_manager: Option<WindowManager>,
     pub wake_fd: RawFd,
     pub scale_factor: f64,
+    /// AHB allocator for server-side buffer allocation (zero-copy path).
+    pub ahb_allocator: Option<ahb_allocator::AhbAllocator>,
+    /// Tracks compositor-allocated AHBs so we can recognize them at commit time.
+    pub ahb_tracker: ahb_allocator::AhbBufferTracker,
 }
 
 /// Signal the compositor thread to wake up via eventfd.
