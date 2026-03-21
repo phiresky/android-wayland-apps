@@ -52,7 +52,18 @@ pub struct HardwareBuffer {
     ptr: *mut AHardwareBuffer,
 }
 
+impl std::fmt::Debug for HardwareBuffer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HardwareBuffer")
+            .field("ptr", &self.ptr)
+            .finish()
+    }
+}
+
 unsafe impl Send for HardwareBuffer {}
+// SAFETY: AHardwareBuffer is reference-counted and thread-safe on Android.
+// All FFI functions that take AHardwareBuffer* are documented as thread-safe.
+unsafe impl Sync for HardwareBuffer {}
 
 impl HardwareBuffer {
     /// Allocate a new AHardwareBuffer.

@@ -22,12 +22,26 @@ pub struct VulkanRenderer {
     physical_device: vk::PhysicalDevice,
     device: ash::Device,
     queue: vk::Queue,
-    queue_family_index: u32,
+    _queue_family_index: u32,
     external_memory_fd_fn: khr::external_memory_fd::Device,
     ahb_fn: ash::android::external_memory_android_hardware_buffer::Device,
+    external_fence_fd_fn: khr::external_fence_fd::Device,
+    /// Persistent command pool (kept alive for cmd_buf lifetime).
+    _cmd_pool: vk::CommandPool,
+    /// Persistent command buffer, reused every frame.
+    cmd_buf: vk::CommandBuffer,
+    /// Cached LINEAR staging image for BGRA→RGBA format conversion.
+    staging_cache: std::cell::RefCell<Option<StagingImage>>,
     /// Cache imported dmabufs by fd to avoid re-importing every frame.
     /// Clients reuse a small pool of ~3 buffers.
     dmabuf_cache: std::cell::RefCell<HashMap<RawFd, ImportedDmabuf>>,
+}
+
+struct StagingImage {
+    image: vk::Image,
+    memory: vk::DeviceMemory,
+    width: u32,
+    height: u32,
 }
 
 /// AHardwareBuffer-backed VkImage for ASurfaceTransaction presentation.
@@ -95,6 +109,8 @@ impl VulkanRenderer {
             cstr("VK_KHR_external_memory"),
             cstr("VK_KHR_external_memory_fd"),
             cstr("VK_ANDROID_external_memory_android_hardware_buffer"),
+            cstr("VK_KHR_external_fence"),
+            cstr("VK_KHR_external_fence_fd"),
         ];
         let dev_ext_ptrs: Vec<*const c_char> = dev_ext_names.iter().map(|s| s.as_ptr()).collect();
 
@@ -114,6 +130,21 @@ impl VulkanRenderer {
 
         let external_memory_fd_fn = khr::external_memory_fd::Device::new(&instance, &device);
         let ahb_fn = ash::android::external_memory_android_hardware_buffer::Device::new(&instance, &device);
+        let external_fence_fd_fn = khr::external_fence_fd::Device::new(&instance, &device);
+
+        // Persistent command pool + buffer (reused every frame).
+        let pool_info = vk::CommandPoolCreateInfo::default()
+            .queue_family_index(queue_family_index)
+            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
+        let cmd_pool = unsafe { device.create_command_pool(&pool_info, None) }
+            .map_err(|e| format!("create_command_pool: {e}"))?;
+
+        let alloc_info = vk::CommandBufferAllocateInfo::default()
+            .command_pool(cmd_pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(1);
+        let cmd_buf = unsafe { device.allocate_command_buffers(&alloc_info) }
+            .map_err(|e| format!("allocate_command_buffers: {e}"))?[0];
 
         tracing::info!("[vk-renderer] Vulkan renderer initialized");
 
@@ -123,9 +154,13 @@ impl VulkanRenderer {
             physical_device,
             device,
             queue,
-            queue_family_index,
+            _queue_family_index: queue_family_index,
             external_memory_fd_fn,
             ahb_fn,
+            external_fence_fd_fn,
+            _cmd_pool: cmd_pool,
+            cmd_buf,
+            staging_cache: std::cell::RefCell::new(None),
             dmabuf_cache: std::cell::RefCell::new(HashMap::new()),
         })
     }
@@ -316,23 +351,14 @@ impl VulkanRenderer {
     }
 
     /// Blit an imported dmabuf onto an AHB-backed VkImage for ASurfaceTransaction.
+    /// Returns a sync fd that signals when the GPU blit completes, or -1 on failure.
+    /// The caller passes this fd to ASurfaceTransaction_setBuffer as acquire_fence_fd.
     pub fn blit_dmabuf_to_ahb(
         &self,
         dmabuf: &ImportedDmabuf,
         target: &AhbTarget,
-    ) -> Result<(), String> {
-        let pool_info = vk::CommandPoolCreateInfo::default()
-            .queue_family_index(self.queue_family_index)
-            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
-        let pool = unsafe { self.device.create_command_pool(&pool_info, None) }
-            .map_err(|e| format!("create_cmd_pool: {e}"))?;
-
-        let alloc_info = vk::CommandBufferAllocateInfo::default()
-            .command_pool(pool)
-            .level(vk::CommandBufferLevel::PRIMARY)
-            .command_buffer_count(1);
-        let cmd = unsafe { self.device.allocate_command_buffers(&alloc_info) }
-            .map_err(|e| format!("alloc_cmd_buf: {e}"))?[0];
+    ) -> Result<RawFd, String> {
+        let cmd = self.cmd_buf;
 
         let begin_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
@@ -371,11 +397,11 @@ impl VulkanRenderer {
         }
 
         // Two-step: dmabuf buffer → LINEAR staging → AHB image (BGRA→RGBA blit)
-        let staging = self.get_or_create_staging(dmabuf.width, dmabuf.height,
+        let staging_img = self.get_or_create_staging(dmabuf.width, dmabuf.height,
             Self::fourcc_to_vk_format(0x34325258))?;
 
         let staging_to_dst = vk::ImageMemoryBarrier::default()
-            .image(staging.0)
+            .image(staging_img)
             .old_layout(vk::ImageLayout::UNDEFINED)
             .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
             .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
@@ -395,12 +421,12 @@ impl VulkanRenderer {
             image_extent: vk::Extent3D { width: dmabuf.width, height: dmabuf.height, depth: 1 },
         };
         unsafe {
-            self.device.cmd_copy_buffer_to_image(cmd, dmabuf.buffer, staging.0,
+            self.device.cmd_copy_buffer_to_image(cmd, dmabuf.buffer, staging_img,
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[copy_region]);
         }
 
         let staging_to_src = vk::ImageMemoryBarrier::default()
-            .image(staging.0)
+            .image(staging_img)
             .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
             .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
             .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
@@ -427,7 +453,7 @@ impl VulkanRenderer {
             ],
         };
         unsafe {
-            self.device.cmd_blit_image(cmd, staging.0,
+            self.device.cmd_blit_image(cmd, staging_img,
                 vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
                 target.vk_image,
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
@@ -450,23 +476,38 @@ impl VulkanRenderer {
         unsafe { self.device.end_command_buffer(cmd) }
             .map_err(|e| format!("end_cmd_buf: {e}"))?;
 
+        // Create exportable fence (SYNC_FD) so SurfaceFlinger waits for the GPU
+        // instead of us blocking on vkQueueWaitIdle.
+        let mut export_info = vk::ExportFenceCreateInfo::default()
+            .handle_types(vk::ExternalFenceHandleTypeFlags::SYNC_FD);
+        let fence_info = vk::FenceCreateInfo::default()
+            .push_next(&mut export_info);
+        let fence = unsafe { self.device.create_fence(&fence_info, None) }
+            .map_err(|e| format!("create_fence: {e}"))?;
+
         let submit_info = vk::SubmitInfo::default()
             .command_buffers(std::slice::from_ref(&cmd));
         unsafe {
-            self.device.queue_submit(self.queue, &[submit_info], vk::Fence::null())
+            self.device.queue_submit(self.queue, &[submit_info], fence)
                 .map_err(|e| format!("queue_submit: {e}"))?;
-            self.device.queue_wait_idle(self.queue)
-                .map_err(|e| format!("queue_wait_idle: {e}"))?;
         }
 
-        unsafe {
-            self.device.free_command_buffers(pool, &[cmd]);
-            self.device.destroy_command_pool(pool, None);
-            self.device.destroy_image(staging.0, None);
-            self.device.free_memory(staging.1, None);
-        }
+        // Export fence as sync fd for ASurfaceTransaction
+        let fd_info = vk::FenceGetFdInfoKHR::default()
+            .fence(fence)
+            .handle_type(vk::ExternalFenceHandleTypeFlags::SYNC_FD);
+        let sync_fd = unsafe { self.external_fence_fd_fn.get_fence_fd(&fd_info) }
+            .unwrap_or_else(|e| {
+                tracing::warn!("[vk-renderer] get_fence_fd failed: {e}, falling back to wait");
+                unsafe { let _ = self.device.wait_for_fences(&[fence], true, u64::MAX); }
+                -1
+            });
 
-        Ok(())
+        // SYNC_FD export transfers ownership — Vulkan fence is now unsignaled/consumed.
+        // Destroy it immediately; the sync fd is what SurfaceFlinger will wait on.
+        unsafe { self.device.destroy_fence(fence, None) };
+
+        Ok(sync_fd)
     }
 
     /// Destroy an AHB target's Vulkan resources. The AHB itself is released by Drop.
@@ -480,9 +521,29 @@ impl VulkanRenderer {
 
     // ── Helpers ─────────────────────────────────────────────────────────────
 
+    /// Get or create a cached LINEAR staging image. Recreates only when size changes.
     fn get_or_create_staging(&self, width: u32, height: u32, format: vk::Format)
-        -> Result<(vk::Image, vk::DeviceMemory), String>
+        -> Result<vk::Image, String>
     {
+        {
+            let cache = self.staging_cache.borrow();
+            if let Some(ref s) = *cache {
+                if s.width == width && s.height == height {
+                    return Ok(s.image);
+                }
+            }
+        }
+        // Destroy old staging if size changed
+        {
+            let mut cache = self.staging_cache.borrow_mut();
+            if let Some(old) = cache.take() {
+                let _ = unsafe { self.device.device_wait_idle() };
+                unsafe {
+                    self.device.destroy_image(old.image, None);
+                    self.device.free_memory(old.memory, None);
+                }
+            }
+        }
         let staging_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(format)
@@ -504,7 +565,9 @@ impl VulkanRenderer {
             .map_err(|e| format!("alloc staging memory: {e}"))?;
         unsafe { self.device.bind_image_memory(image, memory, 0) }
             .map_err(|e| format!("bind staging memory: {e}"))?;
-        Ok((image, memory))
+        tracing::info!("[vk-renderer] Created staging image {}x{}", width, height);
+        *self.staging_cache.borrow_mut() = Some(StagingImage { image, memory, width, height });
+        Ok(image)
     }
 
     fn find_memory_type(&self, type_filter: u32, properties: vk::MemoryPropertyFlags) -> Result<u32, String> {
