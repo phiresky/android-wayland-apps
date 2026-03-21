@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::ffi::{CString, c_char, c_int};
+use std::ffi::CString;
 use std::fmt::Write;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -25,102 +25,78 @@ pub fn get_debug_log() -> String {
     out
 }
 
-#[link(name = "log")]
-unsafe extern "C" {
-    fn __android_log_print(prio: c_int, tag: *const c_char, fmt: *const c_char, ...) -> c_int;
-}
+use ndk_sys::android_LogPriority;
 
-const ANDROID_LOG_DEBUG: c_int = 3;
-const ANDROID_LOG_INFO: c_int = 4;
-const ANDROID_LOG_WARN: c_int = 5;
-const ANDROID_LOG_ERROR: c_int = 6;
+const ANDROID_LOG_DEBUG: u32 = android_LogPriority::ANDROID_LOG_DEBUG.0;
+const ANDROID_LOG_INFO: u32 = android_LogPriority::ANDROID_LOG_INFO.0;
+const ANDROID_LOG_WARN: u32 = android_LogPriority::ANDROID_LOG_WARN.0;
+const ANDROID_LOG_ERROR: u32 = android_LogPriority::ANDROID_LOG_ERROR.0;
 
 #[derive(Debug)]
 struct AndroidLogLayer;
+
+impl<S: Subscriber> Layer<S> for AndroidLogLayer {
+    fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+        let metadata = event.metadata();
+        let prio = match *metadata.level() {
+            tracing::Level::ERROR => ANDROID_LOG_ERROR,
+            tracing::Level::WARN => ANDROID_LOG_WARN,
+            tracing::Level::INFO => ANDROID_LOG_INFO,
+            _ => ANDROID_LOG_DEBUG,
+        };
+
+        let mut visitor = MessageVisitor(String::new());
+        event.record(&mut visitor);
+
+        let tag_str = metadata.target();
+        let tag = CString::new(tag_str).unwrap_or_default();
+        let msg = CString::new(visitor.0.as_str()).unwrap_or_default();
+        unsafe {
+            ndk_sys::__android_log_print(prio as i32, tag.as_ptr(), msg.as_ptr());
+        }
+
+        // Also write to the in-memory debug log buffer.
+        let elapsed = {
+            let mut guard = START_TIME.lock().unwrap_or_else(|e| e.into_inner());
+            let start = guard.get_or_insert_with(Instant::now);
+            start.elapsed()
+        };
+        let secs = elapsed.as_secs_f64();
+        let level_char = match *metadata.level() {
+            tracing::Level::ERROR => 'E',
+            tracing::Level::WARN => 'W',
+            tracing::Level::INFO => 'I',
+            tracing::Level::DEBUG => 'D',
+            tracing::Level::TRACE => 'T',
+        };
+        let line = format!("{secs:8.3} {level_char} {tag_str}: {}", visitor.0);
+        if let Ok(mut buf) = DEBUG_LOG.lock() {
+            if buf.len() >= DEBUG_LOG_MAX_LINES {
+                buf.pop_front();
+            }
+            buf.push_back(line);
+        }
+    }
+}
 
 struct MessageVisitor(String);
 
 impl Visit for MessageVisitor {
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
         if field.name() == "message" {
-            write!(self.0, "{value:?}").ok();
+            let _ = write!(self.0, "{:?}", value);
         } else {
-            write!(self.0, " {field}={value:?}").ok();
+            if !self.0.is_empty() {
+                self.0.push(' ');
+            }
+            let _ = write!(self.0, "{}={:?}", field.name(), value);
         }
-    }
-}
-
-impl<S: Subscriber> Layer<S> for AndroidLogLayer {
-    fn enabled(
-        &self,
-        metadata: &tracing::Metadata<'_>,
-        _ctx: Context<'_, S>,
-    ) -> bool {
-        *metadata.level() <= tracing::Level::INFO
-    }
-
-    fn max_level_hint(&self) -> Option<tracing::metadata::LevelFilter> {
-        Some(tracing::metadata::LevelFilter::INFO)
-    }
-
-    fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
-        let metadata = event.metadata();
-        let level = metadata.level();
-        let prio = if *level == tracing::Level::ERROR {
-            ANDROID_LOG_ERROR
-        } else if *level == tracing::Level::WARN {
-            ANDROID_LOG_WARN
-        } else if *level == tracing::Level::INFO {
-            ANDROID_LOG_INFO
-        } else {
-            ANDROID_LOG_DEBUG
-        };
-
-        let mut visitor = MessageVisitor(String::new());
-        event.record(&mut visitor);
-
-        let Ok(tag) = CString::new(metadata.target()) else { return };
-        let Ok(msg) = CString::new(visitor.0) else { return };
-
-        unsafe {
-            __android_log_print(prio, tag.as_ptr(), c"%s".as_ptr(), msg.as_ptr());
-        }
-    }
-}
-
-#[derive(Debug)]
-struct DebugLogLayer;
-
-impl<S: Subscriber> Layer<S> for DebugLogLayer {
-    fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
-        let metadata = event.metadata();
-        let level = metadata.level();
-        let target = metadata.target();
-
-        let mut visitor = MessageVisitor(String::new());
-        event.record(&mut visitor);
-
-        let elapsed = {
-            let start = START_TIME.lock().unwrap_or_else(|e| e.into_inner());
-            start.map_or(0.0, |s| s.elapsed().as_secs_f64())
-        };
-        let secs = elapsed as u64;
-        let millis = ((elapsed - secs as f64) * 1000.0) as u64;
-        let line = format!("{:4}.{:03} {level} {target}: {}", secs, millis, visitor.0);
-        let mut buf = DEBUG_LOG.lock().unwrap_or_else(|e| e.into_inner());
-        if buf.len() >= DEBUG_LOG_MAX_LINES {
-            buf.pop_front();
-        }
-        buf.push_back(line);
     }
 }
 
 pub fn init() {
-    *START_TIME.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
-    tracing_subscriber::registry()
+    let subscriber = tracing_subscriber::registry()
         .with(AndroidLogLayer)
-        .with(DebugLogLayer)
-        .with(tracing_android_trace::AndroidTraceLayer::new())
-        .try_init()
-        .ok();
+        .with(tracing_android_trace::AndroidTraceLayer::new());
+    tracing::subscriber::set_global_default(subscriber).ok();
 }

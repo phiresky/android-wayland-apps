@@ -6,7 +6,6 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use jni::objects::{JObject, JValue};
-use jni::sys::jobject;
 use jni::JNIEnv;
 use smithay::backend::egl::EGLSurface;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
@@ -177,7 +176,7 @@ pub extern "system" fn Java_io_github_phiresky_wayland_1android_DebugActivity_na
 /// JNI callback: get debug log buffer for DebugActivity.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_io_github_phiresky_wayland_1android_DebugActivity_nativeGetDebugLog(
-    mut env: JNIEnv,
+    env: JNIEnv,
     _class: JObject,
 ) -> jni::sys::jstring {
     let log = crate::android::utils::android_tracing::get_debug_log();

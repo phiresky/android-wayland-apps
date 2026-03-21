@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use ndk_sys::{
     AHardwareBuffer, AHardwareBuffer_Desc, ARect,
-    ASurfaceControl, ASurfaceTransaction, ASurfaceTransactionStats,
+    ASurfaceControl, ASurfaceTransactionStats,
     ANativeWindow,
 };
 
