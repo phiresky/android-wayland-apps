@@ -89,6 +89,7 @@ pub fn run_setup() {
     }
     setup_flatpak_dbus();
     setup_flatpak_system_repo();
+    setup_portal();
     setup_log("=== Proot setup complete ===");
 }
 
@@ -887,12 +888,18 @@ fn setup_pipewire_config() {
 /// The `start-dbus` script starts system + session buses and exports the
 /// required environment variables. Sourced by adb_runas.sh and compositor
 /// app launches.
-fn setup_flatpak_dbus() {
+pub fn setup_flatpak_dbus() {
     let fs_root = Path::new(config::ARCH_FS_ROOT);
     let dbus_conf = fs_root.join("etc/dbus-1/proot-system.conf");
     let start_dbus = fs_root.join("usr/local/bin/start-dbus");
 
-    if dbus_conf.exists() && start_dbus.exists() {
+    // Re-generate start-dbus if it doesn't use our custom session config
+    let needs_update = start_dbus.exists()
+        && fs::read_to_string(&start_dbus)
+            .map(|s| !s.contains("proot-session.conf"))
+            .unwrap_or(false);
+
+    if dbus_conf.exists() && start_dbus.exists() && !needs_update {
         return;
     }
 
@@ -918,6 +925,31 @@ fn setup_flatpak_dbus() {
     fs::write(&dbus_conf, conf)
         .unwrap_or_else(|e| tracing::error!("[setup] Failed to write dbus config: {}", e));
 
+    // Custom session bus config — anonymous auth so D-Bus works across proot instances.
+    // Default session config uses EXTERNAL auth which relies on SCM_CREDENTIALS,
+    // but proot's ptrace interception corrupts credential ancillary data.
+    let session_conf = fs_root.join("etc/dbus-1/proot-session.conf");
+    let session_conf_content = r#"<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
+<busconfig>
+  <type>custom</type>
+  <listen>unix:path=/tmp/dbus-session-bus-socket</listen>
+  <auth>ANONYMOUS</auth>
+  <allow_anonymous/>
+  <policy context="default">
+    <allow send_destination="*" eavesdrop="true"/>
+    <allow eavesdrop="true"/>
+    <allow own="*"/>
+    <allow user="*"/>
+  </policy>
+
+  <servicedir>/usr/share/dbus-1/services</servicedir>
+  <servicedir>/usr/local/share/dbus-1/services</servicedir>
+</busconfig>
+"#;
+    fs::write(&session_conf, session_conf_content)
+        .unwrap_or_else(|e| tracing::error!("[setup] Failed to write session dbus config: {}", e));
+
     // Helper script to start both buses (idempotent)
     let _ = fs::create_dir_all(fs_root.join("usr/local/bin"));
     let script = r#"#!/bin/sh
@@ -941,10 +973,14 @@ if ! dbus-send --system --dest=org.freedesktop.DBus /org/freedesktop/DBus org.fr
     done
 fi
 
-# Session bus (reuse existing if connectable)
+# Session bus with anonymous auth (works across proot instances)
+export DBUS_SESSION_BUS_ADDRESS="unix:path=/tmp/dbus-session-bus-socket"
 if ! dbus-send --session --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.GetId >/dev/null 2>&1; then
-    eval $(dbus-launch --sh-syntax)
-    export DBUS_SESSION_BUS_ADDRESS DBUS_SESSION_BUS_PID
+    rm -f /tmp/dbus-session-bus-socket
+    dbus-daemon --config-file=/etc/dbus-1/proot-session.conf --nofork --nopidfile &
+    _i=0; while [ "$_i" -lt 10 ] && [ ! -S /tmp/dbus-session-bus-socket ]; do
+        sleep 0.05; _i=$((_i+1))
+    done
 fi
 
 # Symlink Wayland and PipeWire sockets into the new XDG_RUNTIME_DIR
@@ -981,6 +1017,243 @@ fn setup_flatpak_system_repo() {
     let config = "[core]\nrepo_version=1\nmode=bare-user-only\n";
     fs::write(&config_file, config)
         .unwrap_or_else(|e| tracing::error!("[setup] Failed to write flatpak repo config: {}", e));
+}
+
+/// Install the XDG Desktop Portal Android backend.
+///
+/// Sets up:
+/// 1. Portal descriptor file so xdg-desktop-portal knows about our backend
+/// 2. D-Bus service file for auto-activation
+/// 3. The Python backend script that bridges D-Bus ↔ compositor Unix socket
+/// 4. Portal config to select our backend
+pub fn setup_portal() {
+    let fs_root = Path::new(config::ARCH_FS_ROOT);
+    let backend_script = fs_root.join("usr/local/libexec/xdg-desktop-portal-android");
+
+    // Re-generate if script doesn't exist or uses the old backend interface
+    if backend_script.exists() {
+        if let Ok(content) = fs::read_to_string(&backend_script) {
+            if content.contains("org.freedesktop.portal.Desktop") {
+                return; // Already has the standalone frontend version
+            }
+        }
+    }
+
+    setup_log("[setup] Installing XDG Desktop Portal Android daemon...");
+
+    // D-Bus service file — allows auto-activation by the session bus
+    let _ = fs::create_dir_all(fs_root.join("usr/share/dbus-1/services"));
+    let service = "\
+[D-BUS Service]
+Name=org.freedesktop.portal.Desktop
+Exec=/usr/local/libexec/xdg-desktop-portal-android
+";
+    fs::write(
+        fs_root.join("usr/share/dbus-1/services/org.freedesktop.portal.Desktop.service"),
+        service,
+    )
+    .unwrap_or_else(|e| tracing::error!("[setup] Failed to write dbus service file: {e}"));
+
+    // Standalone portal daemon — implements the frontend D-Bus interface directly
+    // (no xdg-desktop-portal needed, avoids /proc access issues in proot)
+    let _ = fs::create_dir_all(fs_root.join("usr/local/libexec"));
+    let script = r##"#!/usr/bin/env python3
+"""
+Standalone XDG Desktop Portal for Android.
+
+Implements org.freedesktop.portal.FileChooser directly on the session bus,
+bypassing xdg-desktop-portal (which needs /proc access that proot can't provide).
+Forwards file chooser requests to the Android compositor via a Unix socket.
+"""
+
+import dbus
+import dbus.service
+import dbus.mainloop.glib
+import json
+import socket
+import sys
+import threading
+from gi.repository import GLib
+
+SOCKET_PATH = "/tmp/.portal-bridge"
+BUS_NAME = "org.freedesktop.portal.Desktop"
+OBJECT_PATH = "/org/freedesktop/portal/desktop"
+
+request_counter = 0
+main_loop = None
+
+
+def send_portal_request(request):
+    """Send a JSON request to the compositor and wait for response."""
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.connect(SOCKET_PATH)
+        sock.settimeout(300)
+        sock.sendall((json.dumps(request) + "\n").encode())
+        buf = b""
+        while b"\n" not in buf:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            buf += chunk
+        sock.close()
+        if buf:
+            return json.loads(buf.decode().strip())
+    except Exception as e:
+        print(f"Portal bridge error: {e}", file=sys.stderr)
+    return {"response": 2, "uris": []}
+
+
+class RequestObject(dbus.service.Object):
+    """Represents a portal request. Emits Response signal when done."""
+
+    def __init__(self, bus, path):
+        super().__init__(bus, path)
+
+    @dbus.service.signal("org.freedesktop.portal.Request", signature="ua{sv}")
+    def Response(self, response, results):
+        pass
+
+    @dbus.service.method("org.freedesktop.portal.Request", in_signature="", out_signature="")
+    def Close(self):
+        self.remove_from_connection()
+
+
+class PortalService(dbus.service.Object):
+    """Implements org.freedesktop.portal.FileChooser (frontend interface)."""
+
+    def __init__(self, bus, path):
+        super().__init__(bus, path)
+        self._bus = bus
+
+    def _get_request_path(self, sender, options):
+        global request_counter
+        request_counter += 1
+        token = str(options.get("handle_token", f"android{request_counter}"))
+        sender_part = sender[1:].replace(".", "_")
+        return f"/org/freedesktop/portal/desktop/request/{sender_part}/{token}"
+
+    def _extract_mime_types(self, options):
+        mime_types = []
+        filters = options.get("filters", [])
+        for f in filters:
+            if len(f) >= 2:
+                for pattern in f[1]:
+                    if len(pattern) >= 2 and int(pattern[0]) == 1:
+                        mime_types.append(str(pattern[1]))
+        return mime_types or ["*/*"]
+
+    @dbus.service.method(
+        "org.freedesktop.portal.FileChooser",
+        in_signature="ssa{sv}",
+        out_signature="o",
+        sender_keyword="sender",
+    )
+    def OpenFile(self, parent_window, title, options, sender=None):
+        req_path = self._get_request_path(sender, options)
+        req_obj = RequestObject(self._bus, req_path)
+        multiple = bool(options.get("multiple", False))
+        directory = bool(options.get("directory", False))
+        mime_types = self._extract_mime_types(options)
+
+        def do_request():
+            result = send_portal_request({
+                "type": "open_file",
+                "id": req_path,
+                "title": str(title),
+                "multiple": multiple,
+                "directory": directory,
+                "mime_types": mime_types,
+            })
+            response = int(result.get("response", 2))
+            uris = result.get("uris", [])
+            results = {}
+            if response == 0 and uris:
+                results["uris"] = dbus.Array(uris, signature="s")
+            GLib.idle_add(lambda: (req_obj.Response(dbus.UInt32(response), results),
+                                   req_obj.remove_from_connection()))
+
+        threading.Thread(target=do_request, daemon=True).start()
+        return dbus.ObjectPath(req_path)
+
+    @dbus.service.method(
+        "org.freedesktop.portal.FileChooser",
+        in_signature="ssa{sv}",
+        out_signature="o",
+        sender_keyword="sender",
+    )
+    def SaveFile(self, parent_window, title, options, sender=None):
+        req_path = self._get_request_path(sender, options)
+        req_obj = RequestObject(self._bus, req_path)
+        current_name = str(options.get("current_name", ""))
+        mime_types = self._extract_mime_types(options)
+
+        def do_request():
+            result = send_portal_request({
+                "type": "save_file",
+                "id": req_path,
+                "title": str(title),
+                "multiple": False,
+                "directory": False,
+                "mime_types": mime_types,
+                "current_name": current_name,
+            })
+            response = int(result.get("response", 2))
+            uris = result.get("uris", [])
+            results = {}
+            if response == 0 and uris:
+                results["uris"] = dbus.Array(uris, signature="s")
+            GLib.idle_add(lambda: (req_obj.Response(dbus.UInt32(response), results),
+                                   req_obj.remove_from_connection()))
+
+        threading.Thread(target=do_request, daemon=True).start()
+        return dbus.ObjectPath(req_path)
+
+    # Properties interface — apps query the portal version
+    @dbus.service.method(
+        dbus.PROPERTIES_IFACE,
+        in_signature="ss",
+        out_signature="v",
+    )
+    def Get(self, interface, prop):
+        if prop == "version":
+            return dbus.UInt32(4)
+        raise dbus.exceptions.DBusException(
+            f"Unknown property: {interface}.{prop}",
+            name="org.freedesktop.DBus.Error.UnknownProperty",
+        )
+
+    @dbus.service.method(
+        dbus.PROPERTIES_IFACE,
+        in_signature="s",
+        out_signature="a{sv}",
+    )
+    def GetAll(self, interface):
+        return {"version": dbus.UInt32(4)}
+
+
+def main():
+    dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+    bus = dbus.SessionBus()
+    bus_name = dbus.service.BusName(BUS_NAME, bus, replace_existing=True, allow_replacement=True)
+    portal = PortalService(bus, OBJECT_PATH)
+    print(f"Android file chooser portal running on {BUS_NAME}", flush=True)
+    GLib.MainLoop().run()
+
+
+if __name__ == "__main__":
+    main()
+"##;
+    if let Err(e) = fs::write(&backend_script, script) {
+        tracing::error!("[setup] Failed to write portal daemon: {e}");
+        return;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&backend_script, fs::Permissions::from_mode(0o755));
+    }
 }
 
 /// Fix the xkb symlink if it's absolute (won't resolve outside proot).

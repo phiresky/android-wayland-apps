@@ -14,5 +14,6 @@ pub mod android {
     pub mod camera;
     pub mod proot;
     pub mod utils;
+    pub mod portal;
     pub mod window_manager;
 }

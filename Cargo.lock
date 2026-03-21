@@ -26,10 +26,13 @@ dependencies = [
  "khronos-egl",
  "libc",
  "libloading",
+ "minigbm",
+ "ndk-sys",
  "pathdiff",
  "pipewire-audio",
  "pipewire-cam",
  "raw-window-handle",
+ "serde_json",
  "smithay",
  "tar",
  "tracing",
@@ -815,6 +818,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "minigbm"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "libc",
+]
+
+[[package]]
 name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -828,6 +839,13 @@ checksum = "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316"
 dependencies = [
  "adler2",
  "simd-adler32",
+]
+
+[[package]]
+name = "ndk-sys"
+version = "0.6.1+11769913"
+dependencies = [
+ "jni-sys",
 ]
 
 [[package]]

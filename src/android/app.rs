@@ -127,6 +127,7 @@ pub fn run_compositor_loop(setup_done: Arc<AtomicBool>) {
     }
     backend.compositor.init_keyboard();
     launch();
+    crate::android::portal::start_portal_bridge();
     tracing::info!("Compositor loop started");
 
     // Main poll loop.

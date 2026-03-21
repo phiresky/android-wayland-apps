@@ -129,7 +129,7 @@ pub fn dispatch_wayland(backend: &mut WaylandBackend) {
         c.get_data::<ClientState>().is_some_and(|s| s.is_alive())
     });
     // Process soft keyboard show/hide from text_input_v3.
-    if let Some(visible) = backend.compositor.state.soft_keyboard_request.take() {
+    if let Some((visible, android_input_type)) = backend.compositor.state.soft_keyboard_request.take() {
         let window_id = backend
             .compositor
             .keyboard
@@ -143,7 +143,7 @@ pub fn dispatch_wayland(backend: &mut WaylandBackend) {
                 })
             });
         if let Some(window_id) = window_id {
-            if let Err(e) = set_soft_keyboard_visible(window_id, visible) {
+            if let Err(e) = set_soft_keyboard_visible(window_id, visible, android_input_type) {
                 tracing::error!("Failed to set soft keyboard visibility: {e}");
             }
         }
@@ -318,6 +318,9 @@ fn process_window_events(backend: &mut WaylandBackend) {
             }
             WindowEvent::ImeRecompose { window_id, text } => {
                 handle_ime_recompose(backend, window_id, text);
+            }
+            WindowEvent::PortalRequest(request) => {
+                crate::android::portal::handle_portal_request(&request);
             }
         }
     }
@@ -911,6 +914,7 @@ fn send_status_jni(text: &str) -> Result<(), jni::errors::Error> {
 fn set_soft_keyboard_visible(
     window_id: u32,
     visible: bool,
+    android_input_type: i32,
 ) -> Result<(), jni::errors::Error> {
     crate::android::utils::jni_context::with_jni(|env, activity| {
         let class = crate::android::utils::jni_context::load_class(
@@ -919,10 +923,11 @@ fn set_soft_keyboard_visible(
         env.call_static_method(
             class,
             "setSoftKeyboardVisible",
-            "(IZ)V",
+            "(IZI)V",
             &[
                 jni::objects::JValue::Int(window_id as i32),
                 jni::objects::JValue::Bool(u8::from(visible)),
+                jni::objects::JValue::Int(android_input_type),
             ],
         )?;
         Ok(())

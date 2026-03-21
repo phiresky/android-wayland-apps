@@ -12,6 +12,7 @@ pub fn launch() {
     if crate::core::config::pipewire_enabled() {
         start_pipewire();
     }
+    start_portal();
     if let Err(e) = open_launcher_activity() {
         tracing::error!("Failed to open launcher activity: {e}");
     }
@@ -51,6 +52,23 @@ fn start_pipewire() {
         }
         .run();
         tracing::warn!("WirePlumber exited: {:?}", output.status);
+    });
+}
+
+/// Start D-Bus session bus and our standalone portal daemon inside proot.
+/// Replaces xdg-desktop-portal entirely (it needs /proc access proot can't provide).
+fn start_portal() {
+    thread::spawn(|| {
+        tracing::info!("Starting portal daemon in proot...");
+        let output = ArchProcess {
+            // Source start-dbus to ensure session bus is running, then start our portal.
+            command: ". /usr/local/bin/start-dbus; /usr/local/libexec/xdg-desktop-portal-android".into(),
+            user: Some(config::USERNAME.to_string()),
+            log: Some(Arc::new(|line| tracing::info!("[portal] {}", line))),
+            kill_on_exit: false,
+        }
+        .run();
+        tracing::warn!("Portal daemon exited: {:?}", output.status);
     });
 }
 

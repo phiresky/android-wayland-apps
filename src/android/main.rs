@@ -77,6 +77,11 @@ extern "system" fn Java_io_github_phiresky_wayland_1android_MainActivity_nativeI
     setup::disable_bwrap();
     setup::disable_flatpak_spawn();
 
+    // Ensure D-Bus and portal configs are up to date (may need regeneration
+    // after code changes, even though rootfs already exists).
+    setup::setup_flatpak_dbus();
+    setup::setup_portal();
+
     // Check if rootfs is present AND dependencies are installed.
     let needs_setup = !setup::is_setup_complete();
 

@@ -35,6 +35,8 @@ pub enum WindowEvent {
     ImeCommit { window_id: u32, text: String },
     ImeDelete { window_id: u32, before: i32, after: i32, text: String },
     ImeRecompose { window_id: u32, text: String },
+    /// XDG Desktop Portal file chooser request from portal bridge.
+    PortalRequest(crate::android::portal::PortalRequest),
 }
 
 unsafe impl Send for WindowEvent {}
@@ -425,7 +427,7 @@ pub fn set_wake_fd(fd: RawFd) {
     }
 }
 
-fn send_event(event: WindowEvent) {
+pub fn send_event(event: WindowEvent) {
     if let Ok(guard) = EVENT_SENDER.lock()
         && let Some(tx) = guard.as_ref()
     {

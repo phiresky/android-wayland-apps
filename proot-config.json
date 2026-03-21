@@ -35,6 +35,7 @@
     "XDG_RUNTIME_DIR": "/tmp",
     "WAYLAND_DISPLAY": "wayland-0",
     "QT_QPA_PLATFORM": "wayland",
+    "QT_QPA_PLATFORMTHEME": "xdgdesktopportal",
     "GTK_OVERLAY_SCROLLING": "0",
     "TERM": "xterm-256color",
     "SHELL": "/bin/bash",
@@ -43,6 +44,7 @@
     "MOZ_DISABLE_SOCKET_PROCESS_SANDBOX": "1",
     "XDG_CURRENT_DESKTOP": "android",
     "GTK_USE_PORTAL": "1",
+    "DBUS_SESSION_BUS_ADDRESS": "unix:path=/tmp/dbus-session-bus-socket",
     "_PROOT_BIN": "$LIBDIR/libproot.so",
     "_PROOT_LOADER": "$LIBDIR/libproot_loader.so",
     "_PROOT_TMP_DIR": "$CACHE_DIR/proot"

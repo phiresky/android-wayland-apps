@@ -30,8 +30,14 @@ pub const PACKAGES: &[&str] = &[
     "shared-mime-info",
     "gdk-pixbuf2",
     "noto-fonts",
+    "noto-fonts-emoji",
     "python",
     "vulkan-tools",
+    "sudo",
+    "kitty",
+    "dbus-python",
+    "python-gobject",
+    "xdg-desktop-portal",
 ];
 
 pub fn check_cmd() -> String {
