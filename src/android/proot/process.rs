@@ -96,48 +96,44 @@ impl ArchProcess {
             process.env("PROOT_NO_SECCOMP", "1");
         }
 
-        process
-            .arg("-r")
-            .arg(config::ARCH_FS_ROOT)
-            .arg("-L")
-            .arg("--link2symlink")
-            .arg("--sysvipc");
+        // Load shared proot config (binds + env vars) from proot-config.json.
+        let cfg: serde_json::Value = serde_json::from_str(
+            include_str!("../../../proot-config.json")
+        ).unwrap_or_else(|e| panic!("bad proot-config.json: {e}"));
+
+        let rootfs = config::ARCH_FS_ROOT;
+        let libdir = context.native_library_dir.to_string_lossy();
+        let cache_dir = context.cache_dir.to_string_lossy();
+        let subst = |s: &str| -> String {
+            s.replace("$ROOTFS", rootfs)
+             .replace("$LIBDIR", &libdir)
+             .replace("$CACHE_DIR", &cache_dir)
+        };
+
+        // proot flags
+        process.arg("-r").arg(rootfs);
+        for arg in cfg["proot_args"].as_array().into_iter().flatten() {
+            if let Some(s) = arg.as_str() { process.arg(s); }
+        }
         if self.kill_on_exit {
             process.arg("--kill-on-exit");
         }
-        process.arg("--root-id")
-            .arg("--bind=/dev")
-            .arg("--bind=/proc")
-            .arg("--bind=/sys")
-            .arg(format!("--bind={}/tmp:/dev/shm", config::ARCH_FS_ROOT));
 
-        // Only bind external storage if it's accessible (requires MANAGE_EXTERNAL_STORAGE).
-        // If not granted, proot would fail trying to bind an inaccessible FUSE mount.
-        if Path::new("/storage/emulated/0").exists() {
-            process
-                .arg("--bind=/storage/emulated/0:/storage/emulated/0")
-                .arg("--bind=/storage/emulated/0:/sdcard");
+        // binds (always)
+        for bind in cfg["binds"].as_array().into_iter().flatten() {
+            if let Some(s) = bind.as_str() {
+                process.arg(format!("--bind={}", subst(s)));
+            }
         }
-
-        process
-            .arg("--bind=/dev/urandom:/dev/random")
-            .arg("--bind=/proc/self/fd:/dev/fd")
-            .arg("--bind=/proc/self/fd/0:/dev/stdin")
-            .arg("--bind=/proc/self/fd/1:/dev/stdout")
-            .arg("--bind=/proc/self/fd/2:/dev/stderr")
-            .arg(format!("--bind={}/proc/.loadavg:/proc/loadavg", config::ARCH_FS_ROOT))
-            .arg(format!("--bind={}/proc/.stat:/proc/stat", config::ARCH_FS_ROOT))
-            .arg(format!("--bind={}/proc/.uptime:/proc/uptime", config::ARCH_FS_ROOT))
-            .arg(format!("--bind={}/proc/.version:/proc/version", config::ARCH_FS_ROOT))
-            .arg(format!("--bind={}/proc/.vmstat:/proc/vmstat", config::ARCH_FS_ROOT))
-            .arg(format!("--bind={}/proc/.sysctl_entry_cap_last_cap:/proc/sys/kernel/cap_last_cap", config::ARCH_FS_ROOT))
-            .arg(format!("--bind={}/proc/.sysctl_inotify_max_user_watches:/proc/sys/fs/inotify/max_user_watches", config::ARCH_FS_ROOT))
-            .arg(format!("--bind={}/sys/.empty:/sys/fs/selinux", config::ARCH_FS_ROOT))
-            // Expose the native lib dir and Android system libs inside proot so
-            // nested proot can be invoked (used by the bwrap shim for flatpak)
-            .arg(format!("--bind={}:{}", context.native_library_dir.display(), context.native_library_dir.display()))
-            .arg("--bind=/system:/system")
-            .arg("--bind=/apex:/apex");
+        // binds (only if source path exists)
+        for bind in cfg["binds_if_exists"].as_array().into_iter().flatten() {
+            if let Some(s) = bind.as_str() {
+                let src = subst(s.split(':').next().unwrap_or(s));
+                if Path::new(&src).exists() {
+                    process.arg(format!("--bind={}", subst(s)));
+                }
+            }
+        }
 
         // env vars
         process.arg("/usr/bin/env").arg("-i");
@@ -147,30 +143,24 @@ impl ArchProcess {
             process.arg(format!("HOME=/home/{}", user));
         }
         process
-            .arg("LANG=C.UTF-8")
-            .arg("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/games:/usr/games:/system/bin:/system/xbin")
-            .arg("TMPDIR=/tmp")
             .arg(format!("USER={}", user))
             .arg(format!("LOGNAME={}", user));
 
-        // Proot paths for nested proot (bwrap shim uses these for flatpak)
-        process
-            .arg(format!("_PROOT_BIN={}", context.native_library_dir.join("libproot.so").display()))
-            .arg(format!("_PROOT_LOADER={}", context.native_library_dir.join("libproot_loader.so").display()))
-            .arg(format!("_PROOT_TMP_DIR={}", context.cache_dir.join("proot").display()));
+        for (key, val) in cfg["env"].as_object().into_iter().flatten() {
+            if let Some(v) = val.as_str() {
+                process.arg(format!("{}={}", key, subst(v)));
+            }
+        }
 
-        // Wayland environment variables
-        process
-            .arg(format!("WAYLAND_DISPLAY={}", config::WAYLAND_SOCKET_NAME))
-            .arg("XDG_RUNTIME_DIR=/tmp")
-            .arg("QT_QPA_PLATFORM=wayland")
-            .arg("GTK_OVERLAY_SCROLLING=0")
-            .arg("TERM=xterm-256color")
-            .arg("SHELL=/bin/bash")
-            // Firefox sandbox uses seccomp which conflicts with proot's own seccomp
-            .arg("MOZ_DISABLE_CONTENT_SANDBOX=1")
-            .arg("MOZ_DISABLE_GMP_SANDBOX=1")
-            .arg("MOZ_DISABLE_SOCKET_PROCESS_SANDBOX=1");
+        // GPU-conditional env vars (Zink needs a working Vulkan ICD in proot)
+        let has_gpu = Path::new("/dev/kgsl-3d0").exists();
+        if has_gpu {
+            for (key, val) in cfg["env_if_gpu"].as_object().into_iter().flatten() {
+                if let Some(v) = val.as_str() {
+                    process.arg(format!("{}={}", key, v));
+                }
+            }
+        }
 
         // LD_PRELOAD: fix_ttyname shim if present
         let fix_ttyname = Path::new(config::ARCH_FS_ROOT).join("usr/lib/fix_ttyname.so");

@@ -1,0 +1,54 @@
+{
+  "proot_args": ["-L", "--link2symlink", "--sysvipc", "--root-id"],
+  "binds": [
+    "/dev",
+    "/proc",
+    "/sys",
+    "$ROOTFS/tmp:/dev/shm",
+    "/dev/mali0:/dev/dri/renderD128",
+    "/dev/urandom:/dev/random",
+    "/proc/self/fd:/dev/fd",
+    "/proc/self/fd/0:/dev/stdin",
+    "/proc/self/fd/1:/dev/stdout",
+    "/proc/self/fd/2:/dev/stderr",
+    "$ROOTFS/proc/.loadavg:/proc/loadavg",
+    "$ROOTFS/proc/.stat:/proc/stat",
+    "$ROOTFS/proc/.uptime:/proc/uptime",
+    "$ROOTFS/proc/.version:/proc/version",
+    "$ROOTFS/proc/.vmstat:/proc/vmstat",
+    "$ROOTFS/proc/.sysctl_entry_cap_last_cap:/proc/sys/kernel/cap_last_cap",
+    "$ROOTFS/proc/.sysctl_inotify_max_user_watches:/proc/sys/fs/inotify/max_user_watches",
+    "$ROOTFS/sys/.empty:/sys/fs/selinux",
+    "$LIBDIR:$LIBDIR",
+    "/system:/system",
+    "/apex:/apex"
+  ],
+  "binds_if_exists": [
+    "/storage/emulated/0:/storage/emulated/0",
+    "/storage/emulated/0:/sdcard",
+    "/data/local/tmp"
+  ],
+  "env": {
+    "LANG": "C.UTF-8",
+    "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/games:/usr/games:/system/bin:/system/xbin",
+    "TMPDIR": "/tmp",
+    "XDG_RUNTIME_DIR": "/tmp",
+    "WAYLAND_DISPLAY": "wayland-0",
+    "QT_QPA_PLATFORM": "wayland",
+    "GTK_OVERLAY_SCROLLING": "0",
+    "TERM": "xterm-256color",
+    "SHELL": "/bin/bash",
+    "MOZ_DISABLE_CONTENT_SANDBOX": "1",
+    "MOZ_DISABLE_GMP_SANDBOX": "1",
+    "MOZ_DISABLE_SOCKET_PROCESS_SANDBOX": "1",
+    "XDG_CURRENT_DESKTOP": "android",
+    "GTK_USE_PORTAL": "1",
+    "_PROOT_BIN": "$LIBDIR/libproot.so",
+    "_PROOT_LOADER": "$LIBDIR/libproot_loader.so",
+    "_PROOT_TMP_DIR": "$CACHE_DIR/proot"
+  },
+  "env_if_gpu": {
+    "MESA_LOADER_DRIVER_OVERRIDE": "zink",
+    "GALLIUM_DRIVER": "zink"
+  }
+}
