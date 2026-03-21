@@ -108,3 +108,61 @@ fn android_keycode_to_evdev(keycode: i32) -> Option<u32> {
         _ => None,
     }
 }
+
+/// Map a Unicode character to `(evdev_keycode, shift_needed)` for US QWERTY layout.
+/// Used to convert IME committed text into synthetic wl_keyboard key events.
+pub fn char_to_evdev_key(ch: char) -> Option<(u32, bool)> {
+    match ch {
+        'a'..='z' => {
+            const KEYS: [u32; 26] = [
+                30, 48, 46, 32, 18, 33, 34, 35, 23, 36, 37, 38, 50,
+                49, 24, 25, 16, 19, 31, 20, 22, 47, 17, 45, 21, 44,
+            ];
+            Some((KEYS[(ch as u32 - 'a' as u32) as usize], false))
+        }
+        'A'..='Z' => char_to_evdev_key(ch.to_ascii_lowercase()).map(|(k, _)| (k, true)),
+
+        '0' => Some((11, false)),
+        '1'..='9' => Some((ch as u32 - '0' as u32 + 1, false)),
+
+        ' ' => Some((57, false)),
+        '\n' => Some((28, false)),
+        '\t' => Some((15, false)),
+
+        '-' => Some((12, false)),
+        '=' => Some((13, false)),
+        '[' => Some((26, false)),
+        ']' => Some((27, false)),
+        '\\' => Some((43, false)),
+        ';' => Some((39, false)),
+        '\'' => Some((40, false)),
+        '`' => Some((41, false)),
+        ',' => Some((51, false)),
+        '.' => Some((52, false)),
+        '/' => Some((53, false)),
+
+        '!' => Some((2, true)),
+        '@' => Some((3, true)),
+        '#' => Some((4, true)),
+        '$' => Some((5, true)),
+        '%' => Some((6, true)),
+        '^' => Some((7, true)),
+        '&' => Some((8, true)),
+        '*' => Some((9, true)),
+        '(' => Some((10, true)),
+        ')' => Some((11, true)),
+        '_' => Some((12, true)),
+        '+' => Some((13, true)),
+        '{' => Some((26, true)),
+        '}' => Some((27, true)),
+        '|' => Some((43, true)),
+        ':' => Some((39, true)),
+        '"' => Some((40, true)),
+        '~' => Some((41, true)),
+        '<' => Some((51, true)),
+        '>' => Some((52, true)),
+        '?' => Some((53, true)),
+
+        _ => None,
+    }
+}
