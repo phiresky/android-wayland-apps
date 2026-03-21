@@ -161,6 +161,18 @@ pub extern "system" fn Java_io_github_phiresky_wayland_1android_DebugActivity_na
     if use_vulkan_rendering() { 1 } else { 0 }
 }
 
+/// JNI callback: toggle PipeWire from MainActivity (restoring saved preference).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_phiresky_wayland_1android_MainActivity_nativeSetPipewireEnabled(
+    _env: JNIEnv,
+    _class: JObject,
+    enabled: jni::sys::jboolean,
+) {
+    let val = enabled != 0;
+    tracing::info!("PipeWire preference restored: {}", if val { "enabled" } else { "disabled" });
+    crate::core::config::set_pipewire_enabled(val);
+}
+
 /// JNI callback: toggle PipeWire from DebugActivity.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_io_github_phiresky_wayland_1android_DebugActivity_nativeSetPipewireEnabled(
