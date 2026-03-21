@@ -46,7 +46,6 @@ class DebugActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        window.setDecorFitsSystemWindows(true)
         window.statusBarColor = 0xFF1A1A2E.toInt()
         window.navigationBarColor = 0xFF1A1A2E.toInt()
 
@@ -91,6 +90,19 @@ class DebugActivity : Activity() {
             }
         }
         root.addView(pipewireToggle)
+
+        // Zero-copy toggle
+        val zeroCopyToggle = Switch(this).apply {
+            text = "Zero-copy (GBM proxy)"
+            setTextColor(0xFFCCCCCC.toInt())
+            isChecked = nativeGetZeroCopyEnabled()
+            setPadding(dp(16), dp(4), dp(16), dp(4))
+            setOnCheckedChangeListener { _, isChecked ->
+                nativeSetZeroCopyEnabled(isChecked)
+                text = if (isChecked) "Zero-copy (GBM proxy) ON" else "Zero-copy OFF → blit path"
+            }
+        }
+        root.addView(zeroCopyToggle)
 
         // Restart button — kills the process so PipeWire toggle takes effect
         val restartBtn = Button(this).apply {
@@ -163,6 +175,13 @@ class DebugActivity : Activity() {
         root.addView(logScroll)
 
         setContentView(root)
+
+        // SDK 35 enforces edge-to-edge; apply system bar insets as padding
+        root.setOnApplyWindowInsetsListener { v, insets ->
+            val bars = insets.getInsets(android.view.WindowInsets.Type.systemBars())
+            v.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+            insets
+        }
     }
 
     override fun onResume() {
@@ -184,6 +203,8 @@ class DebugActivity : Activity() {
     private external fun nativeGetVulkanRendering(): Boolean
     private external fun nativeSetPipewireEnabled(enabled: Boolean)
     private external fun nativeGetPipewireEnabled(): Boolean
+    private external fun nativeSetZeroCopyEnabled(enabled: Boolean)
+    private external fun nativeGetZeroCopyEnabled(): Boolean
     private external fun nativeGetDebugLog(): String
 
     companion object {

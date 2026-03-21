@@ -91,6 +91,8 @@ pub struct WindowState {
     pub ahb_surface: Option<AhbWindowSurface>,
     /// Last render method used for this window (for debug overlay).
     pub last_render_method: &'static str,
+    /// Last frame's commit-to-present time in microseconds (for perf comparison).
+    pub last_frame_us: u64,
     /// Last buffer size committed by the client.
     pub last_buffer_size: Option<(u32, u32)>,
     /// Render mode for this window's client, detected from client env vars.
@@ -99,12 +101,17 @@ pub struct WindowState {
     /// When a close was requested but the Activity was already destroyed.
     /// Used to delay relaunching until the client has had time to respond.
     pub close_pending_since: Option<Instant>,
+    /// Compositor-allocated AHB for this window (server-side allocation path).
+    /// When present, the committed dmabuf can be presented directly via
+    /// ASurfaceTransaction without any GPU blit.
+    pub server_ahb: Option<std::sync::Arc<crate::android::backend::surface_transaction::HardwareBuffer>>,
 }
 
 /// Per-window ASurfaceTransaction state.
 pub struct AhbWindowSurface {
     pub surface_control: SurfaceControlHandle,
-    pub ahb_target: AhbTarget,
+    /// Vulkan blit target. None for zero-copy compositor-allocated AHB path.
+    pub ahb_target: Option<AhbTarget>,
     /// True while SurfaceFlinger is displaying the previous frame.
     /// Cleared by OnComplete callback — prevents rendering faster than vsync.
     pub frame_in_flight: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -122,6 +129,13 @@ pub enum RenderMode {
 /// Global toggle: true = Vulkan (default), false = GLES.
 /// Toggled from DebugActivity via JNI.
 static USE_VULKAN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Global toggle: true = zero-copy AHB present (default), false = blit path.
+static USE_ZERO_COPY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn zero_copy_enabled() -> bool {
+    USE_ZERO_COPY.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 pub fn use_vulkan_rendering() -> bool {
     USE_VULKAN.load(std::sync::atomic::Ordering::Relaxed)
@@ -150,6 +164,27 @@ pub extern "system" fn Java_io_github_phiresky_wayland_1android_DebugActivity_na
     _class: JObject,
 ) -> jni::sys::jboolean {
     if use_vulkan_rendering() { 1 } else { 0 }
+}
+
+/// JNI callback: toggle zero-copy from DebugActivity.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_phiresky_wayland_1android_DebugActivity_nativeSetZeroCopyEnabled(
+    _env: JNIEnv,
+    _class: JObject,
+    enabled: jni::sys::jboolean,
+) {
+    let val = enabled != 0;
+    tracing::info!("Zero-copy toggled: {}", if val { "ON" } else { "OFF" });
+    USE_ZERO_COPY.store(val, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// JNI callback: get zero-copy state.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_phiresky_wayland_1android_DebugActivity_nativeGetZeroCopyEnabled(
+    _env: JNIEnv,
+    _class: JObject,
+) -> jni::sys::jboolean {
+    if zero_copy_enabled() { 1 } else { 0 }
 }
 
 /// JNI callback: toggle PipeWire from MainActivity (restoring saved preference).
@@ -236,9 +271,11 @@ impl WindowManager {
             preferred_size: None,
             ahb_surface: None,
             last_render_method: "none",
+            last_frame_us: 0,
             last_buffer_size: None,
             render_mode: None,
             close_pending_since: None,
+            server_ahb: None,
         });
 
         window_id
@@ -499,6 +536,11 @@ extern "system" fn Java_io_github_phiresky_wayland_1android_WaylandWindowActivit
     action: i32,
     meta_state: i32,
 ) -> bool {
+    // Only handle keys we can map; return false for unmapped keys so Android
+    // can handle them (volume, home, etc.).
+    if crate::android::backend::keymap::android_keycode_to_smithay(key_code).is_none() {
+        return false;
+    }
     send_event(WindowEvent::Key {
         window_id: window_id as u32,
         key_code,

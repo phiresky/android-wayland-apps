@@ -470,7 +470,7 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                         .map(|(lw, lh)| lw == buf_w && lh == buf_h)
                         .unwrap_or(false);
 
-                    let gbm_lookup = if size_stable {
+                    let gbm_lookup = if size_stable && crate::android::window_manager::zero_copy_enabled() {
                         backend.gbm_state.as_ref()
                             .and_then(|s| s.lock().ok())
                             .and_then(|g| g.tracker.lookup(&dmabuf).map(|b| b.ahb.clone()))
@@ -518,10 +518,9 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                                     } else if ahb_surface.frame_in_flight.load(std::sync::atomic::Ordering::Acquire) {
                                         // Previous frame still on screen — wait for vsync.
                                     } else {
+                                        let t0 = Instant::now();
                                         let win_size = window.size;
                                         let wake_fd = backend.wake_fd;
-                                        // Present the client's AHB directly — zero GPU copies!
-                                        // Crop source to geometry area (skip CSD shadow borders).
                                         let src_x = (geo_offset.x as f64 * scale).round() as i32;
                                         let src_y = (geo_offset.y as f64 * scale).round() as i32;
                                         crate::android::backend::surface_transaction::present_buffer(
@@ -537,11 +536,13 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                                             &ahb_surface.frame_in_flight,
                                             wake_fd,
                                         );
+                                        let frame_us = t0.elapsed().as_micros() as u64;
                                         done = true;
                                         if let Some(wm) = backend.window_manager.as_mut() {
                                             if let Some(w) = wm.windows.get_mut(&window_id) {
                                                 w.last_render_method = "AHB zero-copy";
                                                 w.last_buffer_size = Some((buf_w, buf_h));
+                                                w.last_frame_us = frame_us;
                                                 w.needs_redraw = false;
                                             }
                                         }
@@ -635,6 +636,7 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                                         // send frame callbacks (done stays false → loop skips
                                         // naturally, suppressing client rendering until vsync).
                                     } else {
+                                        let t0 = Instant::now();
                                         let sz = dmabuf.size();
                                         let fd = dmabuf.handles().next();
                                         let stride = dmabuf.strides().next().unwrap_or(sz.w as u32 * 4);
@@ -662,11 +664,13 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                                                                 &ahb_surface.frame_in_flight,
                                                                 wake_fd,
                                                             );
+                                                            let frame_us = t0.elapsed().as_micros() as u64;
                                                             done = true;
                                                             if let Some(wm) = backend.window_manager.as_mut() {
                                                                 if let Some(w) = wm.windows.get_mut(&window_id) {
                                                                     w.last_render_method = "AHB txn";
                                                                     w.last_buffer_size = Some((sz.w as u32, sz.h as u32));
+                                                                    w.last_frame_us = frame_us;
                                                                     w.needs_redraw = false;
                                                                 }
                                                             }
@@ -880,10 +884,10 @@ fn update_status_overlay(backend: &mut WaylandBackend) {
             let surface_type = if window.ahb_surface.is_some() { "AHB" } else if window.egl_surface.is_some() { "EGL" } else { "-" };
             let frac = if has_frac_scale { "frac" } else { "1x" };
             info.push_str(&format!(
-                "  [{}] {} | {}  phys={}  log={}x{}  buf={}  pref={}  {} {} {:.0}fps\n",
+                "  [{}] {} | {}  phys={}  log={}x{}  buf={}  pref={}  {} {} {:.0}fps  {}µs\n",
                 id, display_name, window.last_render_method,
                 phys, logical_w, logical_h, buf_str, pref_str,
-                surface_type, frac, fps,
+                surface_type, frac, fps, window.last_frame_us,
             ));
         }
     }
