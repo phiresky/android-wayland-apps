@@ -52,7 +52,7 @@ impl<S: Subscriber> Layer<S> for AndroidLogLayer {
         let tag = CString::new(tag_str).unwrap_or_default();
         let msg = CString::new(visitor.0.as_str()).unwrap_or_default();
         unsafe {
-            ndk_sys::__android_log_print(prio as i32, tag.as_ptr(), msg.as_ptr());
+            ndk_sys::__android_log_write(prio as i32, tag.as_ptr(), msg.as_ptr());
         }
 
         // Also write to the in-memory debug log buffer.
