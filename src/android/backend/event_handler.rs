@@ -404,6 +404,13 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
             ((size.h - preferred_h) / 2).max(0)
         }).unwrap_or(0);
 
+        // Unbind EGL context before Vulkan operations. On Qualcomm, EGL and
+        // Vulkan share the GPU via KGSL — an active EGL context during VK
+        // command submission causes buffer corruption.
+        if let Some(cr) = backend.renderer.as_ref() {
+            let _ = cr.renderer.egl_context().unbind();
+        }
+
         // Try Vulkan zero-copy blit for dmabuf surfaces
         let vk_rendered = {
             use smithay::wayland::compositor::with_states;
@@ -807,6 +814,10 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                 continue;
             };
             let _ = cr.submit_surface(egl_surface);
+            // Unbind EGL context after GLES rendering. On Qualcomm, EGL and
+            // Vulkan share the GPU via KGSL — leaving EGL bound while the next
+            // window does Vulkan AHB blits causes GPU state corruption.
+            let _ = cr.renderer.egl_context().unbind();
         }
         // Send frame callbacks AFTER swap + finish — client can now safely
         // reuse its shm buffer.
