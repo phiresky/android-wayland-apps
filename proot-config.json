@@ -5,12 +5,8 @@
     "/proc",
     "/sys",
     "$ROOTFS/tmp:/dev/shm",
-    "/dev/mali0:/dev/dri/renderD128",
     "/dev/urandom:/dev/random",
     "/proc/self/fd:/dev/fd",
-    "/proc/self/fd/0:/dev/stdin",
-    "/proc/self/fd/1:/dev/stdout",
-    "/proc/self/fd/2:/dev/stderr",
     "$ROOTFS/proc/.loadavg:/proc/loadavg",
     "$ROOTFS/proc/.stat:/proc/stat",
     "$ROOTFS/proc/.uptime:/proc/uptime",
@@ -25,6 +21,9 @@
     "/apex:/apex"
   ],
   "binds_if_exists": [
+    "/proc/self/fd/0:/dev/stdin",
+    "/proc/self/fd/1:/dev/stdout",
+    "/proc/self/fd/2:/dev/stderr",
     "/storage/emulated/0:/storage/emulated/0",
     "/storage/emulated/0:/sdcard",
     "/data/local/tmp"

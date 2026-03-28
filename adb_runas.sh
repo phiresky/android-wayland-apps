@@ -32,7 +32,7 @@ fi
 # Generate proot args from JSON config using jq
 PROOT_ARGS=$(jq -r '.proot_args[]' "$CONFIG")
 BINDS=$(jq -r '.binds[]' "$CONFIG" | sed "s|\\\$ROOTFS|$ROOTFS|g;s|\\\$LIBDIR|$LIBDIR|g" | while read -r b; do echo "--bind=$b"; done)
-BINDS_OPT=$(jq -r '.binds_if_exists[]' "$CONFIG" | sed "s|\\\$ROOTFS|$ROOTFS|g" | while read -r b; do echo "--bind=$b"; done)
+BINDS_OPT=$(jq -r '.binds_if_exists[]' "$CONFIG" | sed "s|\\\$ROOTFS|$ROOTFS|g;s|\\\$LIBDIR|$LIBDIR|g")
 ENV_VARS=$(jq -r '.env | to_entries[] | "\(.key)=\(.value)"' "$CONFIG" | sed "s|\\\$ROOTFS|$ROOTFS|g;s|\\\$LIBDIR|$LIBDIR|g;s|\\\$CACHE_DIR|./cache|g")
 
 # GPU: check if kgsl exists on device (Qualcomm)
@@ -79,6 +79,13 @@ LAUNCHER=./files/.proot_launcher_$SUFFIX.sh
     echo "#!/bin/sh"
     echo "export PROOT_LOADER=$LIBDIR/libproot_loader.so"
     echo "export PROOT_TMP_DIR=./cache/proot"
+    # optional binds: check existence on device before adding
+    echo 'BIND_OPT=""'
+    echo "$BINDS_OPT" | while read -r entry; do
+        [ -z "$entry" ] && continue
+        src="${entry%%:*}"
+        echo "[ -e $src ] && BIND_OPT=\"\$BIND_OPT --bind=$entry\""
+    done
     # Start proot command
     printf "exec %s \\\\\n" "$LIBDIR/libproot.so"
     printf "    -r %s \\\\\n" "$ROOTFS"
@@ -90,8 +97,8 @@ LAUNCHER=./files/.proot_launcher_$SUFFIX.sh
     printf "    --kill-on-exit \\\\\n"
     # binds from config
     echo "$BINDS" | while read -r b; do [ -n "$b" ] && printf "    %s \\\\\n" "$b"; done
-    # optional binds
-    echo "$BINDS_OPT" | while read -r b; do [ -n "$b" ] && printf "    %s \\\\\n" "$b"; done
+    # optional binds (checked at runtime on device)
+    echo "    \$BIND_OPT \\"
     # /usr/bin/env -i
     printf "    /usr/bin/env -i \\\\\n"
     printf "    HOME=%s \\\\\n" "$HOMEDIR"
