@@ -91,6 +91,7 @@ pub fn run_setup() {
     setup_flatpak_dbus();
     setup_flatpak_system_repo();
     setup_portal();
+    setup_hybris_vulkan();
     setup_log("=== Proot setup complete ===");
 }
 
@@ -1411,5 +1412,52 @@ pub fn fix_xkb_symlink() {
     let _ = fs::remove_file(&xkb_path);
     if let Err(e) = symlink(&rel_target, &xkb_path) {
         tracing::error!("[setup] Failed to create xkb symlink: {}", e);
+    }
+}
+
+/// Build and install the libhybris Vulkan ICD inside the proot rootfs.
+/// This enables glibc apps to use Android's proprietary GPU driver directly.
+/// Idempotent: the build script skips if already installed.
+fn setup_hybris_vulkan() {
+    let fs_root = Path::new(config::ARCH_FS_ROOT);
+    let icd_so = fs_root.join("usr/lib/libvulkan_hybris.so");
+    let icd_json = fs_root.join("usr/share/vulkan/icd.d/hybris_vulkan_icd.json");
+
+    if icd_so.exists() && icd_json.exists() {
+        setup_log("[setup] hybris Vulkan ICD already installed");
+        return;
+    }
+
+    // Copy ICD source files into the rootfs /tmp
+    let src_dir = fs_root.join("tmp/hybris-vulkan-icd");
+    let _ = fs::create_dir_all(&src_dir);
+
+    let files: &[(&str, &[u8])] = &[
+        ("vulkan_hybris_icd.c", include_bytes!("../../../hybris-vulkan-icd/vulkan_hybris_icd.c")),
+        ("hybris_vulkan_icd.json", include_bytes!("../../../hybris-vulkan-icd/hybris_vulkan_icd.json")),
+        ("build.sh", include_bytes!("../../../hybris-vulkan-icd/build.sh")),
+        ("libhybris-src.tar.gz", include_bytes!("../../../hybris-vulkan-icd/libhybris-src.tar.gz")),
+    ];
+    for (name, data) in files {
+        if let Err(e) = fs::write(src_dir.join(name), data) {
+            tracing::error!("[setup] Failed to write {}: {}", name, e);
+            return;
+        }
+    }
+
+    setup_log("[setup] Building hybris Vulkan ICD (this may take a few minutes)...");
+
+    let result = ArchProcess {
+        command: "bash /tmp/hybris-vulkan-icd/build.sh".into(),
+        user: None,
+        log: Some(Arc::new(|line| setup_log(&format!("[hybris-icd] {}", line)))),
+        kill_on_exit: true,
+    }
+    .run();
+
+    if result.status.success() {
+        setup_log("[setup] hybris Vulkan ICD installed successfully");
+    } else {
+        setup_log("[setup] hybris Vulkan ICD build failed (GPU may use software rendering)");
     }
 }
