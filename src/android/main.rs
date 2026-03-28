@@ -82,6 +82,10 @@ extern "system" fn Java_io_github_phiresky_wayland_1android_MainActivity_nativeI
     setup::setup_flatpak_dbus();
     setup::setup_portal();
 
+    // Build the libhybris Vulkan ICD if not already installed.
+    // Runs in foreground since first build takes a few minutes.
+    setup::setup_hybris_vulkan();
+
     // Check if rootfs is present AND dependencies are installed.
     let needs_setup = !setup::is_setup_complete();
 

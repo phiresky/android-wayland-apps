@@ -9,3 +9,6 @@
 [submodule "deps/proot"]
 	path = patches/proot
 	url = https://github.com/termux/proot.git
+[submodule "patches/libhybris"]
+	path = patches/libhybris
+	url = https://github.com/libhybris/libhybris.git

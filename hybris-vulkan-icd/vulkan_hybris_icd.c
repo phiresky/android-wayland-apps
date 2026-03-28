@@ -24,10 +24,20 @@
 #include <stdint.h>
 #include <string.h>
 #include <unistd.h>
+#include <dlfcn.h>
 #include <sys/mman.h>
 #include <pthread.h>
-#include <vulkan/vulkan.h>
 #include <hybris/common/binding.h>
+
+/* Minimal Vulkan types — avoids depending on vulkan/vulkan.h at build time */
+#define VK_NULL_HANDLE 0
+#define VKAPI_ATTR
+#define VKAPI_CALL
+typedef uint32_t VkResult;
+typedef struct VkInstance_T *VkInstance;
+typedef void (*PFN_vkVoidFunction)(void);
+typedef PFN_vkVoidFunction (*PFN_vkGetInstanceProcAddr)(VkInstance, const char *);
+#define VK_SUCCESS 0
 
 /* libhybris functions not in binding.h */
 extern void android_update_LD_LIBRARY_PATH(const char *path);
