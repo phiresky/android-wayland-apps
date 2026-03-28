@@ -775,11 +775,15 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                 continue;
             };
 
-            if let Err(e) = frame.clear(Color32F::new(0.0, 0.0, 0.0, 1.0), &[damage]) {
-                tracing::warn!("frame.clear failed for window_id={}: {e:?}", window_id);
-            }
-            if let Err(e) = draw_render_elements(&mut frame, scale, &elements, &[damage]) {
-                tracing::warn!("draw_render_elements failed for window_id={}: {e:?}", window_id);
+            // Only clear+draw when we have content — avoids black flash flicker
+            // between buffer releases and new commits.
+            if !elements.is_empty() {
+                if let Err(e) = frame.clear(Color32F::new(0.0, 0.0, 0.0, 1.0), &[damage]) {
+                    tracing::warn!("frame.clear failed for window_id={}: {e:?}", window_id);
+                }
+                if let Err(e) = draw_render_elements(&mut frame, scale, &elements, &[damage]) {
+                    tracing::warn!("draw_render_elements failed for window_id={}: {e:?}", window_id);
+                }
             }
             if let Err(e) = frame.finish() {
                 tracing::warn!("frame.finish failed for window_id={}: {e:?}", window_id);

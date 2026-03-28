@@ -321,14 +321,47 @@ pub fn setup_firefox_config() {
         .unwrap_or_else(|e| tracing::error!("[setup] Failed to write autoconfig.js: {}", e));
 
     // The .cfg file must start with a comment line (Firefox requirement)
-    let cfg = "// Auto-configured by wayland_android for proot compatibility\n\
-               defaultPref(\"security.sandbox.content.level\", 0);\n\
-               defaultPref(\"media.cubeb.sandbox\", false);\n\
-               defaultPref(\"security.sandbox.warn_unprivileged_namespaces\", false);\n\
-               defaultPref(\"gfx.webrender.all\", true);\n";
+    let cfg = "\
+// Auto-configured by wayland_android for proot compatibility
+defaultPref(\"security.sandbox.content.level\", 0);
+defaultPref(\"media.cubeb.sandbox\", false);
+defaultPref(\"security.sandbox.warn_unprivileged_namespaces\", false);
+defaultPref(\"gfx.webrender.all\", true);
+defaultPref(\"webgl.force-enabled\", true);
+defaultPref(\"widget.gtk.overlay-scrollbars.enabled\", false);
+defaultPref(\"widget.non-native-theme.gtk.scrollbar.thumb-size\", \"1\");
+defaultPref(\"widget.non-native-theme.scrollbar.size.override\", 16);
+";
     fs::write(&cfg_file, cfg)
         .unwrap_or_else(|e| tracing::error!("[setup] Failed to write Firefox config: {}", e));
 
+    // Replace glxtest with an EGL-based probe. Firefox's glxtest binary
+    // crashes in proot (seccomp/fork issues), causing GPU detection to fail
+    // and WebGL to be disabled. This script probes EGL via eglinfo and writes
+    // the expected format to fd 3.
+    let glxtest = firefox_root.join("glxtest");
+    let glxtest_orig = firefox_root.join("glxtest.orig");
+    if glxtest.exists() && !glxtest_orig.exists() {
+        let _ = fs::rename(&glxtest, &glxtest_orig);
+    }
+    let glxtest_script = r#"#!/bin/sh
+# EGL-based GPU probe replacement for Firefox's glxtest (which fails in proot).
+# Firefox opens fd 3 as a pipe before launching this. Write GPU info there.
+info=$(eglinfo -B 2>/dev/null)
+vendor=$(echo "$info" | grep "OpenGL core profile vendor:" | head -1 | sed 's/.*: //')
+renderer=$(echo "$info" | grep "OpenGL core profile renderer:" | head -1 | sed 's/.*: //')
+version=$(echo "$info" | grep "OpenGL core profile version:" | head -1 | sed 's/.*: //')
+if [ -n "$renderer" ]; then
+    printf "VENDOR\n%s\nRENDERER\n%s\nVERSION\n%s\nTFP\nEGL\n" "$vendor" "$renderer" "$version" >&3
+fi
+"#;
+    fs::write(&glxtest, glxtest_script)
+        .unwrap_or_else(|e| tracing::error!("[setup] Failed to write glxtest: {}", e));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&glxtest, fs::Permissions::from_mode(0o755));
+    }
 }
 
 /// Configure Electron apps (VSCode etc.) to run without sandbox.

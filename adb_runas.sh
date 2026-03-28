@@ -16,6 +16,12 @@ PKG=io.github.phiresky.wayland_android
 ROOTFS=./files/arch
 CONFIG="$(dirname "$0")/proot-config.json"
 
+# Check the compositor is running
+if ! adb shell pidof "$PKG" </dev/null >/dev/null 2>&1; then
+    echo "WARNING: $PKG is not running. Wayland apps will fail to connect." >&2
+    echo "         Start it first: ./run.sh  (or launch from device)" >&2
+fi
+
 # Resolve native lib dir from package path
 APK_DIR=$(adb shell pm path "$PKG" </dev/null | grep base.apk | head -1 | sed 's|package:||;s|/base.apk||' | tr -d '\r')
 LIBDIR="$APK_DIR/lib/arm64"
