@@ -131,10 +131,13 @@ and explicit vsync control. GLES/EGL is only used as fallback for wl_shm clients
 ## Rendering Path
 
 ### wl_shm path (software clients)
-- Wayland clients render into shared memory buffers (wl_shm)
-- Compositor uploads SHM buffer as GLES texture via smithay GlesRenderer
-- Texture drawn to the Activity's EGL surface
-- Works everywhere, involves CPU copy
+- CPU-rendered clients (gedit, nemo): VK shm blit — memcpy to host-visible
+  VK staging buffer → GPU blit to AHB → ASurfaceTransaction. No GLES.
+- GPU-rendered clients (Firefox/Zink): GLES fallback — shm data is GPU-async
+  (reads as zeros from CPU), imported via GL_EXT_memory_object_fd + Vulkan bridge.
+- **Qualcomm limitation**: mixing GLES texture uploads with VK command submission
+  causes intermittent GPU corruption. VK shm path eliminates GLES for CPU clients.
+  Firefox still needs GLES (fix: make Kopper WSI use zwp_linux_dmabuf_v1).
 
 ### dmabuf path (GPU clients — current)
 - Client renders via Turnip (Mesa Vulkan for Adreno) → exports dmabuf fd

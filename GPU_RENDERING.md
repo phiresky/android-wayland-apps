@@ -202,6 +202,64 @@ upstream adds a proper server-side allocation protocol), but default to the
 blit path which is correct, portable, and fast enough. Toggle available in
 DebugActivity for A/B testing.
 
+### 5c. VK shm blit path (eliminates GLES/VK GPU corruption)
+
+**Problem**: On Qualcomm Adreno 830, mixing GLES texture uploads (`glTexImage2D`)
+with Vulkan command submission (`vkCmdCopyBufferToImage`) in the same process causes
+intermittent GPU corruption — the VK blit reads with wrong stride/offset, producing
+horizontal stripe artifacts in dmabuf windows (eglgears).
+
+**Root cause**: The Qualcomm GLES and Vulkan drivers share GPU hardware via KGSL but
+don't properly synchronize internal GPU state (DMA engines, page tables, caches).
+Confirmed by testing: skipping all GLES rendering eliminates the corruption entirely.
+
+**Fix**: `blit_shm_to_ahb()` in `vulkan_renderer.rs` — uploads wl_shm pixel data
+into a host-visible VK staging buffer and blits to AHB via Vulkan, same pipeline as
+the dmabuf path but from CPU memory instead of an imported fd. This eliminates GLES
+for CPU-rendered shm clients (gedit, nemo, terminals).
+
+```
+CPU shm client (gedit):
+1. Client renders via Cairo → writes pixels to wl_shm pool (CPU memory)
+2. Compositor reads shm data (data_readable=true) → memcpy to VK staging buffer
+3. vkCmdCopyBufferToImage → staging image → vkCmdBlitImage → AHB
+4. ASurfaceTransaction_setBuffer → SurfaceFlinger
+Result: no GLES, no corruption ✓
+
+GPU shm client (Firefox/Zink):
+1. Firefox renders via Zink → Turnip → KGSL (GPU async)
+2. Commits wl_shm buffer, but CPU reads zeros (GPU data not flushed)
+3. data_readable=false → VK shm path can't blit → falls through to GLES
+4. GLES imports via GL_EXT_memory_object_fd + Vulkan bridge → renders
+Result: GLES still used → corruption returns when dmabuf windows are open ✗
+```
+
+**Status by app combination:**
+
+| Apps running | Render paths | Corruption? |
+|---|---|---|
+| eglgears alone | VK dmabuf | Clean |
+| gedit/nemo alone | VK shm | Clean |
+| eglgears + gedit/nemo | VK dmabuf + VK shm | Clean |
+| Firefox alone | GLES fallback | Renders OK |
+| eglgears + Firefox | VK dmabuf + GLES | eglgears corrupted |
+
+**Remaining fix needed**: Make Firefox's Kopper WSI commit via `zwp_linux_dmabuf_v1`
+instead of `wl_shm`. Then it goes through the VK dmabuf path (like eglgears) with
+no GLES involvement.
+
+**Why Firefox uses wl_shm**: Kopper allocates GPU buffers via our GBM proxy
+(AHardwareBuffer-backed). But it commits them wrapped in `wl_shm` instead of
+`zwp_linux_dmabuf_v1`. The shm pool fd is a memfd (not importable by VK). The
+likely cause: Kopper checks compositor's dmabuf format+modifier list (we advertise
+Linear + Invalid) but AHBs may use Qualcomm's tiled modifier → no match → shm
+fallback. eglgears (also Kopper/Zink) does commit via `zwp_linux_dmabuf_v1` and
+works — possibly because it uses simpler allocations that match Linear.
+
+**Fix path**: Either advertise the correct AHB modifier in our dmabuf format list,
+or force the GBM proxy to allocate with LINEAR tiling (`AHARDWAREBUFFER_USAGE_CPU_*`
+flags). Then Kopper matches → uses dmabuf protocol → VK dmabuf path → no GLES.
+
 ## How to Reproduce (vkcube test)
 
 ### Prerequisites (one-time, inside proot)
