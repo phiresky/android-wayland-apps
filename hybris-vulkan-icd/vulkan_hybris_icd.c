@@ -77,17 +77,12 @@ static void setup_bionic_tls_for_thread(void) {
     /* Slot -1: bionic_tls pointer */
     ((void **)tp)[-1] = bionic_tls_block;
 
-    /* Slot 5: stack guard canary — read from urandom */
-    if (((uint64_t *)tp)[5] == 0) {
-        uint64_t canary = 0;
-        FILE *f = fopen("/dev/urandom", "r");
-        if (f) {
-            fread(&canary, 8, 1, f);
-            fclose(f);
-        }
-        canary &= ~0xFFUL; /* bionic sets low byte to 0 */
-        ((uint64_t *)tp)[5] = canary;
-    }
+    /* NOTE: Do NOT write to TLS slot 5 (tp + 40). On bionic it's the stack guard
+     * canary, but on glibc aarch64 it overlaps the DTV or other TCB data. Writing
+     * here corrupts the glibc Vulkan loader's callee-saved register restore.
+     * Bionic functions compiled with -fstack-protector will use whatever value
+     * glibc has at this offset as the canary — this works as long as the value
+     * is consistent within a thread (which it is, since glibc doesn't change it). */
 }
 
 /* ── CFI patch ─────────────────────────────────────────────────────── */
@@ -159,22 +154,44 @@ static void ensure_init(void) {
     pthread_once(&init_once, do_init);
 }
 
-/* ── Vulkan ICD entry points ───────────────────────────────────────── */
+/* ── Vulkan entry points ───────────────────────────────────────────── */
 
 /*
- * The Vulkan loader (Khronos, glibc-side) calls these three functions
- * to discover and use our ICD.
+ * Export vkGetInstanceProcAddr directly so this library can be used as
+ * a drop-in libvulkan.so replacement WITHOUT the Khronos loader.
+ *
+ * The Khronos glibc Vulkan loader's ICD dispatch mechanism has
+ * incompatibilities with Android driver function pointers (dispatch table
+ * poison values, PAC/BTI mismatches). Bypassing it entirely avoids these.
+ *
+ * Apps link against our libvulkan_hybris.so (installed as libvulkan.so.1)
+ * and call vkGetInstanceProcAddr directly — zero dispatch overhead.
  */
+
+static PFN_vkVoidFunction get_proc(VkInstance instance, const char *pName) {
+    ensure_init();
+    setup_bionic_tls_for_thread();
+    if (init_failed || !real_get_instance_proc_addr)
+        return NULL;
+    PFN_vkVoidFunction fn = real_get_instance_proc_addr(instance, pName);
+    if (getenv("HYBRIS_VK_DEBUG"))
+        fprintf(stderr, "[hybris-vk] GetInstanceProcAddr(%p, \"%s\") = %p%s\n",
+                (void*)instance, pName, (void*)fn, fn ? "" : " NULL!");
+    return fn;
+}
+
+__attribute__((visibility("default")))
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
+vkGetInstanceProcAddr(VkInstance instance, const char *pName) {
+    return get_proc(instance, pName);
+}
+
+/* ICD entry points — kept for compatibility if used with a loader */
 
 __attribute__((visibility("default")))
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
 vk_icdGetInstanceProcAddr(VkInstance instance, const char *pName) {
-    ensure_init();
-    /* Set up bionic TLS for the calling thread (may be different from init thread) */
-    setup_bionic_tls_for_thread();
-    if (init_failed || !real_get_instance_proc_addr)
-        return NULL;
-    return real_get_instance_proc_addr(instance, pName);
+    return get_proc(instance, pName);
 }
 
 __attribute__((visibility("default")))
@@ -188,9 +205,10 @@ vk_icdNegotiateLoaderICDInterfaceVersion(uint32_t *pSupportedVersion) {
 __attribute__((visibility("default")))
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
 vk_icdGetPhysicalDeviceProcAddr(VkInstance instance, const char *pName) {
-    ensure_init();
-    setup_bionic_tls_for_thread();
-    if (init_failed || !real_get_instance_proc_addr)
-        return NULL;
-    return real_get_instance_proc_addr(instance, pName);
+    /* Return NULL — tells the loader to use its own dispatch for physical
+     * device functions. Returning non-NULL here for non-physical-device
+     * functions corrupts the loader's dispatch table. */
+    (void)instance;
+    (void)pName;
+    return NULL;
 }

@@ -1459,10 +1459,17 @@ pub fn setup_hybris_vulkan() {
     }
 
     // Create soname symlinks
-    let _ = std::fs::remove_file(lib_dir.join("libhybris-common.so.1"));
-    let _ = std::fs::remove_file(lib_dir.join("libhybris-common.so"));
-    let _ = symlink("libhybris-common.so.1.0.0", lib_dir.join("libhybris-common.so.1"));
-    let _ = symlink("libhybris-common.so.1.0.0", lib_dir.join("libhybris-common.so"));
+    for (link, target) in [
+        ("libhybris-common.so.1", "libhybris-common.so.1.0.0"),
+        ("libhybris-common.so", "libhybris-common.so.1.0.0"),
+        // Install as libvulkan.so.1 so apps can use it without the Khronos loader.
+        // The Khronos loader's ICD dispatch has incompatibilities with Android drivers.
+        ("libvulkan.so.1", "libvulkan_hybris.so"),
+        ("libvulkan.so", "libvulkan_hybris.so"),
+    ] {
+        let _ = std::fs::remove_file(lib_dir.join(link));
+        let _ = symlink(target, lib_dir.join(link));
+    }
 
     setup_log("[setup] hybris Vulkan ICD installed");
 }
