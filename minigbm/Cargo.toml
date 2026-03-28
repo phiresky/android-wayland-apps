@@ -1,0 +1,14 @@
+[package]
+name = "minigbm"
+version = "0.1.0"
+edition = "2024"
+description = "GBM API backed by Android AHardwareBuffer, for server-side buffer allocation"
+
+[lib]
+name = "minigbm"
+
+[dependencies]
+libc = "0.2"
+
+[build-dependencies]
+cc = "1"
