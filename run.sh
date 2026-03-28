@@ -13,5 +13,5 @@ adb shell am start -n "$ACTIVITY"
 
 # Stream logs: tracing uses module path as tag (e.g. android_wayland_launcher::android::compositor),
 # plus stdout/stderr and crashes.
-exec adb logcat -v time \
-    -e 'android_wayland_launcher|RustStdoutStderr|AndroidRuntime|ActivityManager'
+timeout 10 adb logcat -v time \
+    -e 'android_wayland_launcher|RustStdoutStderr|AndroidRuntime|ActivityManager' || true

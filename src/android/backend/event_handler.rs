@@ -784,12 +784,9 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
             if let Err(e) = frame.finish() {
                 tracing::warn!("frame.finish failed for window_id={}: {e:?}", window_id);
             }
-
-            send_frames_surface_tree(&wl_surface, time);
-            // Also send frame callbacks for popup surfaces (menus, dropdowns).
-            for (popup, _) in PopupManager::popups_for_surface(&wl_surface) {
-                send_frames_surface_tree(popup.wl_surface(), time);
-            }
+            // TODO: intermittent horizontal stripe corruption in Firefox wl_shm path.
+            // Likely a race in shm mmap between proot client writes and our texture
+            // upload. glFinish doesn't help — corruption is before GL reads.
         }
         // Borrows released — now swap buffers
         {
@@ -806,6 +803,12 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                 continue;
             };
             let _ = cr.submit_surface(egl_surface);
+        }
+        // Send frame callbacks AFTER swap + finish — client can now safely
+        // reuse its shm buffer.
+        send_frames_surface_tree(&wl_surface, time);
+        for (popup, _) in PopupManager::popups_for_surface(&wl_surface) {
+            send_frames_surface_tree(popup.wl_surface(), time);
         }
         // Count rendered frame for FPS tracking + mark GLES render method.
         if let Some(wm) = backend.window_manager.as_mut()

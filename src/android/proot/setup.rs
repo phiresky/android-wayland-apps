@@ -324,7 +324,8 @@ pub fn setup_firefox_config() {
     let cfg = "// Auto-configured by wayland_android for proot compatibility\n\
                defaultPref(\"security.sandbox.content.level\", 0);\n\
                defaultPref(\"media.cubeb.sandbox\", false);\n\
-               defaultPref(\"security.sandbox.warn_unprivileged_namespaces\", false);\n";
+               defaultPref(\"security.sandbox.warn_unprivileged_namespaces\", false);\n\
+               defaultPref(\"gfx.webrender.all\", true);\n";
     fs::write(&cfg_file, cfg)
         .unwrap_or_else(|e| tracing::error!("[setup] Failed to write Firefox config: {}", e));
 

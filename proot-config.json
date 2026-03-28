@@ -42,6 +42,7 @@
     "MOZ_DISABLE_CONTENT_SANDBOX": "1",
     "MOZ_DISABLE_GMP_SANDBOX": "1",
     "MOZ_DISABLE_SOCKET_PROCESS_SANDBOX": "1",
+    "MOZ_ENABLE_WAYLAND": "1",
     "XDG_CURRENT_DESKTOP": "android",
     "GTK_USE_PORTAL": "1",
     "DBUS_SESSION_BUS_ADDRESS": "unix:path=/tmp/dbus-session-bus-socket",
