@@ -703,6 +703,112 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
             continue;
         }
 
+        // ── VK shm path: blit wl_shm buffer via Vulkan to avoid GLES/VK mixing ──
+        // On Qualcomm, mixing GLES texture uploads with VK command submission
+        // causes GPU corruption. Use VK for shm too when VK renderer is available.
+        let vk_shm_rendered = {
+            let mut done = false;
+            if let Some(vk) = backend.vk_renderer.as_ref() {
+                use smithay::wayland::compositor::with_states;
+
+                if let Some(wm) = backend.window_manager.as_mut() {
+                    if let Some(window) = wm.windows.get_mut(&window_id) {
+                        if !window.needs_redraw {
+                            done = true; // no new frame
+                        } else {
+                            use smithay::backend::renderer::utils::RendererSurfaceState;
+                            // Get shm buffer + dimensions in one call
+                            let shm_info = with_states(&wl_surface, |states| {
+                                type RssType = std::sync::Mutex<RendererSurfaceState>;
+                                states.data_map.get::<RssType>().and_then(|rss| {
+                                    let guard = rss.lock().ok()?;
+                                    let buf = guard.buffer()?.clone();
+                                    smithay::wayland::shm::with_buffer_contents(&buf, |_, _, data| {
+                                        (buf.clone(), data.width as u32, data.height as u32)
+                                    }).ok()
+                                })
+                            });
+                            if let Some((shm_buf, buf_w, buf_h)) = shm_info {
+                                // Create AHB for pure-shm windows only. Wait for 2+
+                                // consecutive shm frames — Firefox starts shm then
+                                // switches to dmabuf, so don't create AHB prematurely.
+                                if window.ahb_surface.is_none() && window.frame_count > 0 {
+                                    if let Some(nw) = window.native_window {
+                                        let sc = crate::android::backend::surface_transaction::SurfaceControlHandle::from_window(
+                                            nw, &format!("shm-{window_id}"));
+                                        if let Some(sc) = sc {
+                                            crate::android::backend::surface_transaction::set_visible(&sc);
+                                            window.egl_surface = None;
+                                            window.ahb_surface = Some(crate::android::window_manager::AhbWindowSurface {
+                                                surface_control: sc,
+                                                ahb_target: None,
+                                                frame_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                                            });
+                                        }
+                                    }
+                                }
+                                // Create/resize AHB target at buffer dimensions
+                                if let Some(ref mut ahb_surface) = window.ahb_surface {
+                                    let needs_target = ahb_surface.ahb_target.as_ref()
+                                        .map(|t| t.width != buf_w || t.height != buf_h)
+                                        .unwrap_or(true);
+                                    if needs_target {
+                                        if let Some(ref old) = ahb_surface.ahb_target {
+                                            vk.destroy_ahb_target(old);
+                                        }
+                                        if let Ok(target) = vk.create_ahb_target(buf_w, buf_h) {
+                                            ahb_surface.ahb_target = Some(target);
+                                        }
+                                    }
+                                    // Blit using the buffer we already cloned
+                                    tracing::warn!("[vk-shm] window_id={} ahb_target={}", window_id, ahb_surface.ahb_target.is_some());
+                                    if let Some(ref ahb_target) = ahb_surface.ahb_target {
+                                        {
+                                            let blit_result = smithay::wayland::shm::with_buffer_contents(&shm_buf, |ptr, _, data| {
+                                                vk.blit_shm_to_ahb(
+                                                    unsafe { ptr.offset(data.offset as isize) as *const u8 },
+                                                    data.width as u32, data.height as u32, data.stride as u32,
+                                                    ash::vk::Format::B8G8R8A8_UNORM, ahb_target,
+                                                )
+                                            });
+                                            match &blit_result {
+                                                Err(e) => tracing::warn!("[vk-shm] buffer access: {e:?}"),
+                                                Ok(Err(e)) => tracing::warn!("[vk-shm] blit error: {e}"),
+                                                _ => {}
+                                            }
+                                            if let Ok(Ok(fence_fd)) = blit_result {
+                                                let wake_fd = backend.wake_fd;
+                                                let win_size = window.size;
+                                                crate::android::backend::surface_transaction::present_buffer(
+                                                    &ahb_surface.surface_control, &ahb_target.ahb, fence_fd,
+                                                    ahb_target.width, ahb_target.height,
+                                                    win_size.w, win_size.h,
+                                                    (geo_offset.x as f64 * scale).round() as i32,
+                                                    (geo_offset.y as f64 * scale).round() as i32,
+                                                    &ahb_surface.frame_in_flight, wake_fd,
+                                                );
+                                                window.needs_redraw = false;
+                                                window.frame_count += 1;
+                                                window.last_render_method = "VK shm";
+                                                done = true;
+                                            }
+                                        }
+                                    }
+                                }
+                            } // shm_data
+                        } // else (needs_redraw)
+                    }
+                }
+            }
+            done
+        };
+
+        if vk_shm_rendered {
+            send_frames_surface_tree(&wl_surface, time);
+            continue;
+        }
+
+        // ── GLES fallback for shm windows (when VK renderer unavailable) ──
         // Render in a scoped block so borrows are released before submit
         {
             let Some(wm) = backend.window_manager.as_mut() else {
