@@ -77,6 +77,7 @@ fi
 LAUNCHER=./files/.proot_launcher_$SUFFIX.sh
 {
     echo "#!/bin/sh"
+    echo "set -o pipefail"
     echo "export PROOT_LOADER=$LIBDIR/libproot_loader.so"
     echo "export PROOT_TMP_DIR=./cache/proot"
     # optional binds: check existence on device before adding
@@ -87,7 +88,7 @@ LAUNCHER=./files/.proot_launcher_$SUFFIX.sh
         echo "[ -e $src ] && BIND_OPT=\"\$BIND_OPT --bind=$entry\""
     done
     # Start proot command
-    printf "exec %s \\\\\n" "$LIBDIR/libproot.so"
+    printf "{ %s \\\\\n" "$LIBDIR/libproot.so"
     printf "    -r %s \\\\\n" "$ROOTFS"
     printf "    -w %s \\\\\n" "$HOMEDIR"
     # proot_args from config
@@ -110,8 +111,9 @@ LAUNCHER=./files/.proot_launcher_$SUFFIX.sh
     if [ -n "$GPU_ENV" ]; then
         echo "$GPU_ENV" | while read -r e; do [ -n "$e" ] && printf "    %s \\\\\n" "$e"; done
     fi
-    # final command
-    printf "    %s\n" "$SHELL_CMD"
+    # final command + stderr filter (fd swap: stdout→fd3, stderr→pipe→sed, sed→stderr)
+    printf "    %s \\\\\n" "$SHELL_CMD"
+    echo "    2>&1 1>&3 | sed '/^proot warning: can.t sanitize binding/d' >&2 3>&- ; } 3>&1"
 } | adb shell run-as "$PKG" sh -c "'cat > $LAUNCHER'"
 
 # Run with -t for PTY allocation when interactive

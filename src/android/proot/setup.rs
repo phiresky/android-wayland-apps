@@ -1443,7 +1443,9 @@ pub fn setup_hybris_vulkan() {
     let files: &[(&str, &[u8])] = &[
         ("usr/lib/libhybris-common.so.1.0.0", include_bytes!("../../../libs/arm64-v8a-linux/libhybris-common.so.1.0.0")),
         ("usr/lib/libvulkan_hybris.so", include_bytes!("../../../libs/arm64-v8a-linux/libvulkan_hybris.so")),
-        ("usr/share/vulkan/icd.d/hybris_vulkan_icd.json", include_bytes!("../../../hybris-vulkan-icd/hybris_vulkan_icd.json")),
+        // NOTE: Do NOT install the ICD JSON manifest — it causes the Khronos loader to
+        // use our hybris ICD which crashes due to dual-loader dispatch table conflict.
+        // Zink/Turnip should use their own ICDs. The hybris ICD is for direct dlopen only.
         ("usr/lib/libhybris/linker/q.so", include_bytes!("../../../libs/arm64-v8a-linux/libhybris-linker/q.so")),
         ("usr/lib/libhybris/linker/o.so", include_bytes!("../../../libs/arm64-v8a-linux/libhybris-linker/o.so")),
         ("usr/lib/libhybris/linker/n.so", include_bytes!("../../../libs/arm64-v8a-linux/libhybris-linker/n.so")),
