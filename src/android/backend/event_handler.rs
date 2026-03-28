@@ -451,6 +451,7 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                         })
                 });
 
+                tracing::debug!("[vk-dmabuf] window_id={} dmabuf={}", window_id, dmabuf.is_some());
                 if let Some(dmabuf) = dmabuf {
                     let dmabuf_sz = dmabuf.size();
                     let buf_w = dmabuf_sz.w as u32;
@@ -729,10 +730,100 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                                 })
                             });
                             if let Some((shm_buf, buf_w, buf_h)) = shm_info {
-                                // Create AHB for pure-shm windows only. Wait for 2+
-                                // consecutive shm frames — Firefox starts shm then
-                                // switches to dmabuf, so don't create AHB prematurely.
-                                if window.ahb_surface.is_none() && window.frame_count > 0 {
+                                // Only create AHB if pixel data is CPU-readable (non-zero).
+                                // Firefox/Zink writes GPU-async — shm data reads as zeros.
+                                // Those windows stay on GLES fallback.
+                                // Sample multiple rows to check if data is CPU-readable.
+                                // Firefox/Zink GPU-async buffers read as all zeros.
+                                let data_readable = smithay::wayland::shm::with_buffer_contents(
+                                    &shm_buf, |ptr, _, data| {
+                                        let total = (data.stride * data.height) as usize;
+                                        let buf = unsafe { std::slice::from_raw_parts(
+                                            ptr.offset(data.offset as isize) as *const u8, total) };
+                                        // Check 4 points across the buffer
+                                        [0, total/4, total/2, total*3/4].iter().any(|&off| {
+                                            let end = (off + 16).min(total);
+                                            buf[off..end].iter().any(|&b| b != 0)
+                                        })
+                                    }
+                                ).unwrap_or(false);
+                                tracing::info!("[vk-shm] window_id={} data_readable={}", window_id, data_readable);
+
+                                // For GPU-backed shm pools (data_readable=false), import
+                                // the pool fd as a dmabuf via VK instead of CPU-reading.
+                                if !data_readable {
+                                    let pool_info = smithay::wayland::shm::shm_buffer_pool_fd(&shm_buf);
+                                    if let Some((pool_fd, buf_data)) = pool_info {
+                                        // Create AHB surface if needed
+                                        if window.ahb_surface.is_none() {
+                                            if let Some(nw) = window.native_window {
+                                                if let Some(sc) = crate::android::backend::surface_transaction::SurfaceControlHandle::from_window(
+                                                    nw, &format!("shm-gpu-{window_id}"))
+                                                {
+                                                    if let Ok(target) = vk.create_ahb_target(buf_data.width as u32, buf_data.height as u32) {
+                                                        crate::android::backend::surface_transaction::set_visible(&sc);
+                                                        // Don't destroy EGL yet — wait for successful VK import
+                                                        window.ahb_surface = Some(crate::android::window_manager::AhbWindowSurface {
+                                                            surface_control: sc,
+                                                            ahb_target: Some(target),
+                                                            frame_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                                                        });
+                                                        tracing::info!("[vk-shm-gpu] Created AHB for GPU-backed shm window_id={}", window_id);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        // Blit via VK dmabuf import (same as regular dmabuf path)
+                                        if let Some(ref mut ahb_surface) = window.ahb_surface {
+                                            // Resize if needed
+                                            let bw = buf_data.width as u32;
+                                            let bh = buf_data.height as u32;
+                                            if let Some(ref t) = ahb_surface.ahb_target {
+                                                if t.width != bw || t.height != bh {
+                                                    vk.destroy_ahb_target(t);
+                                                    ahb_surface.ahb_target = vk.create_ahb_target(bw, bh).ok();
+                                                }
+                                            }
+                                            if let Some(ref ahb_target) = ahb_surface.ahb_target {
+                                                let stride = buf_data.stride as u32;
+                                                let vk_fmt = ash::vk::Format::B8G8R8A8_UNORM;
+                                                match vk.get_or_import_dmabuf(pool_fd, bw, bh, stride, vk_fmt) {
+                                                    Ok(imported) => {
+                                                        match vk.blit_dmabuf_to_ahb(&imported, ahb_target) {
+                                                            Ok(fence_fd) => {
+                                                                let wake_fd = backend.wake_fd;
+                                                                let win_size = window.size;
+                                                                crate::android::backend::surface_transaction::present_buffer(
+                                                                    &ahb_surface.surface_control, &ahb_target.ahb, fence_fd,
+                                                                    ahb_target.width, ahb_target.height,
+                                                                    win_size.w, win_size.h,
+                                                                    (geo_offset.x as f64 * scale).round() as i32,
+                                                                    (geo_offset.y as f64 * scale).round() as i32,
+                                                                    &ahb_surface.frame_in_flight, wake_fd,
+                                                                );
+                                                                window.needs_redraw = false;
+                                                                window.frame_count += 1;
+                                                                window.last_render_method = "VK shm-gpu";
+                                                                done = true;
+                                                            }
+                                                            Err(e) => tracing::warn!("[vk-shm-gpu] blit: {e}"),
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        tracing::warn!("[vk-shm-gpu] import failed, reverting to GLES: {e}");
+                                                        // Destroy AHB surface so EGL is visible
+                                                        if let Some(ref ahb) = window.ahb_surface {
+                                                            if let Some(ref t) = ahb.ahb_target { vk.destroy_ahb_target(t); }
+                                                        }
+                                                        window.ahb_surface = None;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if window.ahb_surface.is_none() && data_readable {
                                     if let Some(nw) = window.native_window {
                                         let sc = crate::android::backend::surface_transaction::SurfaceControlHandle::from_window(
                                             nw, &format!("shm-{window_id}"));
