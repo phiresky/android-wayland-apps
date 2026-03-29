@@ -61,5 +61,5 @@ pub const LAUNCHER_IGNORE: &[&str] = &["avahi-discover", "bssh", "bvnc"];
 pub const LAUNCHER_EXTRA: &[(&str, &str, &str)] = &[
     ("EGL Gears", "eglgears_wayland", "@drawable/ic_eglgears"),
     ("Vulkan Cube", "vkcube", "@drawable/ic_vkcube"),
-    ("Factorio", "BOX64_DYNAREC_BIGBLOCK=2 BOX64_DYNAREC_STRONGMEM=0 BOX64_DYNAREC_FASTNAN=1 BOX64_DYNAREC_FASTROUND=1 BOX64_DYNAREC_SAFEFLAGS=0 BOX64_DYNAREC_CALLRET=1 MESA_LOADER_DRIVER_OVERRIDE=zink GALLIUM_DRIVER=zink box64 /home/alarm/factorio/bin/x64/factorio --graphics-quality=low", "factorio"),
+    ("Factorio", "BOX64_DYNAREC_BIGBLOCK=2 BOX64_DYNAREC_STRONGMEM=0 BOX64_DYNAREC_FASTNAN=1 BOX64_DYNAREC_FASTROUND=1 BOX64_DYNAREC_SAFEFLAGS=0 BOX64_DYNAREC_CALLRET=1 MESA_LOADER_DRIVER_OVERRIDE=zink GALLIUM_DRIVER=zink box64 /home/alarm/factorio/bin/x64/factorio --graphics-quality=low", "@drawable/ic_factorio"),
 ];

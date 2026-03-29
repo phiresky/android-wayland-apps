@@ -336,6 +336,12 @@ class LauncherActivity : Activity() {
             val svg = com.caverock.androidsvg.SVG.getFromInputStream(fis)
             val bmp = Bitmap.createBitmap(targetSize, targetSize, Bitmap.Config.ARGB_8888)
             val canvas = Canvas(bmp)
+            // If SVG has no viewBox, set one from original dimensions so content scales
+            val origW = svg.documentWidth
+            val origH = svg.documentHeight
+            if (svg.documentViewBox == null && origW > 0 && origH > 0) {
+                svg.setDocumentViewBox(0f, 0f, origW, origH)
+            }
             svg.documentWidth = targetSize.toFloat()
             svg.documentHeight = targetSize.toFloat()
             svg.renderToCanvas(canvas)
