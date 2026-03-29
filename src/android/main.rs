@@ -73,6 +73,10 @@ extern "system" fn Java_io_github_phiresky_wayland_1android_MainActivity_nativeI
     // Firefox may be installed after initial setup.
     setup::setup_firefox_config();
 
+    // Configure Electron/Chromium apps (no-sandbox, Wayland). Runs every startup
+    // because apps may be installed after initial setup.
+    setup::setup_electron_config();
+
     // Disable bwrap/flatpak-spawn — sandboxing can't work inside proot.
     setup::disable_bwrap();
     setup::disable_flatpak_spawn();

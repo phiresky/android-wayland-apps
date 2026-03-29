@@ -380,7 +380,7 @@ fi
 
 /// Configure Chromium-based apps to run without sandbox.
 /// Chromium's sandbox uses seccomp/namespaces that don't work in proot.
-fn setup_electron_config() {
+pub fn setup_electron_config() {
     let config_dir = Path::new(config::ARCH_FS_ROOT)
         .join("home")
         .join(config::USERNAME)
@@ -959,13 +959,7 @@ pub fn setup_flatpak_dbus() {
     let dbus_conf = fs_root.join("etc/dbus-1/proot-system.conf");
     let start_dbus = fs_root.join("usr/local/bin/start-dbus");
 
-    // Re-generate start-dbus if it doesn't use our custom session config
-    let needs_update = start_dbus.exists()
-        && fs::read_to_string(&start_dbus)
-            .map(|s| !s.contains("proot-session.conf"))
-            .unwrap_or(false);
-
-    if dbus_conf.exists() && start_dbus.exists() && !needs_update {
+    if dbus_conf.exists() && start_dbus.exists() {
         return;
     }
 
