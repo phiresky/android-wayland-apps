@@ -214,9 +214,8 @@ fn get_ahb_dmabuf_fd(
         return Err(AhbExportError::FdExtractionFailed);
     }
 
-    // The data array starts right after the struct fields.
-    let data_ptr = unsafe { (handle as *const i32).add(3) };
-    let dmabuf_fd_raw = unsafe { *data_ptr };
+    // Read the first fd from the flexible data[] array via the struct layout.
+    let dmabuf_fd_raw = unsafe { *native_handle.fd_ptr() };
 
     // Dup the fd so we own it independently of the AHB's lifetime.
     let duped = unsafe { libc::dup(dmabuf_fd_raw) };

@@ -70,6 +70,15 @@ where
     f(&mut env, ctx.activity.as_obj())
 }
 
+/// Extract a Rust `String` from a JNI `JString`, returning an empty string on failure.
+///
+/// This is the standard pattern used across JNI callbacks to safely convert
+/// Java strings without panicking. Equivalent to:
+/// `env.get_string(&s).map(|s| s.into()).unwrap_or_default()`
+pub fn get_string(env: &mut JNIEnv, s: &jni::objects::JString) -> String {
+    env.get_string(s).map(|s| s.into()).unwrap_or_default()
+}
+
 /// Load an app class by name using the Activity's ClassLoader.
 ///
 /// `env.find_class()` uses the system classloader which doesn't know about app classes,

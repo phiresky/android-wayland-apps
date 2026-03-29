@@ -5,6 +5,35 @@ use jni::objects::{JObject, JString, JValue};
 use jni::JNIEnv;
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
+
+/// Spawn a background thread that runs a command in proot, logs its output
+/// with `[prefix]`, and warns when it exits. An optional `delay` causes the
+/// thread to sleep before launching the process.
+fn start_background_process(
+    command: &str,
+    prefix: &str,
+    kill_on_exit: bool,
+    delay: Option<Duration>,
+) {
+    let command = command.to_string();
+    let prefix = prefix.to_string();
+    thread::spawn(move || {
+        if let Some(d) = delay {
+            thread::sleep(d);
+        }
+        tracing::info!("Starting {prefix} in proot...");
+        let log_prefix = prefix.clone();
+        let output = ArchProcess {
+            command,
+            user: Some(config::USERNAME.to_string()),
+            log: Some(Arc::new(move |line| tracing::info!("[{log_prefix}] {}", line))),
+            kill_on_exit,
+        }
+        .run();
+        tracing::warn!("{prefix} exited: {:?}", output.status);
+    });
+}
 
 /// Open the native Android launcher Activity.
 /// Called once after setup completes and the compositor is ready.
@@ -28,48 +57,33 @@ fn start_pipewire() {
     let _ = std::fs::remove_file(format!("{}-manager", pw_socket));
 
     // PipeWire daemon — runs as foreground (blocks the thread)
-    thread::spawn(|| {
-        tracing::info!("Starting PipeWire daemon in proot...");
-        let output = ArchProcess {
-            command: "PIPEWIRE_DEBUG=4 pipewire & sleep infinity".into(),
-            user: Some(config::USERNAME.to_string()),
-            log: Some(Arc::new(|line| tracing::info!("[pipewire] {}", line))),
-            kill_on_exit: false, // PipeWire daemonizes (forks); don't kill the child
-        }
-        .run();
-        tracing::warn!("PipeWire exited: {:?}", output.status);
-    });
+    // kill_on_exit=false because PipeWire daemonizes (forks)
+    start_background_process(
+        "PIPEWIRE_DEBUG=4 pipewire & sleep infinity",
+        "pipewire",
+        false,
+        None,
+    );
 
     // WirePlumber session manager — start after a short delay
-    thread::spawn(|| {
-        thread::sleep(std::time::Duration::from_secs(2));
-        tracing::info!("Starting WirePlumber in proot...");
-        let output = ArchProcess {
-            command: "wireplumber".into(),
-            user: Some(config::USERNAME.to_string()),
-            log: Some(Arc::new(|line| tracing::info!("[wireplumber] {}", line))),
-            kill_on_exit: false,
-        }
-        .run();
-        tracing::warn!("WirePlumber exited: {:?}", output.status);
-    });
+    start_background_process(
+        "wireplumber",
+        "wireplumber",
+        false,
+        Some(Duration::from_secs(2)),
+    );
 }
 
 /// Start D-Bus session bus and our standalone portal daemon inside proot.
 /// Replaces xdg-desktop-portal entirely (it needs /proc access proot can't provide).
 fn start_portal() {
-    thread::spawn(|| {
-        tracing::info!("Starting portal daemon in proot...");
-        let output = ArchProcess {
-            // Source start-dbus to ensure session bus is running, then start our portal.
-            command: ". /usr/local/bin/start-dbus; /usr/local/libexec/xdg-desktop-portal-android".into(),
-            user: Some(config::USERNAME.to_string()),
-            log: Some(Arc::new(|line| tracing::info!("[portal] {}", line))),
-            kill_on_exit: false,
-        }
-        .run();
-        tracing::warn!("Portal daemon exited: {:?}", output.status);
-    });
+    // Source start-dbus to ensure session bus is running, then start our portal.
+    start_background_process(
+        ". /usr/local/bin/start-dbus; /usr/local/libexec/xdg-desktop-portal-android",
+        "portal",
+        false,
+        None,
+    );
 }
 
 fn open_launcher_activity() -> Result<(), jni::errors::Error> {
@@ -152,15 +166,5 @@ extern "system" fn Java_io_github_phiresky_wayland_1android_LauncherActivity_nat
         }
     };
 
-    thread::spawn(move || {
-        tracing::info!("Launching app: {}", command);
-        let output = ArchProcess {
-            command,
-            user: Some(config::USERNAME.to_string()),
-            log: Some(Arc::new(|it| tracing::info!("{}", it))),
-            kill_on_exit: true,
-        }
-        .run();
-        tracing::info!("App exited: {:?}", output.status);
-    });
+    start_background_process(&command, "app", true, None);
 }

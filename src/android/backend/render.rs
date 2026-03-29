@@ -24,7 +24,7 @@ pub(crate) fn render_activity_windows(backend: &mut WaylandBackend) {
     // eglSwapBuffers waiting for a frame callback that never comes.
     if let Some(wm) = backend.window_manager.as_ref() {
         for (_, window) in &wm.windows {
-            if window.egl_surface.is_none() && window.ahb_surface.is_none() {
+            if window.render.egl_surface.is_none() && window.render.ahb_surface.is_none() {
                 send_frames_surface_tree(window.surface_kind.wl_surface(), time);
             }
         }
@@ -48,7 +48,7 @@ pub(crate) fn render_activity_windows(backend: &mut WaylandBackend) {
         .map(|wm| {
             wm.windows
                 .iter()
-                .filter(|(_, w)| (w.egl_surface.is_some() || w.ahb_surface.is_some() || w.native_window.is_some()) && w.size.w > 0 && w.size.h > 0)
+                .filter(|(_, w)| (w.render.egl_surface.is_some() || w.render.ahb_surface.is_some() || w.render.native_window.is_some()) && w.size.w > 0 && w.size.h > 0)
                 .map(|(id, _)| *id)
                 .collect()
         })
@@ -117,8 +117,8 @@ pub(crate) fn render_activity_windows(backend: &mut WaylandBackend) {
             // Set render mode from global toggle on first commit
             if let Some(wm) = backend.window_manager.as_mut() {
                 if let Some(window) = wm.windows.get_mut(&window_id) {
-                    if window.render_mode.is_none() {
-                        window.render_mode = Some(if crate::android::window_manager::use_vulkan_rendering() {
+                    if window.render.render_mode.is_none() {
+                        window.render.render_mode = Some(if crate::android::window_manager::use_vulkan_rendering() {
                             RenderMode::Vulkan
                         } else {
                             RenderMode::Gles
@@ -129,7 +129,7 @@ pub(crate) fn render_activity_windows(backend: &mut WaylandBackend) {
 
             let render_mode = backend.window_manager.as_ref()
                 .and_then(|wm| wm.windows.get(&window_id))
-                .and_then(|w| w.render_mode)
+                .and_then(|w| w.render.render_mode)
                 .unwrap_or(RenderMode::Vulkan);
 
             let mut done = false;
@@ -179,7 +179,7 @@ pub(crate) fn render_activity_windows(backend: &mut WaylandBackend) {
                     let gbm_lookup = {
                         let size_stable = backend.window_manager.as_ref()
                             .and_then(|wm| wm.windows.get(&window_id))
-                            .and_then(|w| w.last_buffer_size)
+                            .and_then(|w| w.metrics.last_buffer_size)
                             .map(|(lw, lh)| lw == buf_w && lh == buf_h)
                             .unwrap_or(false);
 
@@ -197,22 +197,22 @@ pub(crate) fn render_activity_windows(backend: &mut WaylandBackend) {
                         // Ensure ASurfaceControl exists for this window.
                         let has_sc = backend.window_manager.as_ref()
                             .and_then(|wm| wm.windows.get(&window_id))
-                            .map(|w| w.ahb_surface.is_some())
+                            .map(|w| w.render.ahb_surface.is_some())
                             .unwrap_or(false);
                         if !has_sc {
                             if let Some(wm) = backend.window_manager.as_mut() {
                                 if let Some(window) = wm.windows.get_mut(&window_id) {
-                                    if let Some(native_window) = window.native_window {
-                                        if window.egl_surface.is_some() {
+                                    if let Some(native_window) = window.render.native_window {
+                                        if window.render.egl_surface.is_some() {
                                             tracing::info!("Destroying EGL for zero-copy AHB window_id={}", window_id);
-                                            window.egl_surface = None;
+                                            window.render.egl_surface = None;
                                         }
                                         let sc = crate::android::backend::surface_transaction::SurfaceControlHandle::from_window(
                                             native_window, &format!("wl-zc-{window_id}"));
                                         if let Some(sc) = sc {
                                             crate::android::backend::surface_transaction::set_visible(&sc);
                                             // Zero-copy: no AhbTarget needed (no blit).
-                                            window.ahb_surface = Some(crate::android::window_manager::AhbWindowSurface {
+                                            window.render.ahb_surface = Some(crate::android::window_manager::AhbWindowSurface {
                                                 surface_control: sc,
                                                 ahb_target: None,
                                                 frame_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -228,7 +228,7 @@ pub(crate) fn render_activity_windows(backend: &mut WaylandBackend) {
                         // Present the compositor-allocated AHB directly.
                         if let Some(ref wm) = backend.window_manager {
                             if let Some(window) = wm.windows.get(&window_id) {
-                                if let Some(ref ahb_surface) = window.ahb_surface {
+                                if let Some(ref ahb_surface) = window.render.ahb_surface {
                                     if !window.needs_redraw {
                                         done = true;
                                     } else if ahb_surface.frame_in_flight.load(std::sync::atomic::Ordering::Acquire) {
@@ -256,9 +256,9 @@ pub(crate) fn render_activity_windows(backend: &mut WaylandBackend) {
                                         done = true;
                                         if let Some(wm) = backend.window_manager.as_mut() {
                                             if let Some(w) = wm.windows.get_mut(&window_id) {
-                                                w.last_render_method = "AHB zero-copy";
-                                                w.last_buffer_size = Some((buf_w, buf_h));
-                                                w.last_frame_us = frame_us;
+                                                w.metrics.last_render_method = "AHB zero-copy";
+                                                w.metrics.last_buffer_size = Some((buf_w, buf_h));
+                                                w.metrics.last_frame_us = frame_us;
                                                 w.needs_redraw = false;
                                             }
                                         }
@@ -273,16 +273,16 @@ pub(crate) fn render_activity_windows(backend: &mut WaylandBackend) {
                     if !done {
                         let needs_ahb = backend.window_manager.as_ref()
                             .and_then(|wm| wm.windows.get(&window_id))
-                            .map(|w| w.ahb_surface.is_none() && w.native_window.is_some())
+                            .map(|w| w.render.ahb_surface.is_none() && w.render.native_window.is_some())
                             .unwrap_or(false);
 
                         if needs_ahb {
                             if let Some(wm) = backend.window_manager.as_mut() {
                                 if let Some(window) = wm.windows.get_mut(&window_id) {
-                                    if let Some(native_window) = window.native_window {
-                                        if window.egl_surface.is_some() {
+                                    if let Some(native_window) = window.render.native_window {
+                                        if window.render.egl_surface.is_some() {
                                             tracing::info!("Destroying EGL for AHB takeover window_id={}", window_id);
-                                            window.egl_surface = None;
+                                            window.render.egl_surface = None;
                                         }
                                         let sc = crate::android::backend::surface_transaction::SurfaceControlHandle::from_window(
                                             native_window, &format!("wl-{window_id}"));
@@ -290,7 +290,7 @@ pub(crate) fn render_activity_windows(backend: &mut WaylandBackend) {
                                             match vk.create_ahb_target(buf_w, buf_h) {
                                                 Ok(ahb_target) => {
                                                     crate::android::backend::surface_transaction::set_visible(&sc);
-                                                    window.ahb_surface = Some(crate::android::window_manager::AhbWindowSurface {
+                                                    window.render.ahb_surface = Some(crate::android::window_manager::AhbWindowSurface {
                                                         surface_control: sc,
                                                         ahb_target: Some(ahb_target),
                                                         frame_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -309,7 +309,7 @@ pub(crate) fn render_activity_windows(backend: &mut WaylandBackend) {
                         // Resize AHB if buffer dimensions changed
                         let needs_resize = backend.window_manager.as_ref()
                             .and_then(|wm| wm.windows.get(&window_id))
-                            .and_then(|w| w.ahb_surface.as_ref())
+                            .and_then(|w| w.render.ahb_surface.as_ref())
                             .and_then(|ahb| ahb.ahb_target.as_ref())
                             .map(|target| target.width != buf_w || target.height != buf_h)
                             .unwrap_or(false);
@@ -317,16 +317,16 @@ pub(crate) fn render_activity_windows(backend: &mut WaylandBackend) {
                         if needs_resize {
                             if let Some(wm) = backend.window_manager.as_mut() {
                                 if let Some(window) = wm.windows.get_mut(&window_id) {
-                                    if let Some(ref old) = window.ahb_surface {
+                                    if let Some(ref old) = window.render.ahb_surface {
                                         if let Some(ref target) = old.ahb_target {
                                             vk.destroy_ahb_target(target);
                                         }
                                     }
-                                    let sc = window.ahb_surface.take().map(|s| s.surface_control);
+                                    let sc = window.render.ahb_surface.take().map(|s| s.surface_control);
                                     if let Some(sc) = sc {
                                         match vk.create_ahb_target(buf_w, buf_h) {
                                             Ok(ahb_target) => {
-                                                window.ahb_surface = Some(crate::android::window_manager::AhbWindowSurface {
+                                                window.render.ahb_surface = Some(crate::android::window_manager::AhbWindowSurface {
                                                     surface_control: sc, ahb_target: Some(ahb_target),
                                                     frame_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                                                 });
@@ -343,7 +343,7 @@ pub(crate) fn render_activity_windows(backend: &mut WaylandBackend) {
                         // Blit to AHB + present via ASurfaceTransaction
                         if let Some(ref wm) = backend.window_manager {
                             if let Some(window) = wm.windows.get(&window_id) {
-                                if let Some(ref ahb_surface) = window.ahb_surface {
+                                if let Some(ref ahb_surface) = window.render.ahb_surface {
                                     if let Some(ref ahb_target) = ahb_surface.ahb_target {
                                     if !window.needs_redraw {
                                         done = true; // no new frame, skip
@@ -384,9 +384,9 @@ pub(crate) fn render_activity_windows(backend: &mut WaylandBackend) {
                                                             done = true;
                                                             if let Some(wm) = backend.window_manager.as_mut() {
                                                                 if let Some(w) = wm.windows.get_mut(&window_id) {
-                                                                    w.last_render_method = "AHB txn";
-                                                                    w.last_buffer_size = Some((sz.w as u32, sz.h as u32));
-                                                                    w.last_frame_us = frame_us;
+                                                                    w.metrics.last_render_method = "AHB txn";
+                                                                    w.metrics.last_buffer_size = Some((sz.w as u32, sz.h as u32));
+                                                                    w.metrics.last_frame_us = frame_us;
                                                                     w.needs_redraw = false;
                                                                 }
                                                             }
@@ -435,14 +435,14 @@ pub(crate) fn render_activity_windows(backend: &mut WaylandBackend) {
             // Lazy EGL surface creation for shm clients. Only create when:
             // 1. No AHB surface (client doesn't use dmabuf)
             // 2. Window has committed (needs_redraw) — so we know it's wl_shm
-            if window.egl_surface.is_none() && window.ahb_surface.is_none()
-                && window.native_window.is_some() && window.needs_redraw {
+            if window.render.egl_surface.is_none() && window.render.ahb_surface.is_none()
+                && window.render.native_window.is_some() && window.needs_redraw {
                 if let Some(handle) = wm.get_native_handle(window_id) {
                     if let Some(surface) = backend.renderer.as_ref()
                         .and_then(|r| r.create_surface_for_native_window(handle).ok()) {
                         tracing::info!("Lazy-created EGL surface for window_id={}", window_id);
                         if let Some(w) = wm.windows.get_mut(&window_id) {
-                            w.egl_surface = Some(surface);
+                            w.render.egl_surface = Some(surface);
                         }
                     }
                 }
@@ -450,7 +450,7 @@ pub(crate) fn render_activity_windows(backend: &mut WaylandBackend) {
             let Some(window) = wm.windows.get_mut(&window_id) else {
                 continue;
             };
-            let Some(egl_surface) = window.egl_surface.as_mut() else {
+            let Some(egl_surface) = window.render.egl_surface.as_mut() else {
                 continue;
             };
             let Some(cr) = backend.renderer.as_mut() else {
@@ -526,7 +526,7 @@ pub(crate) fn render_activity_windows(backend: &mut WaylandBackend) {
             let Some(window) = wm.windows.get(&window_id) else {
                 continue;
             };
-            let Some(egl_surface) = window.egl_surface.as_ref() else {
+            let Some(egl_surface) = window.render.egl_surface.as_ref() else {
                 continue;
             };
             let Some(cr) = backend.renderer.as_ref() else {
@@ -548,9 +548,9 @@ pub(crate) fn render_activity_windows(backend: &mut WaylandBackend) {
         if let Some(wm) = backend.window_manager.as_mut()
             && let Some(window) = wm.windows.get_mut(&window_id)
         {
-            window.frame_count += 1;
-            if window.last_render_method != "VK dmabuf" {
-                window.last_render_method = "GLES shm";
+            window.metrics.frame_count += 1;
+            if window.metrics.last_render_method != "VK dmabuf" {
+                window.metrics.last_render_method = "GLES shm";
             }
         }
 

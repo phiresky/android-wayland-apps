@@ -150,7 +150,7 @@ fn process_window_events(backend: &mut WaylandBackend) {
                 // Store the native window pointer
                 if let Some(wm) = backend.window_manager.as_mut()
                     && let Some(window) = wm.windows.get_mut(&window_id) {
-                        window.native_window = Some(native_window);
+                        window.render.native_window = Some(native_window);
                     }
                 // EGL surface is created lazily on first GLES render (not here).
             }
@@ -166,7 +166,7 @@ fn process_window_events(backend: &mut WaylandBackend) {
                         // Only set needs_redraw for non-AHB windows.
                         // For AHB/dmabuf, needs_redraw is set by client commits only —
                         // re-blitting the old committed buffer shows stale content.
-                        if window.ahb_surface.is_none() {
+                        if window.render.ahb_surface.is_none() {
                             window.needs_redraw = true;
                         }
                         let logical_w = (width as f64 / scale).round() as i32;
@@ -219,16 +219,16 @@ fn process_window_events(backend: &mut WaylandBackend) {
             WindowEvent::SurfaceDestroyed { window_id } => {
                 if let Some(wm) = backend.window_manager.as_mut()
                     && let Some(window) = wm.windows.get_mut(&window_id) {
-                        if let Some(ref ahb) = window.ahb_surface {
+                        if let Some(ref ahb) = window.render.ahb_surface {
                             if let Some(ref vk) = backend.vk_renderer {
                                 if let Some(ref target) = ahb.ahb_target {
                                     vk.destroy_ahb_target(target);
                                 }
                             }
                         }
-                        window.ahb_surface = None;
-                        window.egl_surface = None;
-                        window.native_window = None;
+                        window.render.ahb_surface = None;
+                        window.render.egl_surface = None;
+                        window.render.native_window = None;
                         tracing::info!("Surface destroyed for window_id={}", window_id);
                     }
             }
@@ -241,10 +241,10 @@ fn process_window_events(backend: &mut WaylandBackend) {
                         window.surface_kind.send_close();
                         // If the Activity was already destroyed (DeX X bypasses finish()),
                         // mark for delayed relaunch — the client may refuse to close.
-                        if window.native_window.is_none() {
+                        if window.render.native_window.is_none() {
                             tracing::info!("Window {} Activity gone, will relaunch if client refuses close", window_id);
-                            window.close_pending_since = Some(Instant::now());
-                            window.activity_launched = false;
+                            window.lifecycle.close_pending_since = Some(Instant::now());
+                            window.lifecycle.activity_launched = false;
                         }
                     }
             }
@@ -347,24 +347,24 @@ fn update_status_overlay(backend: &mut WaylandBackend) {
                 (title, app_id, buf_size, has_frac)
             });
             let fps = if elapsed_secs > 0.0 {
-                window.frame_count as f64 / elapsed_secs
+                window.metrics.frame_count as f64 / elapsed_secs
             } else {
                 0.0
             };
-            window.frame_count = 0;
+            window.metrics.frame_count = 0;
             let display_name = if !title.is_empty() { &title } else if !app_id.is_empty() { &app_id } else { "(untitled)" };
             let phys = format!("{}x{}", window.size.w, window.size.h);
             let logical_w = (window.size.w as f64 / scale).round() as i32;
             let logical_h = (window.size.h as f64 / scale).round() as i32;
             let buf_str = buf_size.map(|s| format!("{}x{}", s.w, s.h)).unwrap_or_else(|| "?".into());
             let pref_str = window.preferred_size.map(|p| format!("{}x{}", p.w, p.h)).unwrap_or_else(|| "-".into());
-            let surface_type = if window.ahb_surface.is_some() { "AHB" } else if window.egl_surface.is_some() { "EGL" } else { "-" };
+            let surface_type = if window.render.ahb_surface.is_some() { "AHB" } else if window.render.egl_surface.is_some() { "EGL" } else { "-" };
             let frac = if has_frac_scale { "frac" } else { "1x" };
             info.push_str(&format!(
                 "  [{}] {} | {}  phys={}  log={}x{}  buf={}  pref={}  {} {} {:.0}fps  {}us\n",
-                id, display_name, window.last_render_method,
+                id, display_name, window.metrics.last_render_method,
                 phys, logical_w, logical_h, buf_str, pref_str,
-                surface_type, frac, fps, window.last_frame_us,
+                surface_type, frac, fps, window.metrics.last_frame_us,
             ));
         }
     }
@@ -425,10 +425,10 @@ fn launch_pending_activities(backend: &mut WaylandBackend) {
         backend.window_manager.as_ref()
         .map(|wm| {
             wm.windows.iter()
-                .filter(|(_, w)| !w.activity_launched)
+                .filter(|(_, w)| !w.lifecycle.activity_launched)
                 // Don't relaunch while a close request is pending — give the
                 // client time to process it. Relaunch after 500ms (client refused).
-                .filter(|(_, w)| w.close_pending_since.map_or(true,
+                .filter(|(_, w)| w.lifecycle.close_pending_since.map_or(true,
                     |t| t.elapsed() > std::time::Duration::from_millis(500)))
                 .filter_map(|(&id, w)| {
                     // Read the client's committed geometry (logical, needs scaling)
@@ -465,11 +465,11 @@ fn launch_pending_activities(backend: &mut WaylandBackend) {
                     let bounds = bounds.filter(|&(w, h)| w > 0 && h > 0);
 
                     tracing::info!("launch_pending: window_id={id} geo_size={geo_size:?} bounds={bounds:?} elapsed={}ms",
-                        w.created_time.elapsed().as_millis());
+                        w.lifecycle.created_time.elapsed().as_millis());
                     if bounds.is_some() {
                         // Client has committed with geometry — launch with bounds.
                         Some((id, bounds, geo_size))
-                    } else if w.created_time.elapsed() > std::time::Duration::from_millis(500) {
+                    } else if w.lifecycle.created_time.elapsed() > std::time::Duration::from_millis(500) {
                         // Timeout — launch without bounds (full-size fallback).
                         Some((id, None, None))
                     } else {

@@ -6,13 +6,14 @@
 //! launching a FileChooserActivity, and returns the result back over the socket.
 
 use crate::android::utils::jni_context;
+use crate::android::utils::socket::create_unix_listener;
 use crate::android::window_manager::{send_event, WindowEvent};
 use crate::core::config;
 
 use jni::objects::JValue;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::mpsc;
 use std::sync::Mutex;
@@ -66,23 +67,8 @@ fn run_listener() -> std::io::Result<()> {
     }
 
     let socket_path = format!("{}/tmp/.portal-bridge", config::ARCH_FS_ROOT);
-    // Remove stale socket from previous run.
-    let _ = std::fs::remove_file(&socket_path);
-
-    // Ensure parent dir exists.
-    if let Some(parent) = Path::new(&socket_path).parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let listener = UnixListener::bind(&socket_path)?;
+    let listener = create_unix_listener(Path::new(&socket_path))?;
     tracing::info!("Portal bridge listening on {socket_path}");
-
-    // Make socket world-writable so proot user can connect.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o777));
-    }
 
     for stream in listener.incoming() {
         match stream {
@@ -361,14 +347,8 @@ extern "system" fn Java_io_github_phiresky_wayland_1android_FileChooserActivity_
     response_code: i32,
     paths: jni::objects::JString,
 ) {
-    let request_id: String = env
-        .get_string(&request_id)
-        .map(|s| s.into())
-        .unwrap_or_default();
-    let paths_str: String = env
-        .get_string(&paths)
-        .map(|s| s.into())
-        .unwrap_or_default();
+    let request_id = crate::android::utils::jni_context::get_string(&mut env, &request_id);
+    let paths_str = crate::android::utils::jni_context::get_string(&mut env, &paths);
 
     let uris: Vec<String> = if paths_str.is_empty() {
         vec![]

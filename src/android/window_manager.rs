@@ -73,36 +73,58 @@ impl SurfaceKind {
 pub struct WindowState {
     pub window_id: u32,
     pub surface_kind: SurfaceKind,
-    pub native_window: Option<*mut ANativeWindow>,
-    pub egl_surface: Option<EGLSurface>,
     pub size: Size<i32, Physical>,
     pub needs_redraw: bool,
-    /// Frames rendered since last FPS sample.
-    pub frame_count: u32,
+    /// The client's preferred logical size from its initial geometry commit.
+    /// DeX enforces a minimum window height larger than small dialogs need,
+    /// so we cap the Wayland configure to this size and center the content.
+    pub preferred_size: Option<Size<i32, Logical>>,
+    /// Android surface handles and rendering backend state.
+    pub render: RenderSurfaces,
+    /// Activity lifecycle tracking.
+    pub lifecycle: WindowLifecycle,
+    /// Frame performance and debug metrics.
+    pub metrics: FrameMetrics,
+}
+
+/// Android surface handles and rendering backend state for a window.
+pub struct RenderSurfaces {
+    pub native_window: Option<*mut ANativeWindow>,
+    pub egl_surface: Option<EGLSurface>,
+    /// AHB + ASurfaceTransaction path for dmabuf compositing.
+    pub ahb_surface: Option<AhbWindowSurface>,
+    /// Render mode for this window's client, detected from client env vars.
+    /// `None` means not yet checked.
+    pub render_mode: Option<RenderMode>,
+    /// Compositor-allocated AHB for this window (server-side allocation path).
+    /// When present, the committed dmabuf can be presented directly via
+    /// ASurfaceTransaction without any GPU blit.
+    pub server_ahb: Option<std::sync::Arc<crate::android::backend::surface_transaction::HardwareBuffer>>,
+}
+
+/// Activity lifecycle tracking for a window.
+pub struct WindowLifecycle {
     /// Whether the Android Activity has been launched for this window.
     /// We delay launch until the client commits so we can use setLaunchBounds
     /// to size the DeX freeform window correctly.
     pub activity_launched: bool,
     /// When this window was created. Used for fallback launch timeout.
     pub created_time: Instant,
-    /// The client's preferred logical size from its initial geometry commit.
-    /// DeX enforces a minimum window height larger than small dialogs need,
-    /// so we cap the Wayland configure to this size and center the content.
-    pub preferred_size: Option<Size<i32, Logical>>,
-    /// AHB + ASurfaceTransaction path for dmabuf compositing.
-    pub ahb_surface: Option<AhbWindowSurface>,
+    /// When a close was requested but the Activity was already destroyed.
+    /// Used to delay relaunching until the client has had time to respond.
+    pub close_pending_since: Option<Instant>,
+}
+
+/// Frame performance and debug metrics for a window.
+pub struct FrameMetrics {
+    /// Frames rendered since last FPS sample.
+    pub frame_count: u32,
     /// Last render method used for this window (for debug overlay).
     pub last_render_method: &'static str,
     /// Last frame's commit-to-present time in microseconds (for perf comparison).
     pub last_frame_us: u64,
     /// Last buffer size committed by the client.
     pub last_buffer_size: Option<(u32, u32)>,
-    /// Render mode for this window's client, detected from client env vars.
-    /// `None` means not yet checked.
-    pub render_mode: Option<RenderMode>,
-    /// When a close was requested but the Activity was already destroyed.
-    /// Used to delay relaunching until the client has had time to respond.
-    pub close_pending_since: Option<Instant>,
     /// VK shm-gpu import failed for this window — don't retry every frame.
     /// Set when vkAllocateMemory(import) fails for the shm pool fd.
     pub vk_shm_gpu_failed: bool,
@@ -110,10 +132,6 @@ pub struct WindowState {
     /// Used to delay GLES fallback — CPU clients (gedit) become readable
     /// after 1-2 frames, GPU clients (Firefox/Zink) stay at zero forever.
     pub shm_zero_frames: u32,
-    /// Compositor-allocated AHB for this window (server-side allocation path).
-    /// When present, the committed dmabuf can be presented directly via
-    /// ASurfaceTransaction without any GPU blit.
-    pub server_ahb: Option<std::sync::Arc<crate::android::backend::surface_transaction::HardwareBuffer>>,
 }
 
 /// Per-window ASurfaceTransaction state.
@@ -241,8 +259,13 @@ pub extern "system" fn Java_io_github_phiresky_wayland_1android_DebugActivity_na
     _class: JObject,
 ) -> jni::sys::jstring {
     let log = crate::android::utils::android_tracing::get_debug_log();
-    let output = env.new_string(&log).unwrap_or_else(|_| env.new_string("").unwrap_or_else(|e| panic!("JNI new_string failed: {e}")));
-    output.into_raw()
+    match env.new_string(&log).or_else(|_| env.new_string("")) {
+        Ok(s) => s.into_raw(),
+        Err(e) => {
+            tracing::error!("JNI new_string failed: {e}");
+            std::ptr::null_mut()
+        }
+    }
 }
 
 /// Manages the mapping between XDG toplevels and Android Activities.
@@ -275,23 +298,29 @@ impl WindowManager {
         self.windows.insert(window_id, WindowState {
             window_id,
             surface_kind,
-            native_window: None,
-            egl_surface: None,
             size: (0, 0).into(),
             needs_redraw: true,
-            frame_count: 0,
-            activity_launched: false,
-            created_time: Instant::now(),
             preferred_size: None,
-            ahb_surface: None,
-            last_render_method: "none",
-            last_frame_us: 0,
-            last_buffer_size: None,
-            render_mode: None,
-            close_pending_since: None,
-            vk_shm_gpu_failed: false,
-            shm_zero_frames: 0,
-            server_ahb: None,
+            render: RenderSurfaces {
+                native_window: None,
+                egl_surface: None,
+                ahb_surface: None,
+                render_mode: None,
+                server_ahb: None,
+            },
+            lifecycle: WindowLifecycle {
+                activity_launched: false,
+                created_time: Instant::now(),
+                close_pending_since: None,
+            },
+            metrics: FrameMetrics {
+                frame_count: 0,
+                last_render_method: "none",
+                last_frame_us: 0,
+                last_buffer_size: None,
+                vk_shm_gpu_failed: false,
+                shm_zero_frames: 0,
+            },
         });
 
         window_id
@@ -301,7 +330,7 @@ impl WindowManager {
     /// If bounds are provided (physical pixels), uses setLaunchBounds for DeX freeform sizing.
     pub fn launch_activity(&mut self, window_id: u32, bounds: Option<(i32, i32)>) {
         if let Some(window) = self.windows.get_mut(&window_id) {
-            window.activity_launched = true;
+            window.lifecycle.activity_launched = true;
         }
         if let Err(e) = Self::launch_activity_inner(window_id, bounds) {
             tracing::error!("Failed to launch Activity for window_id={}: {}", window_id, e);
@@ -408,7 +437,7 @@ impl WindowManager {
     /// Remove a window and clean up its resources.
     pub fn remove_window(&mut self, window_id: u32) {
         if let Some(state) = self.windows.remove(&window_id) {
-            if let Some(native_window) = state.native_window {
+            if let Some(native_window) = state.render.native_window {
                 unsafe { ndk_sys::ANativeWindow_release(native_window) };
             }
             tracing::info!("Removed window_id={}", window_id);
@@ -418,7 +447,7 @@ impl WindowManager {
     /// Get the ANativeWindow handle for creating an EGL surface.
     pub fn get_native_handle(&self, window_id: u32) -> Option<AndroidNdkWindowHandle> {
         self.windows.get(&window_id).and_then(|w| {
-            w.native_window.and_then(|ptr| {
+            w.render.native_window.and_then(|ptr| {
                 NonNull::new(ptr as *mut c_void).map(AndroidNdkWindowHandle::new)
             })
         })
@@ -576,9 +605,7 @@ extern "system" fn Java_io_github_phiresky_wayland_1android_WaylandWindowActivit
     delete_before: i32,
     delete_after: i32,
 ) {
-    let text: String = env.get_string(&text)
-        .map(|s| s.into())
-        .unwrap_or_default();
+    let text = crate::android::utils::jni_context::get_string(&mut env, &text);
     let event = match ime_type {
         0 => WindowEvent::ImeComposing { window_id: window_id as u32, text },
         1 => WindowEvent::ImeCommit { window_id: window_id as u32, text },

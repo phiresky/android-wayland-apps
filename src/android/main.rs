@@ -1,6 +1,51 @@
+// ==========================================================================
+// JNI Entry Point Index
+// ==========================================================================
+//
+// All `#[unsafe(no_mangle)]` JNI exports in this crate, grouped by Java class.
+// Each entry lists the Rust function name and its source file.
+//
+// ## JNI_OnLoad
+//   JNI_OnLoad                          — src/android/main.rs
+//       Called by System.loadLibrary; caches the JavaVM pointer.
+//
+// ## MainActivity (src/android/main.rs, src/android/window_manager.rs)
+//   nativeInit                           — src/android/main.rs
+//       Compositor init, rootfs setup, spawns compositor thread.
+//   nativeSetPipewireEnabled             — src/android/window_manager.rs
+//       Restores saved PipeWire preference on startup.
+//
+// ## WaylandWindowActivity (src/android/window_manager.rs)
+//   nativeSurfaceCreated                 — Acquires ANativeWindow from Surface.
+//   nativeSurfaceChanged                 — Handles surface resize.
+//   nativeSurfaceDestroyed               — Releases native window.
+//   nativeWindowClosed                   — Activity destroyed / finishing.
+//   nativeRequestClose                   — User requested close (back / DeX X).
+//   nativeOnTouchEvent                   — Touch input forwarding.
+//   nativeOnKeyEvent                     — Key input forwarding.
+//   nativeOnImeText                      — IME compose/commit/delete/recompose.
+//   nativeRightClick                     — Right-click (long press / mouse).
+//
+// ## DebugActivity (src/android/window_manager.rs)
+//   nativeSetVulkanRendering             — Toggle Vulkan vs GLES render mode.
+//   nativeGetVulkanRendering             — Query current render mode.
+//   nativeSetZeroCopyEnabled             — Toggle zero-copy compositing.
+//   nativeGetZeroCopyEnabled             — Query zero-copy state.
+//   nativeSetPipewireEnabled             — Toggle PipeWire from debug UI.
+//   nativeGetPipewireEnabled             — Query PipeWire state.
+//   nativeGetDebugLog                    — Retrieve debug log buffer.
+//
+// ## FileChooserActivity (src/android/portal.rs)
+//   nativeFileChooserResult              — XDG Desktop Portal file chooser callback.
+//
+// ## LauncherActivity (src/android/proot/launch.rs)
+//   nativeLaunchApp                      — Launch a Linux app from the launcher UI.
+//
+// ==========================================================================
+
 use crate::android::{
     app::run_compositor_loop,
-    proot::setup,
+    proot::{app_compat, services, setup},
     utils::{application_context::ApplicationContext, jni_context},
 };
 use crate::core::config;
@@ -71,24 +116,24 @@ extern "system" fn Java_io_github_phiresky_wayland_1android_MainActivity_nativeI
 
     // Configure Firefox for proot (sandbox disable). Runs every startup because
     // Firefox may be installed after initial setup.
-    setup::setup_firefox_config();
+    app_compat::setup_firefox_config();
 
     // Configure Electron/Chromium apps (no-sandbox, Wayland). Runs every startup
     // because apps may be installed after initial setup.
-    setup::setup_electron_config();
+    app_compat::setup_electron_config();
 
     // Disable bwrap/flatpak-spawn — sandboxing can't work inside proot.
-    setup::disable_bwrap();
-    setup::disable_flatpak_spawn();
+    app_compat::disable_bwrap();
+    app_compat::disable_flatpak_spawn();
 
     // Ensure D-Bus and portal configs are up to date (may need regeneration
     // after code changes, even though rootfs already exists).
-    setup::setup_flatpak_dbus();
-    setup::setup_portal();
+    services::setup_flatpak_dbus();
+    services::setup_portal();
 
     // Build the libhybris Vulkan ICD if not already installed.
     // Runs in foreground since first build takes a few minutes.
-    setup::setup_hybris_vulkan();
+    services::setup_hybris_vulkan();
 
     // Check if rootfs is present AND dependencies are installed.
     let needs_setup = !setup::is_setup_complete();

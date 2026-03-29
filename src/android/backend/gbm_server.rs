@@ -8,6 +8,8 @@
 //! - Server sends `AllocResponse` (32 bytes) + dmabuf fd via SCM_RIGHTS
 //! - Client uses the fd to render via Turnip, then commits via Wayland
 
+use crate::android::utils::socket::create_unix_listener;
+
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
@@ -58,9 +60,8 @@ pub struct GbmServerState {
 /// Returns the shared state (for the compositor to query tracked buffers).
 pub fn start_server(rootfs: &str) -> Arc<Mutex<GbmServerState>> {
     let socket_path = PathBuf::from(format!("{rootfs}/tmp/gbm-alloc-0"));
-    let _ = std::fs::remove_file(&socket_path);
 
-    let listener = match UnixListener::bind(&socket_path) {
+    let listener = match create_unix_listener(&socket_path) {
         Ok(l) => l,
         Err(e) => {
             tracing::error!("[gbm-server] Failed to bind {}: {e}", socket_path.display());
@@ -71,10 +72,6 @@ pub fn start_server(rootfs: &str) -> Arc<Mutex<GbmServerState>> {
             }));
         }
     };
-
-    // Make socket accessible from proot (world-writable)
-    let _ = std::fs::set_permissions(&socket_path,
-        std::os::unix::fs::PermissionsExt::from_mode(0o777));
 
     tracing::info!("[gbm-server] Listening at {}", socket_path.display());
 
@@ -91,8 +88,6 @@ pub fn start_server(rootfs: &str) -> Arc<Mutex<GbmServerState>> {
 
     state
 }
-
-use std::os::unix::fs::PermissionsExt;
 
 fn server_loop(listener: UnixListener, state: Arc<Mutex<GbmServerState>>) {
     for stream in listener.incoming() {
