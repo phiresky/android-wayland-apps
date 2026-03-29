@@ -103,6 +103,9 @@ pub struct WindowState {
     /// When a close was requested but the Activity was already destroyed.
     /// Used to delay relaunching until the client has had time to respond.
     pub close_pending_since: Option<Instant>,
+    /// VK shm-gpu import failed for this window — don't retry every frame.
+    /// Set when vkAllocateMemory(import) fails for the shm pool fd.
+    pub vk_shm_gpu_failed: bool,
     /// Compositor-allocated AHB for this window (server-side allocation path).
     /// When present, the committed dmabuf can be presented directly via
     /// ASurfaceTransaction without any GPU blit.
@@ -282,6 +285,7 @@ impl WindowManager {
             last_buffer_size: None,
             render_mode: None,
             close_pending_since: None,
+            vk_shm_gpu_failed: false,
             server_ahb: None,
         });
 

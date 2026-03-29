@@ -451,6 +451,23 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                         })
                 });
 
+                if dmabuf.is_none() {
+                    // Log shm buffer details when dmabuf detection fails
+                    let is_shm = with_states(&wl_surface, |states| {
+                        type RssType = std::sync::Mutex<RendererSurfaceState>;
+                        states.data_map.get::<RssType>()
+                            .and_then(|rss| {
+                                let guard = rss.lock().ok()?;
+                                let buf = guard.buffer()?;
+                                smithay::wayland::shm::with_buffer_contents(&buf, |_, _, data| {
+                                    (data.width, data.height, data.format)
+                                }).ok()
+                            })
+                    });
+                    if let Some((w, h, fmt)) = is_shm {
+                        tracing::warn!("[buffer-type] window_id={} BUFFER=shm ({}x{} fmt={:?}) — not dmabuf! Firefox/Zink should use zwp_linux_dmabuf_v1", window_id, w, h, fmt);
+                    }
+                }
                 tracing::debug!("[vk-dmabuf] window_id={} dmabuf={}", window_id, dmabuf.is_some());
                 if let Some(dmabuf) = dmabuf {
                     let dmabuf_sz = dmabuf.size();
@@ -751,7 +768,9 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
 
                                 // For GPU-backed shm pools (data_readable=false), import
                                 // the pool fd as a dmabuf via VK instead of CPU-reading.
-                                if !data_readable {
+                                // Skip if VK import previously failed (prevents OOM from
+                                // creating/destroying AHB surfaces every frame).
+                                if !data_readable && !window.vk_shm_gpu_failed {
                                     let pool_info = smithay::wayland::shm::shm_buffer_pool_fd(&shm_buf);
                                     if let Some((pool_fd, buf_data)) = pool_info {
                                         // Create AHB surface if needed
@@ -810,12 +829,13 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                                                         }
                                                     }
                                                     Err(e) => {
-                                                        tracing::warn!("[vk-shm-gpu] import failed, reverting to GLES: {e}");
+                                                        tracing::warn!("[vk-shm-gpu] import failed, reverting to GLES (won't retry): {e}");
                                                         // Destroy AHB surface so EGL is visible
                                                         if let Some(ref ahb) = window.ahb_surface {
                                                             if let Some(ref t) = ahb.ahb_target { vk.destroy_ahb_target(t); }
                                                         }
                                                         window.ahb_surface = None;
+                                                        window.vk_shm_gpu_failed = true;
                                                     }
                                                 }
                                             }
@@ -823,7 +843,12 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                                     }
                                 }
 
-                                if window.ahb_surface.is_none() && data_readable {
+                                // Always use VK shm blit for ALL shm clients (even
+                                // data_readable=false). This avoids GLES entirely,
+                                // preventing Qualcomm GLES/VK GPU corruption.
+                                // For GPU-backed shm (Firefox/Zink), content may
+                                // appear black — but dmabuf clients stay clean.
+                                if window.ahb_surface.is_none() {
                                     if let Some(nw) = window.native_window {
                                         let sc = crate::android::backend::surface_transaction::SurfaceControlHandle::from_window(
                                             nw, &format!("shm-{window_id}"));

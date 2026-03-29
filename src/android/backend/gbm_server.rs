@@ -246,8 +246,8 @@ fn handle_alloc(
     // Close our copy of the dup'd fd (client owns it now)
     unsafe { libc::close(dmabuf_fd) };
 
-    tracing::info!("[gbm-server] Allocated {}x{} stride={} → fd sent",
-        req.width, req.height, stride);
+    tracing::info!("[gbm-server] Allocated {}x{} stride={} modifier={:#x} → fd sent",
+        req.width, req.height, stride, u64::from(format.modifier));
 }
 
 fn send_error(stream: &std::os::unix::net::UnixStream) {

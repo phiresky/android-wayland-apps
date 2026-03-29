@@ -241,24 +241,37 @@ Result: GLES still used → corruption returns when dmabuf windows are open ✗
 | eglgears alone | VK dmabuf | Clean |
 | gedit/nemo alone | VK shm | Clean |
 | eglgears + gedit/nemo | VK dmabuf + VK shm | Clean |
-| Firefox alone | GLES fallback | Renders OK |
-| eglgears + Firefox | VK dmabuf + GLES | eglgears corrupted |
+| Firefox alone (HW WebRender) | VK (Kopper) + GLES (shm) | Corrupted ✗ |
+| Firefox alone (SW WebRender) | GLES (shm, data readable) | Clean ✓ |
+| eglgears + Firefox (SW WR) | VK dmabuf + VK shm | Clean ✓ |
+| eglgears + Firefox (HW WR) | VK dmabuf + VK (Kopper) + GLES | Corrupted ✗ |
 
-**Remaining fix needed**: Make Firefox's Kopper WSI commit via `zwp_linux_dmabuf_v1`
-instead of `wl_shm`. Then it goes through the VK dmabuf path (like eglgears) with
-no GLES involvement.
+**Current fix**: Force software WebRender via `gfx.webrender.software=true` in
+Firefox config (`setup.rs`). Software WR renders via CPU → shm data is readable →
+VK shm blit path handles it → no GLES needed → no corruption.
 
-**Why Firefox uses wl_shm**: Kopper allocates GPU buffers via our GBM proxy
-(AHardwareBuffer-backed). But it commits them wrapped in `wl_shm` instead of
-`zwp_linux_dmabuf_v1`. The shm pool fd is a memfd (not importable by VK). The
-likely cause: Kopper checks compositor's dmabuf format+modifier list (we advertise
-Linear + Invalid) but AHBs may use Qualcomm's tiled modifier → no match → shm
-fallback. eglgears (also Kopper/Zink) does commit via `zwp_linux_dmabuf_v1` and
-works — possibly because it uses simpler allocations that match Linear.
+**Root cause (investigated 2026-03-29)**: Firefox's `WindowSurfaceWaylandMB` hardcodes
+`WaylandBufferSHM` for all window presentation (`ObtainBufferFromPool()` in
+`WindowSurfaceWaylandMultiBuffer.cpp:297`). `WaylandBufferDMABUF` exists but is only
+used for WebGL textures and video, never windows. No config pref changes this.
 
-**Fix path**: Either advertise the correct AHB modifier in our dmabuf format list,
-or force the GBM proxy to allocate with LINEAR tiling (`AHARDWAREBUFFER_USAGE_CPU_*`
-flags). Then Kopper matches → uses dmabuf protocol → VK dmabuf path → no GLES.
+Kopper/Zink DOES create a VkSwapchain with dmabuf buffers (GBM proxy allocates AHBs),
+but Firefox ignores it for presentation — it creates separate wl_shm buffers via GTK.
+WAYLAND_DEBUG confirms Firefox binds only `wl_shm`, never `zwp_linux_dmabuf_v1`.
+
+Firefox's `nsDMABufDevice::Init()` (`DMABufDevice.cpp:222`) tries to open
+`/dev/dri/renderD128` for GBM device init. SELinux blocks app access to DRM nodes →
+`FEATURE_FAILURE_NO_DRM_DEVICE` → dmabuf infrastructure disabled entirely.
+(`MOZ_DRM_DEVICE` env var can override the path but doesn't help without DRM ioctls.)
+
+With hardware WebRender, Firefox renders via Zink → Turnip → KGSL (VK operations).
+Even though presentation is via wl_shm/GLES, the Kopper VK activity corrupts GLES
+through shared KGSL GPU state — same corruption mechanism as eglgears + GLES mixing.
+
+**Possible future fixes**:
+- Patch Firefox to use `WaylandBufferDMABUF` for windows (requires Firefox rebuild)
+- Create DRM ioctl shim (LD_PRELOAD) to fake render node for `nsDMABufDevice`
+- Eliminate GLES entirely — use VK for shm buffer upload too
 
 ## How to Reproduce (vkcube test)
 

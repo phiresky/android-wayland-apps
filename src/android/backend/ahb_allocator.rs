@@ -316,8 +316,10 @@ impl Allocator for AhbAllocator {
             stride: stride_bytes,
             format: Format {
                 code: fourcc,
-                // AHB doesn't expose DRM modifiers; treat as implicit/vendor-specific.
-                modifier: Modifier::Invalid,
+                // AHB doesn't expose DRM modifiers. Report as Linear since
+                // gbm_bo_get_modifier() returns 0 (LINEAR) and the compositor's
+                // VK blit path handles LINEAR dmabufs correctly.
+                modifier: Modifier::Linear,
             },
         })
     }

@@ -111,14 +111,14 @@ src/vulkan/wsi/wsi_common_drm.c --- 2/2 --- Text (2 C parse errors, exceeded DFT
 ... 840    result = wsi_init_image_dmabuf_fd(chain, image, false);
 ... 841    if (result != VK_SUCCESS) return result;
 ... 842 
-... 843    image->drm_modifier = DRM_FORMAT_MOD_INVALID;
+... 843    image->drm_modifier = resp.modifier;
 ... 844    image->num_planes = 1;
 ... 845    image->sizes[0] = (uint64_t)resp.stride * h;
 ... 846    image->row_pitches[0] = resp.stride;
 ... 847    image->offsets[0] = 0;
 ... 848 
-... 849    mesa_logi("WSI: compositor GBM proxy buffer %ux%u stride=%u fd=%d",
-... 850              w, h, resp.stride, image->dma_buf_fd);
+... 849    mesa_logi("WSI: compositor GBM proxy buffer %ux%u stride=%u fd=%d mod=0x%"PRIx64,
+... 850              w, h, resp.stride, image->dma_buf_fd, resp.modifier);
 ... 851    return VK_SUCCESS;
 ... 852 }
 ... 853 
