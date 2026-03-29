@@ -148,12 +148,29 @@ fn get_ahb_dmabuf_fd(
     type GetNativeHandleFn =
         unsafe extern "C" fn(*const ndk_sys::AHardwareBuffer) -> *const NativeHandle;
 
+    /// Android's `native_handle_t` from `<cutils/native_handle.h>`.
+    ///
+    /// Layout: version, numFds, numInts, then a flexible `data[]` array
+    /// containing `numFds` file descriptors followed by `numInts` ints.
     #[repr(C)]
     struct NativeHandle {
         version: i32,
         num_fds: i32,
         num_ints: i32,
-        // data[] follows: first num_fds file descriptors, then num_ints ints
+        /// First element of the flexible `data[]` array. Access via
+        /// `data_ptr()` to get a slice of the fd entries.
+        data: [i32; 0],
+    }
+
+    impl NativeHandle {
+        /// Returns a pointer to the start of the `data[]` flexible array member.
+        ///
+        /// # Safety
+        /// Caller must ensure `self` points to a valid `native_handle_t` with
+        /// at least `num_fds + num_ints` elements in the trailing data array.
+        unsafe fn fd_ptr(&self) -> *const i32 {
+            self.data.as_ptr()
+        }
     }
 
     // Try to load AHardwareBuffer_getNativeHandle via dlsym.

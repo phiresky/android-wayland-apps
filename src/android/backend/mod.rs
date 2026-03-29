@@ -6,6 +6,9 @@ pub mod gbm_server;
 pub mod vulkan_renderer;
 pub mod surface_transaction;
 mod event_handler;
+mod render;
+mod input;
+mod ime;
 pub(crate) mod keymap;
 
 pub use event_handler::{compositor_tick, dispatch_wayland};
