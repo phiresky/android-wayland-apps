@@ -752,18 +752,45 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                                 // Those windows stay on GLES fallback.
                                 // Sample multiple rows to check if data is CPU-readable.
                                 // Firefox/Zink GPU-async buffers read as all zeros.
-                                let data_readable = smithay::wayland::shm::with_buffer_contents(
+                                let data_readable_result = smithay::wayland::shm::with_buffer_contents(
                                     &shm_buf, |ptr, _, data| {
                                         let total = (data.stride * data.height) as usize;
                                         let buf = unsafe { std::slice::from_raw_parts(
                                             ptr.offset(data.offset as isize) as *const u8, total) };
                                         // Check 4 points across the buffer
-                                        [0, total/4, total/2, total*3/4].iter().any(|&off| {
+                                        let readable = [0, total/4, total/2, total*3/4].iter().any(|&off| {
                                             let end = (off + 16).min(total);
                                             buf[off..end].iter().any(|&b| b != 0)
-                                        })
+                                        });
+                                        // Debug: compare mmap data vs direct fd read
+                                        if !readable && window.frame_count < 3 {
+                                            let first: Vec<u8> = buf[..32.min(total)].to_vec();
+                                            tracing::warn!("[vk-shm-debug] window_id={} total={} stride={} offset={} mmap_first={:02x?}",
+                                                window_id, total, data.stride, data.offset, first);
+                                        }
+                                        readable
                                     }
-                                ).unwrap_or(false);
+                                );
+                                let data_readable = match &data_readable_result {
+                                    Ok(true) => true,
+                                    Ok(false) => {
+                                        // Double-check via direct pread() on the pool fd
+                                        if window.frame_count < 3 {
+                                            if let Some((pool_fd, buf_data)) = smithay::wayland::shm::shm_buffer_pool_fd(&shm_buf) {
+                                                let mut direct_buf = [0u8; 64];
+                                                let mid = (buf_data.stride * buf_data.height / 2) as i64;
+                                                let n = unsafe { libc::pread(pool_fd, direct_buf.as_mut_ptr() as *mut _, 64, mid) };
+                                                tracing::warn!("[vk-shm-fd] window_id={} fd={} pread({})={} bytes={:02x?}",
+                                                    window_id, pool_fd, mid, n, &direct_buf[..32]);
+                                            }
+                                        }
+                                        false
+                                    },
+                                    Err(e) => {
+                                        tracing::error!("[vk-shm] window_id={} SIGBUS/BadMap on shm pool! {:?}", window_id, e);
+                                        false
+                                    }
+                                };
                                 tracing::info!("[vk-shm] window_id={} data_readable={}", window_id, data_readable);
 
                                 // For GPU-backed shm pools (data_readable=false), import
@@ -843,12 +870,7 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
                                     }
                                 }
 
-                                // Always use VK shm blit for ALL shm clients (even
-                                // data_readable=false). This avoids GLES entirely,
-                                // preventing Qualcomm GLES/VK GPU corruption.
-                                // For GPU-backed shm (Firefox/Zink), content may
-                                // appear black — but dmabuf clients stay clean.
-                                if window.ahb_surface.is_none() {
+                                if window.ahb_surface.is_none() && data_readable {
                                     if let Some(nw) = window.native_window {
                                         let sc = crate::android::backend::surface_transaction::SurfaceControlHandle::from_window(
                                             nw, &format!("shm-{window_id}"));

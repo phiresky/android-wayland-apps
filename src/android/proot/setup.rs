@@ -335,27 +335,17 @@ defaultPref(\"widget.non-native-theme.scrollbar.size.override\", 16);
     fs::write(&cfg_file, cfg)
         .unwrap_or_else(|e| tracing::error!("[setup] Failed to write Firefox config: {}", e));
 
-    // Wrapper script: force Firefox to use llvmpipe (software GL) instead of
-    // Zink/Turnip. With MESA_LOADER_DRIVER_OVERRIDE=zink set globally for GPU
-    // apps, Firefox's EGL init loads Zink → Turnip → Kopper VkSwapchain, which
-    // causes GLES/VK GPU corruption on Qualcomm. Firefox uses software WebRender
-    // anyway (gfx.webrender.software=true), so llvmpipe is correct here.
-    //
-    // The .desktop file uses /usr/lib/firefox/firefox (absolute path), so we
-    // replace the binary with our wrapper and move the real binary aside.
+    // Restore Firefox binary if we previously replaced it with a wrapper.
     let real_firefox = firefox_root.join("firefox");
     let real_firefox_bin = firefox_root.join("firefox.real");
-    if real_firefox.exists() && !real_firefox_bin.exists() {
-        let _ = fs::rename(&real_firefox, &real_firefox_bin);
-    }
     if real_firefox_bin.exists() {
-        let wrapper_script = "#!/bin/sh\n# Force no-GPU rendering: unset Zink overrides, disable EGL so Firefox\n# uses pure CPU software WebRender without any GL context.\nexec env MESA_LOADER_DRIVER_OVERRIDE= GALLIUM_DRIVER= EGL_PLATFORM=surfaceless MOZ_WEBRENDER=1 /usr/lib/firefox/firefox.real \"$@\"\n";
-        fs::write(&real_firefox, wrapper_script)
-            .unwrap_or_else(|e| tracing::error!("[setup] Failed to write Firefox wrapper: {}", e));
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&real_firefox, fs::Permissions::from_mode(0o755));
+        // Check if current "firefox" is a shell script wrapper
+        if let Ok(content) = fs::read(&real_firefox) {
+            if content.starts_with(b"#!/bin/sh") {
+                let _ = fs::remove_file(&real_firefox);
+                let _ = fs::rename(&real_firefox_bin, &real_firefox);
+                setup_log("[setup] Restored Firefox binary (removed wrapper)");
+            }
         }
     }
 
@@ -397,7 +387,7 @@ fn setup_electron_config() {
         .join(".config");
     let _ = fs::create_dir_all(&config_dir);
 
-    let flags = "--no-sandbox\n";
+    let flags = "--no-sandbox\n--ozone-platform=wayland\n";
     for name in ["chromium-flags.conf", "code-flags.conf", "electron-flags.conf"] {
         fs::write(config_dir.join(name), flags)
             .unwrap_or_else(|e| tracing::error!("[setup] Failed to write {}: {}", name, e));
