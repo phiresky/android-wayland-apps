@@ -10,13 +10,12 @@
 
 use crate::android::utils::socket::create_unix_listener;
 
-use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use smithay::backend::allocator::{Allocator, Fourcc, Modifier};
-use smithay::backend::allocator::dmabuf::AsDmabuf;
 
 use super::ahb_allocator::{AhbAllocator, AhbBufferTracker};
 

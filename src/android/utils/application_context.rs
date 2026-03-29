@@ -3,9 +3,9 @@ use jni::{
     JNIEnv,
 };
 use std::path::PathBuf;
-use std::sync::RwLock;
+use std::sync::OnceLock;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ApplicationContext {
     pub cache_dir: PathBuf,
     pub data_dir: PathBuf,
@@ -14,23 +14,13 @@ pub struct ApplicationContext {
 
 impl ApplicationContext {
     pub fn build(env: &mut JNIEnv, activity: &JObject) -> Result<(), Box<dyn std::error::Error>> {
-        let cache_dir = Self::get_path(env, activity, "getCacheDir")?;
-        let data_dir = Self::get_path(env, activity, "getFilesDir")?;
-        let native_library_dir = Self::get_native_library_dir(env, activity)?;
-
-        {
-            let mut context = APPLICATION_CONTEXT
-                .write()
-                .map_err(|e| format!("Failed to write application context: {e}"))?;
-            *context = Some(ApplicationContext {
-                cache_dir,
-                data_dir,
-                native_library_dir,
-            });
-            if let Some(ref ctx) = *context {
-                tracing::info!("ApplicationContext initialized: {:?}", ctx);
-            }
-        }
+        let ctx = ApplicationContext {
+            cache_dir: Self::get_path(env, activity, "getCacheDir")?,
+            data_dir: Self::get_path(env, activity, "getFilesDir")?,
+            native_library_dir: Self::get_native_library_dir(env, activity)?,
+        };
+        tracing::info!("ApplicationContext initialized: {:?}", ctx);
+        let _ = APPLICATION_CONTEXT.set(ctx);
         Ok(())
     }
 
@@ -66,19 +56,12 @@ impl ApplicationContext {
     }
 }
 
-static APPLICATION_CONTEXT: RwLock<Option<ApplicationContext>> = RwLock::new(None);
+static APPLICATION_CONTEXT: OnceLock<ApplicationContext> = OnceLock::new();
 
-pub fn get_application_context() -> ApplicationContext {
-    let guard = match APPLICATION_CONTEXT.read() {
-        Ok(g) => g,
-        Err(e) => {
-            panic!("Failed to read application context: {e}");
-        }
-    };
-    match guard.as_ref() {
-        Some(ctx) => ctx.clone(),
-        None => {
-            panic!("ApplicationContext is not initialized");
-        }
-    }
+/// Get the application context. Panics if called before `ApplicationContext::build()`.
+/// This is a programming error — build() runs in nativeInit before any other code.
+pub fn get_application_context() -> &'static ApplicationContext {
+    APPLICATION_CONTEXT.get().unwrap_or_else(|| {
+        panic!("ApplicationContext not initialized — build() must be called first")
+    })
 }

@@ -575,7 +575,7 @@ impl VulkanRenderer {
         width: u32,
         height: u32,
         stride: u32,
-        format: vk::Format,
+        _format: vk::Format,
         target: &AhbTarget,
     ) -> Result<RawFd, String> {
         let buf_size = (stride as u64) * (height as u64);
