@@ -106,6 +106,10 @@ pub struct WindowState {
     /// VK shm-gpu import failed for this window — don't retry every frame.
     /// Set when vkAllocateMemory(import) fails for the shm pool fd.
     pub vk_shm_gpu_failed: bool,
+    /// Count of consecutive frames where shm data was unreadable (zeros).
+    /// Used to delay GLES fallback — CPU clients (gedit) become readable
+    /// after 1-2 frames, GPU clients (Firefox/Zink) stay at zero forever.
+    pub shm_zero_frames: u32,
     /// Compositor-allocated AHB for this window (server-side allocation path).
     /// When present, the committed dmabuf can be presented directly via
     /// ASurfaceTransaction without any GPU blit.
@@ -286,6 +290,7 @@ impl WindowManager {
             render_mode: None,
             close_pending_since: None,
             vk_shm_gpu_failed: false,
+            shm_zero_frames: 0,
             server_ahb: None,
         });
 
