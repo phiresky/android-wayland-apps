@@ -329,7 +329,7 @@ defaultPref(\"security.sandbox.warn_unprivileged_namespaces\", false);
 defaultPref(\"gfx.webrender.all\", true);
 defaultPref(\"webgl.force-enabled\", true);
 defaultPref(\"widget.gtk.overlay-scrollbars.enabled\", false);
-defaultPref(\"widget.non-native-theme.gtk.scrollbar.thumb-size\", \"1\");
+// defaultPref(\"widget.non-native-theme.gtk.scrollbar.thumb-size\", \"1\");
 defaultPref(\"widget.non-native-theme.scrollbar.size.override\", 16);
 ";
     fs::write(&cfg_file, cfg)
@@ -364,8 +364,8 @@ fi
     }
 }
 
-/// Configure Electron apps (VSCode etc.) to run without sandbox.
-/// Electron's Chromium sandbox uses seccomp/namespaces that don't work in proot.
+/// Configure Chromium-based apps to run without sandbox.
+/// Chromium's sandbox uses seccomp/namespaces that don't work in proot.
 fn setup_electron_config() {
     let config_dir = Path::new(config::ARCH_FS_ROOT)
         .join("home")
@@ -374,7 +374,7 @@ fn setup_electron_config() {
     let _ = fs::create_dir_all(&config_dir);
 
     let flags = "--no-sandbox\n";
-    for name in ["code-flags.conf", "electron-flags.conf"] {
+    for name in ["chromium-flags.conf", "code-flags.conf", "electron-flags.conf"] {
         fs::write(config_dir.join(name), flags)
             .unwrap_or_else(|e| tracing::error!("[setup] Failed to write {}: {}", name, e));
     }

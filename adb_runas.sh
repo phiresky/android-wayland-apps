@@ -6,6 +6,7 @@
 #        ./adb_runas.sh                        (interactive alarm shell)
 #        USER_NAME=root ./adb_runas.sh              (interactive root shell)
 #        USER_NAME=root ./adb_runas.sh pacman -S mesa-demos
+#        KEEP_ALIVE=1 ./adb_runas.sh firefox     (background processes survive exit)
 #        echo 'complex | cmd' | ./adb_runas.sh (stdin script, no escaping needed)
 #        ./adb_runas.sh <<'EOF'                (heredoc script)
 #        MOZ_ENABLE_WAYLAND=1 firefox 2>&1
@@ -67,10 +68,25 @@ elif [ $# -gt 0 ]; then
             exit 1
             ;;
     esac
-    adb shell run-as "$PKG" sh -c "'echo \"exec $*\" > $CMD_FILE'" </dev/null
+    adb shell run-as "$PKG" sh -c "'echo \"$*\" > $CMD_FILE'" </dev/null
 else
     # Stdin: pipe the script
     adb shell run-as "$PKG" sh -c "'cat > $CMD_FILE'" < /dev/stdin
+fi
+
+# For non-interactive cases, append a check for background jobs.
+# With --kill-on-exit (default), background processes are killed when proot exits.
+# Set KEEP_ALIVE=1 to disable --kill-on-exit and let them survive.
+if ! { [ -t 0 ] && [ $# -eq 0 ]; }; then
+    adb shell run-as "$PKG" sh -c "'cat >> $CMD_FILE'" </dev/null <<'BGCHECK'
+
+_bg_pids=$(jobs -rp 2>/dev/null)
+if [ -n "$_bg_pids" ]; then
+    echo "" >&2
+    echo "WARNING: Background processes still running. They will be KILLED when adb_runas.sh exits!" >&2
+    echo "  Use KEEP_ALIVE=1 ./adb_runas.sh to let background processes survive." >&2
+fi
+BGCHECK
 fi
 
 if [ "$PROOT_USER" = "root" ]; then
@@ -101,7 +117,9 @@ LAUNCHER=./files/.proot_launcher_$SUFFIX.sh
     for arg in $PROOT_ARGS; do
         printf "    %s \\\\\n" "$arg"
     done
-    printf "    --kill-on-exit \\\\\n"
+    if [ "${KEEP_ALIVE:-0}" != "1" ]; then
+        printf "    --kill-on-exit \\\\\n"
+    fi
     # binds from config
     echo "$BINDS" | while read -r b; do [ -n "$b" ] && printf "    %s \\\\\n" "$b"; done
     # optional binds (checked at runtime on device)
@@ -123,7 +141,7 @@ LAUNCHER=./files/.proot_launcher_$SUFFIX.sh
 } | adb shell run-as "$PKG" sh -c "'cat > $LAUNCHER'"
 
 # Run with -t for PTY allocation when interactive
-# rlwrap provides local readline (arrow keys, history, Ctrl+R) since
+# rlwrap provides locaül readline (arrow keys, history, Ctrl+R) since
 # run-as UID switch prevents tcsetattr on adb's PTY
 if [ -t 0 ]; then
     if [ "${USE_RLWRAP:-0}" = 1 ]; then
