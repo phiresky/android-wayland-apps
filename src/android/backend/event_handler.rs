@@ -404,11 +404,17 @@ fn render_activity_windows(backend: &mut WaylandBackend) {
             ((size.h - preferred_h) / 2).max(0)
         }).unwrap_or(0);
 
-        // Unbind EGL context before Vulkan operations. On Qualcomm, EGL and
-        // Vulkan share the GPU via KGSL — an active EGL context during VK
-        // command submission causes buffer corruption.
-        if let Some(cr) = backend.renderer.as_ref() {
+        // Flush and unbind EGL context before Vulkan operations. On Qualcomm,
+        // EGL and Vulkan share the GPU via KGSL — interleaved GPU commands
+        // cause buffer corruption (horizontal stripes).
+        // glFinish() waits for all pending GLES ops to complete on GPU.
+        // eglReleaseThread() fully releases EGL/KGSL state from the thread.
+        if let Some(cr) = backend.renderer.as_mut() {
+            let _ = cr.renderer.with_context(|gl| {
+                unsafe { gl.Finish(); }
+            });
             let _ = cr.renderer.egl_context().unbind();
+            unsafe { smithay::backend::egl::ffi::egl::ReleaseThread(); }
         }
 
         // Try Vulkan zero-copy blit for dmabuf surfaces
