@@ -5,7 +5,7 @@
 //! Each function is idempotent and skips if the fix is already in place.
 
 use super::process::ArchProcess;
-use super::setup::setup_log;
+use super::setup::{setup_log, write_executable};
 use crate::core::config;
 use std::fs;
 use std::path::Path;
@@ -74,23 +74,8 @@ defaultPref(\"widget.non-native-theme.scrollbar.size.override\", 16);
     if glxtest.exists() && !glxtest_orig.exists() {
         let _ = fs::rename(&glxtest, &glxtest_orig);
     }
-    let glxtest_script = r#"#!/bin/sh
-# EGL-based GPU probe replacement for Firefox's glxtest (which fails in proot).
-# Firefox opens fd 3 as a pipe before launching this. Write GPU info there.
-info=$(eglinfo -B 2>/dev/null)
-vendor=$(echo "$info" | grep "OpenGL core profile vendor:" | head -1 | sed 's/.*: //')
-renderer=$(echo "$info" | grep "OpenGL core profile renderer:" | head -1 | sed 's/.*: //')
-version=$(echo "$info" | grep "OpenGL core profile version:" | head -1 | sed 's/.*: //')
-if [ -n "$renderer" ]; then
-    printf "VENDOR\n%s\nRENDERER\n%s\nVERSION\n%s\nTFP\nEGL\n" "$vendor" "$renderer" "$version" >&3
-fi
-"#;
-    fs::write(&glxtest, glxtest_script)
-        .unwrap_or_else(|e| tracing::error!("[setup] Failed to write glxtest: {}", e));
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&glxtest, fs::Permissions::from_mode(0o755));
+    if let Err(e) = write_executable(&glxtest, include_str!("scripts/glxtest_egl.sh")) {
+        tracing::error!("[setup] Failed to write glxtest: {}", e);
     }
 }
 
@@ -120,10 +105,10 @@ pub fn disable_bwrap() {
     let bwrap = Path::new(config::ARCH_FS_ROOT).join("usr/bin/bwrap");
     let bwrap_real = Path::new(config::ARCH_FS_ROOT).join("usr/bin/bwrap.real");
 
-    // Already our shim
+    // Already our shim (Python or shell script, not an ELF binary)
     if bwrap.exists() {
         if let Ok(contents) = fs::read(&bwrap) {
-            if contents.starts_with(b"#!/bin/sh") {
+            if contents.starts_with(b"#!") {
                 return;
             }
         }
@@ -138,183 +123,9 @@ pub fn disable_bwrap() {
         return;
     }
 
-    let shim = r#"#!/usr/bin/env python3
-"""bwrap shim: uses nested proot for bind mounts instead of namespaces.
-Handles --args FD (NUL-separated args from file descriptor) used by flatpak.
-Requires _PROOT_BIN, _PROOT_LOADER, _PROOT_TMP_DIR env vars."""
-import sys, os
-
-def read_fd(fd):
-    data = b''
-    while True:
-        chunk = os.read(fd, 4096)
-        if not chunk: break
-        data += chunk
-    os.close(fd)
-    return data
-
-args = list(sys.argv[1:])
-# Expand --args FD
-i = 0
-while i < len(args):
-    if args[i] == '--args' and i + 1 < len(args):
-        fd = int(args[i + 1])
-        rest = args[i + 2:]
-        decoded = read_fd(fd).decode('utf-8', errors='replace')
-        extra = decoded.split('\0')
-        if extra and extra[-1] == '':
-            extra.pop()
-        args = extra + rest
-        i = 0
-        continue
-    i += 1
-
-clear_env = False
-chdir_path = None
-cmd = []
-binds = []
-env_set = {}
-env_unset = []
-i = 0
-
-ONE_ARG = {'--unshare-all', '--unshare-user', '--unshare-user-try', '--unshare-ipc',
-    '--unshare-pid', '--unshare-net', '--unshare-uts', '--unshare-cgroup',
-    '--unshare-cgroup-try', '--share-net', '--die-with-parent', '--new-session',
-    '--as-pid-1', '--disable-userns', '--assert-userns-disabled'}
-TWO_ARG = {'--lock-file', '--sync-fd', '--info-fd', '--json-status-fd', '--block-fd',
-    '--userns-block-fd', '--size', '--perms', '--uid', '--gid', '--hostname',
-    '--exec-label', '--file-label', '--cap-add', '--cap-drop',
-    '--seccomp', '--userns', '--userns2', '--pidns'}
-
-while i < len(args):
-    a = args[i]
-    if a == '--':
-        cmd = args[i + 1:]
-        break
-    elif a == '--setenv' and i + 2 < len(args):
-        env_set[args[i + 1]] = args[i + 2]; i += 3
-    elif a == '--unsetenv' and i + 1 < len(args):
-        env_unset.append(args[i + 1]); i += 2
-    elif a == '--chdir' and i + 1 < len(args):
-        chdir_path = args[i + 1]; i += 2
-    elif a == '--clearenv':
-        clear_env = True; i += 1
-    elif a == '--file' and i + 2 < len(args):
-        dest = args[i + 2]
-        try:
-            os.makedirs(os.path.dirname(dest) or '.', exist_ok=True)
-            with open(dest, 'wb') as f: f.write(read_fd(int(args[i + 1])))
-        except OSError: pass
-        i += 3
-    elif a in ('--bind-data', '--ro-bind-data') and i + 2 < len(args):
-        dest = args[i + 2]
-        try:
-            os.makedirs(os.path.dirname(dest) or '.', exist_ok=True)
-            with open(dest, 'wb') as f: f.write(read_fd(int(args[i + 1])))
-        except OSError: pass
-        i += 3
-    elif a in ('--ro-bind', '--bind', '--ro-bind-try', '--bind-try',
-               '--dev-bind', '--dev-bind-try') and i + 2 < len(args):
-        src, dest = args[i + 1], args[i + 2]
-        if src != dest:
-            binds.append((src, dest))
-        i += 3
-    elif a == '--remount-ro-bind' and i + 2 < len(args):
-        i += 3
-    elif a == '--remount-ro' and i + 1 < len(args):
-        i += 2
-    elif a == '--dir' and i + 1 < len(args):
-        try: os.makedirs(args[i + 1], exist_ok=True)
-        except OSError: pass
-        i += 2
-    elif a == '--tmpfs' and i + 1 < len(args):
-        try: os.makedirs(args[i + 1], exist_ok=True)
-        except OSError: pass
-        i += 2
-    elif a == '--symlink' and i + 2 < len(args):
-        try:
-            os.makedirs(os.path.dirname(args[i + 2]) or '.', exist_ok=True)
-            if os.path.lexists(args[i + 2]): os.unlink(args[i + 2])
-            os.symlink(args[i + 1], args[i + 2])
-        except OSError: pass
-        i += 3
-    elif a == '--chmod' and i + 2 < len(args):
-        try: os.chmod(args[i + 2], int(args[i + 1], 8))
-        except OSError: pass
-        i += 3
-    elif a in ('--dev', '--proc', '--mqueue') and i + 1 < len(args):
-        i += 2
-    elif a in ONE_ARG: i += 1
-    elif a in TWO_ARG and i + 1 < len(args): i += 2
-    elif not a.startswith('--'):
-        cmd = args[i:]
-        break
-    else: i += 1
-
-if not cmd:
-    sys.exit(0)
-
-# Build environment
-if clear_env:
-    env = {}
-else:
-    env = dict(os.environ)
-for k, v in env_set.items():
-    env[k] = v
-for k in env_unset:
-    env.pop(k, None)
-
-internal_keys = ('_PROOT_BIN', '_PROOT_LOADER', '_PROOT_TMP_DIR')
-
-# Find proot binary: prefer env var, fall back to scanning /proc
-proot_bin = os.environ.get('_PROOT_BIN', '')
-proot_loader = os.environ.get('_PROOT_LOADER', '')
-proot_tmp = os.environ.get('_PROOT_TMP_DIR', '/tmp')
-if not proot_bin:
-    try:
-        for entry in os.listdir('/proc'):
-            if entry.isdigit():
-                try:
-                    exe = os.readlink(f'/proc/{entry}/exe')
-                    if exe.endswith('/libproot.so'):
-                        proot_bin = exe
-                        proot_loader = exe.replace('libproot.so', 'libproot_loader.so')
-                        break
-                except OSError:
-                    continue
-    except OSError:
-        pass
-
-# Use nested proot for bind mounts when available
-if binds and proot_bin and os.path.isfile(proot_bin):
-    proot_args = [proot_bin, '-r', '/', '-L', '--link2symlink']
-    for src, dest in binds:
-        proot_args.append(f'--bind={src}:{dest}')
-    if chdir_path:
-        proot_args.extend(['-w', chdir_path])
-    proot_args.extend(cmd)
-    env['PROOT_LOADER'] = proot_loader
-    env['PROOT_TMP_DIR'] = proot_tmp
-    for k in internal_keys: env.pop(k, None)
-    os.execvpe(proot_args[0], proot_args, env)
-else:
-    if chdir_path:
-        try: os.chdir(chdir_path)
-        except OSError: pass
-    for k in internal_keys: env.pop(k, None)
-    os.execvpe(cmd[0], cmd, env)
-"#;
-
     setup_log("[setup] Installing bwrap shim (sandboxing incompatible with proot)");
-    if let Err(e) = fs::write(&bwrap, shim) {
+    if let Err(e) = write_executable(&bwrap, include_str!("scripts/bwrap_shim.py")) {
         tracing::error!("[setup] Failed to write bwrap shim: {}", e);
-        return;
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&bwrap, fs::Permissions::from_mode(0o755));
     }
 }
 
@@ -335,40 +146,9 @@ pub fn disable_flatpak_spawn() {
         }
     }
 
-    let shim = r#"#!/bin/sh
-# flatpak-spawn shim: runs the command unsandboxed (proot can't do namespaces).
-# Strips all flatpak-spawn options and execs the trailing command.
-dir=""
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --sandbox|--watch-bus|--latest-version|--no-network|--clear-env|--host|--verbose)
-            shift ;;
-        --directory=*)
-            dir="${1#--directory=}"; shift ;;
-        --forward-fd=*|--env=*)
-            shift ;;
-        -*)
-            shift ;;
-        *)
-            break ;;
-    esac
-done
-if [ -n "$dir" ]; then
-    cd "$dir" 2>/dev/null || true
-fi
-exec "$@"
-"#;
-
     setup_log("[setup] Installing flatpak-spawn shim (sandboxing incompatible with proot)");
-    if let Err(e) = fs::write(&flatpak_spawn, shim) {
+    if let Err(e) = write_executable(&flatpak_spawn, include_str!("scripts/flatpak_spawn_shim.sh")) {
         tracing::error!("[setup] Failed to write flatpak-spawn shim: {}", e);
-        return;
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&flatpak_spawn, fs::Permissions::from_mode(0o755));
     }
 }
 
@@ -393,16 +173,8 @@ pub(super) fn fix_bsdtar() {
     setup_log("[setup] Installing bsdtar wrapper (permission errors non-fatal)");
 
     let _ = fs::create_dir_all(fs_root.join("usr/local/bin"));
-    let shim = "#!/bin/sh\n/usr/bin/bsdtar \"$@\"\nexit 0\n";
-    if let Err(e) = fs::write(&wrapper, shim) {
+    if let Err(e) = write_executable(&wrapper, include_str!("scripts/bsdtar_wrapper.sh")) {
         tracing::error!("[setup] Failed to write bsdtar wrapper: {}", e);
-        return;
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755));
     }
 }
 
@@ -425,50 +197,14 @@ pub(super) fn fix_ttyname() {
     setup_log("[setup] Building ttyname fix for Android SELinux...");
 
     let c_source = fs_root.join("tmp/fix_ttyname.c");
-    let source_code = r#"#define _GNU_SOURCE
-#include <unistd.h>
-#include <stdio.h>
-#include <string.h>
-#include <errno.h>
-#include <sys/stat.h>
-
-/* Override ttyname_r to use /proc/self/fd instead of scanning /dev/pts/.
- * On Android, SELinux blocks readdir on /dev/pts for untrusted_app,
- * causing ttyname_r to fail with EACCES. */
-int ttyname_r(int fd, char *buf, size_t buflen) {
-    struct stat st;
-    if (fstat(fd, &st) != 0 || !S_ISCHR(st.st_mode)) {
-        errno = ENOTTY;
-        return ENOTTY;
-    }
-    char proc_path[64];
-    snprintf(proc_path, sizeof(proc_path), "/proc/self/fd/%d", fd);
-    ssize_t len = readlink(proc_path, buf, buflen - 1);
-    if (len == -1) return errno;
-    buf[len] = '\0';
-    return 0;
-}
-
-char *ttyname(int fd) {
-    static char buf[256];
-    if (ttyname_r(fd, buf, sizeof(buf)) != 0) return NULL;
-    return buf;
-}
-"#;
-
-    if let Err(e) = fs::write(&c_source, source_code) {
+    if let Err(e) = fs::write(&c_source, include_str!("scripts/fix_ttyname.c")) {
         tracing::error!("[setup] Failed to write fix_ttyname.c: {}", e);
         return;
     }
 
-    let output = ArchProcess {
-        command: "gcc -shared -fPIC -o /usr/lib/fix_ttyname.so /tmp/fix_ttyname.c && echo OK"
-            .into(),
-        user: None,
-        log: None,
-        kill_on_exit: true,
-    }
-    .run();
+    let output = ArchProcess::run_simple(
+        "gcc -shared -fPIC -o /usr/lib/fix_ttyname.so /tmp/fix_ttyname.c && echo OK",
+    );
 
     if output.status.success()
         && String::from_utf8_lossy(&output.stdout).contains("OK")

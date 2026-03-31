@@ -77,6 +77,11 @@ impl ArchProcess {
         supported
     }
 
+    /// Run a simple command with default options (no user, no log, kill on exit).
+    pub fn run_simple(cmd: &str) -> Output {
+        Self { command: cmd.into(), user: None, log: None, kill_on_exit: true }.run()
+    }
+
     pub fn run(self) -> Output {
         let context = get_application_context();
         let user = self.user.as_deref().unwrap_or("root");

@@ -18,6 +18,14 @@ use std::{
 use tar::Archive;
 use xz2::read::XzDecoder;
 
+/// Write content to a file and mark it executable (0o755).
+pub(super) fn write_executable(path: &Path, content: &str) -> std::io::Result<()> {
+    fs::write(path, content)?;
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
+    Ok(())
+}
+
 const MAX_INSTALL_ATTEMPTS: usize = 10;
 
 // Optional UI logger callback — set by main.rs to forward logs to SetupOverlay.
@@ -56,15 +64,9 @@ pub fn is_setup_complete() -> bool {
     if !fs_root.join("usr/local/bin/bsdtar").exists() {
         return false;
     }
-    ArchProcess {
-        command: config::check_cmd(),
-        user: None,
-        log: None,
-        kill_on_exit: true,
-    }
-    .run()
-    .status
-    .success()
+    ArchProcess::run_simple(&config::check_cmd())
+        .status
+        .success()
 }
 
 /// Run all proot setup stages sequentially. Each stage is idempotent
@@ -75,30 +77,40 @@ pub fn run_setup() {
         return;
     }
     setup_log("[setup] Your device is supported!");
-
     setup_log("=== Proot setup starting ===");
-    setup_arch_fs();
-    setup_sysdata();
-    setup_machine_id();
-    setup_dns();
-    setup_alpm_user();
-    install_dependencies();
-    setup_user();
-    super::app_compat::disable_bwrap();
-    super::app_compat::disable_flatpak_spawn();
-    super::app_compat::fix_bsdtar();
-    super::app_compat::setup_firefox_config();
-    super::app_compat::setup_electron_config();
-    fix_xkb_symlink();
-    super::app_compat::fix_ttyname();
-    setup_storage_mountpoints();
-    if config::pipewire_enabled() {
-        super::services::setup_pipewire_config();
+
+    let steps: &[(&str, &dyn Fn())] = &[
+        ("Arch rootfs", &setup_arch_fs),
+        ("System data", &setup_sysdata),
+        ("Machine ID", &setup_machine_id),
+        ("DNS", &setup_dns),
+        ("Alpm user", &setup_alpm_user),
+        ("Dependencies", &install_dependencies),
+        ("User config", &setup_user),
+        ("Bwrap shim", &super::app_compat::disable_bwrap),
+        ("Flatpak-spawn shim", &super::app_compat::disable_flatpak_spawn),
+        ("Bsdtar wrapper", &super::app_compat::fix_bsdtar),
+        ("Firefox config", &super::app_compat::setup_firefox_config),
+        ("Electron config", &super::app_compat::setup_electron_config),
+        ("XKB symlink", &fix_xkb_symlink),
+        ("Ttyname fix", &super::app_compat::fix_ttyname),
+        ("Storage mountpoints", &setup_storage_mountpoints),
+        ("PipeWire config", &(|| {
+            if config::pipewire_enabled() {
+                super::services::setup_pipewire_config();
+            }
+        }) as &dyn Fn()),
+        ("D-Bus config", &super::services::setup_flatpak_dbus),
+        ("Flatpak repo", &super::services::setup_flatpak_system_repo),
+        ("XDG portal", &super::services::setup_portal),
+        ("Hybris Vulkan", &super::services::setup_hybris_vulkan),
+    ];
+
+    for (i, (name, func)) in steps.iter().enumerate() {
+        setup_log(&format!("[setup] Step {}/{}: {}...", i + 1, steps.len(), name));
+        func();
     }
-    super::services::setup_flatpak_dbus();
-    super::services::setup_flatpak_system_repo();
-    super::services::setup_portal();
-    super::services::setup_hybris_vulkan();
+
     setup_log("=== Proot setup complete ===");
 }
 
@@ -291,14 +303,7 @@ fn setup_machine_id() {
     }
 
     setup_log("[setup] Generating /etc/machine-id...");
-
-    ArchProcess {
-        command: "systemd-machine-id-setup".into(),
-        user: None,
-        log: None,
-        kill_on_exit: true,
-    }
-    .run();
+    ArchProcess::run_simple("systemd-machine-id-setup");
 }
 
 /// Ensure resolv.conf exists with a working nameserver.
@@ -359,15 +364,9 @@ fn setup_alpm_user() {
 /// Install dependencies via pacman if the check command fails.
 fn install_dependencies() {
     let is_installed = || {
-        ArchProcess {
-            command: config::check_cmd(),
-            user: None,
-            log: None,
-            kill_on_exit: true,
-        }
-        .run()
-        .status
-        .success()
+        ArchProcess::run_simple(&config::check_cmd())
+            .status
+            .success()
     };
 
     if is_installed() {
@@ -382,13 +381,7 @@ fn install_dependencies() {
         ));
 
         // Remove stale pacman lock
-        ArchProcess {
-            command: "rm -f /var/lib/pacman/db.lck".into(),
-            user: None,
-            log: None,
-            kill_on_exit: true,
-        }
-        .run();
+        ArchProcess::run_simple("rm -f /var/lib/pacman/db.lck");
 
         // Run install command with output logged to logcat and UI
         ArchProcess {

@@ -16,4 +16,5 @@ pub mod android {
     pub mod utils;
     pub mod portal;
     pub mod window_manager;
+    pub mod jni_exports;
 }

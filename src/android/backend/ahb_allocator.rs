@@ -9,7 +9,7 @@
 //! with [`DmabufAllocator`] and [`Swapchain`].
 
 use std::collections::HashMap;
-use std::os::unix::io::{OwnedFd, RawFd};
+use std::os::unix::io::{FromRawFd, OwnedFd, RawFd};
 use std::sync::Arc;
 
 use smithay::backend::allocator::dmabuf::{AsDmabuf, Dmabuf, DmabufFlags};
@@ -226,8 +226,6 @@ fn get_ahb_dmabuf_fd(
     Ok(unsafe { OwnedFd::from_raw_fd(duped) })
 }
 
-use std::os::unix::io::FromRawFd;
-
 // ── AhbAllocator ────────────────────────────────────────────────────────────
 
 /// Allocator that creates AHardwareBuffer-backed buffers.
@@ -366,6 +364,12 @@ fn fd_inode(fd: RawFd) -> Option<DmabufInode> {
     }
 }
 
+/// Get the inode identity of a dmabuf's first plane fd.
+fn dmabuf_inode(dmabuf: &Dmabuf) -> Option<DmabufInode> {
+    use std::os::unix::io::AsRawFd;
+    dmabuf.handles().next().and_then(|fd| fd_inode(fd.as_raw_fd()))
+}
+
 /// Tracks compositor-allocated AHB buffers so we can recognize them when
 /// a client commits a frame rendered into one.
 ///
@@ -405,13 +409,7 @@ impl AhbBufferTracker {
         let dmabuf = buffer.export()?;
 
         // Get the inode of the first plane fd.
-        let inode = dmabuf
-            .handles()
-            .next()
-            .and_then(|fd| {
-                use std::os::unix::io::AsRawFd;
-                fd_inode(fd.as_raw_fd())
-            })
+        let inode = dmabuf_inode(&dmabuf)
             .ok_or(AhbExportError::FdExtractionFailed)?;
 
         tracing::info!(
@@ -436,28 +434,19 @@ impl AhbBufferTracker {
     /// different fd number for the same underlying buffer.
     /// Returns a reference to the AhbBuffer if found.
     pub fn lookup(&self, dmabuf: &Dmabuf) -> Option<&AhbBuffer> {
-        let inode = dmabuf.handles().next().and_then(|fd| {
-            use std::os::unix::io::AsRawFd;
-            fd_inode(fd.as_raw_fd())
-        })?;
+        let inode = dmabuf_inode(dmabuf)?;
         self.buffers.get(&inode).map(|t| &t.buffer)
     }
 
     /// Look up by dmabuf and also return the exported Dmabuf (for buffer release).
     pub fn lookup_with_dmabuf(&self, dmabuf: &Dmabuf) -> Option<(&AhbBuffer, &Dmabuf)> {
-        let inode = dmabuf.handles().next().and_then(|fd| {
-            use std::os::unix::io::AsRawFd;
-            fd_inode(fd.as_raw_fd())
-        })?;
+        let inode = dmabuf_inode(dmabuf)?;
         self.buffers.get(&inode).map(|t| (&t.buffer, &t.dmabuf))
     }
 
     /// Remove a tracked buffer by its dmabuf.
     pub fn untrack(&mut self, dmabuf: &Dmabuf) {
-        if let Some(inode) = dmabuf.handles().next().and_then(|fd| {
-            use std::os::unix::io::AsRawFd;
-            fd_inode(fd.as_raw_fd())
-        }) {
+        if let Some(inode) = dmabuf_inode(dmabuf) {
             self.buffers.remove(&inode);
         }
     }

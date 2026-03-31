@@ -9,13 +9,13 @@
 //   JNI_OnLoad                          — src/android/main.rs
 //       Called by System.loadLibrary; caches the JavaVM pointer.
 //
-// ## MainActivity (src/android/main.rs, src/android/window_manager.rs)
+// ## MainActivity (src/android/main.rs, src/android/jni_exports.rs)
 //   nativeInit                           — src/android/main.rs
 //       Compositor init, rootfs setup, spawns compositor thread.
-//   nativeSetPipewireEnabled             — src/android/window_manager.rs
+//   nativeSetPipewireEnabled             — src/android/jni_exports.rs
 //       Restores saved PipeWire preference on startup.
 //
-// ## WaylandWindowActivity (src/android/window_manager.rs)
+// ## WaylandWindowActivity (src/android/jni_exports.rs)
 //   nativeSurfaceCreated                 — Acquires ANativeWindow from Surface.
 //   nativeSurfaceChanged                 — Handles surface resize.
 //   nativeSurfaceDestroyed               — Releases native window.
@@ -26,7 +26,7 @@
 //   nativeOnImeText                      — IME compose/commit/delete/recompose.
 //   nativeRightClick                     — Right-click (long press / mouse).
 //
-// ## DebugActivity (src/android/window_manager.rs)
+// ## DebugActivity (src/android/jni_exports.rs)
 //   nativeSetVulkanRendering             — Toggle Vulkan vs GLES render mode.
 //   nativeGetVulkanRendering             — Query current render mode.
 //   nativeSetZeroCopyEnabled             — Toggle zero-copy compositing.
